@@ -38,9 +38,19 @@ This extension is built for Firefox and Chromium-based browsers (Manifest V3). F
 - Monitors active characters in the scene in the background. If a character exits the active scene or remains active for $N$ turns (default 20), the extension automatically triggers a background profile update.
 - Generates deep character profiles through a configured AI provider, displaying proposed changes as pending edits with highlighted diffs for your review.
 
-### 2. Plot Essentials (PE) Updates
-- Periodically analyzes recent actions to recommend structural changes to your character description cards and global adventure memory in AI Dungeon.
-- Updates are managed fully via your custom-configured outside AI Provider (Claude, OpenAI GPT, Gemini, or Ollama).
+### 2. Plot Essentials (PE) Management
+- **What it is:** Plot Essentials is AI Dungeon's always-in-context memory — the bracketed `[Name is …]` character bios and key facts the AI sees every turn. The extension reads and maintains these blocks for you.
+- **On-demand updates:** Click **Update Plot Essentials** to have your configured AI provider (Claude, OpenAI GPT, Gemini, or Ollama) analyze recent actions and propose revised bios for your tracked characters. Proposals appear as highlighted pending changes you can review, edit, accept, or reject — nothing reaches AI Dungeon until you approve it.
+- **Reliable apply:** Approving a change pushes it to AI Dungeon's Plot Essentials and keeps the on-page editor in sync, guarding against AI Dungeon's autosave silently reverting your edit — so updates stick without a page reload.
+- **Plot Essentials "Memories" log (optional):** A `[Memories (newest to oldest): …]` block kept *inside* Plot Essentials — a curated, always-in-context running history, separate from AI Dungeon's native Memory Bank. Enable **Use Memories in Plot Essentials** (Settings → General) and seed the block once in this exact format:
+  ```
+  [Memories (newest to oldest):
+  - latest memory here
+  - something that happened before that
+  ]
+  ```
+  Each **Update Plot Essentials** run then summarizes new events into one-sentence entries and prepends them to the top of the list, keeping a continuous story log. A longer **Analyze Lookback Actions** window (60+) is recommended so the AI has enough context to write high-quality, continuous memories.
+- **Customizable:** Tune the Plot Essentials prompt sections in the **Prompts** tab.
 
 ### 3. MemorAID NPC Thought Tracking
 - Intercepts outgoing player turns (actions, dialogue, retries, continues) to generate subjective thoughts, feelings, and impulses for active NPCs in the scene.
@@ -56,11 +66,20 @@ This extension is built for Firefox and Chromium-based browsers (Manifest V3). F
 - Surfaces new names as suggestion banners above the Card Manager roster so you can quickly classify and create new Story Cards.
 - Alias Resolution: Allows linking nicknames/aliases (e.g. "Pookie" → character Steve) directly to existing cards, merging them into the card's trigger keys.
 
+### 6. OffMeta's AIN Repository
+- Fetches and parses a community library of AI Instruction (AIN) rule-sets from **OffMetaGamer's** public repository.
+- Browse the available rule-sets in-panel and apply any of them to your adventure's AI Instructions with a single click.
+
+### 7. Adventures Manager (Global Bucket & DB Explorer)
+- Browse every adventure cached in the extension's local database, drilling into each one's AI Instructions, Author's Notes, Plot Essentials character bios, and Story Cards.
+- Maintain a reusable **Global Bucket** of favorited assets (AI Instructions, Author's Notes, PE character bios, and Story Cards) that can be imported into any active adventure via GraphQL — handy for carrying setups across campaigns.
+- Hide, restore, or fully delete cached adventures from local storage.
+
 ---
 
 ## 🧭 Using the Extension Sidebar (Menu Guide)
 
-Once loaded in the page, the extension overlays a sidebar on AI Dungeon. It contains four tabs:
+Once loaded in the page, the extension overlays a sidebar on AI Dungeon, with the following areas:
 
 ### 🗃️ Card Manager
 - **Roster & Active Location:** Select your current location manually or view all tracked story cards in the campaign.
@@ -83,6 +102,10 @@ Once loaded in the page, the extension overlays a sidebar on AI Dungeon. It cont
   - Customize the Intercept Release Timeout to control how long the game waits for NPC thoughts to generate before advancing the turn.
 - **Prompts Tab:**
   - Customize character instructions templates (Appearance, Quirks, Dynamic relationship pacing, etc.) or Plot Essentials prompt sections.
+- **OffMeta's AIN Tab:**
+  - Browse and one-click apply community AI Instruction rule-sets from OffMetaGamer's repository.
+- **Adventures Manager Tab:**
+  - Browse the local adventure database, maintain a Global Bucket of reusable assets (AI Instructions, Author's Notes, PE bios, Story Cards), and import them into the active adventure.
 
 ### 🛠️ Debug
 - **Learned Operations:** Lists the captured AI Dungeon GraphQL mutation templates (enabling offline fetch relays).

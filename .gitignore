@@ -1,0 +1,33 @@
+# Claude Code local state (may contain secrets, memory, transcripts)
+.claude/
+
+# Node / build artifacts
+node_modules/
+build/
+*.log
+
+# Raw spike captures (may contain unredacted payloads — review before committing)
+*.network-request
+*.network-response
+captures/
+
+# Unrelated workspace content (not part of this extension)
+skills/
+docs/
+/C
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Local exports / captures / scratch / build artifacts
+aid-*.json
+*.zip
+*.tar.gz
+scratch/
+
+# Ignore all markdown files except developer.md, README.md, and privacy-policy.md
+*.md
+!developer.md
+!README.md
+!privacy-policy.md

@@ -39,6 +39,7 @@ export interface PanelState {
     enableProperNounDetection?: boolean;
     useSinglePassGeneration?: boolean;
     memoraidBannerDismissed?: boolean;
+    manualMode?: boolean;
   } | null;
   versions: PanelStateVersion[];
   cards?: CardRow[];

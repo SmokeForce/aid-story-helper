@@ -25,7 +25,7 @@ export type BgMessage =
   | { kind: "setVersionStatus"; id: string; status: Version["status"] }
   | { kind: "applyToAid"; id: string }
   | { kind: "getState"; shortId: string }
-  | { kind: "listModels" }
+  | { kind: "listModels"; provider?: string; apiKey?: string }
   | { kind: "adventureMemories"; shortId: string; memories: any[] }
   | { kind: "updateAidMemories"; shortId: string; memories: any[] }
   | { kind: "createConfigCard"; shortId: string }

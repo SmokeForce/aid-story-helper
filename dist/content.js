@@ -105,6 +105,41 @@ HARD RULES (weaker models break these \u2014 do not):
   };
   var DEFAULT_FORMATTING_MODE = "squareBrackets";
 
+  // src/content/browser-helper.ts
+  var g = typeof globalThis !== "undefined" ? globalThis : typeof window !== "undefined" ? window : {};
+  var rawBrowser = g.browser || g.chrome;
+  var browser = rawBrowser ? new Proxy(rawBrowser, {
+    get(target, prop) {
+      if (prop === "runtime") {
+        const runtime = target.runtime;
+        if (!runtime) return void 0;
+        return new Proxy(runtime, {
+          get(rTarget, rProp) {
+            if (rProp === "sendMessage") {
+              return (...args) => {
+                try {
+                  if (!rTarget || !rTarget.id) {
+                    return Promise.reject(new Error("Extension context invalidated"));
+                  }
+                  return rTarget.sendMessage(...args).catch((err) => {
+                    if (err && err.message && err.message.includes("Extension context invalidated")) {
+                      return { error: "Extension context invalidated" };
+                    }
+                    throw err;
+                  });
+                } catch (e) {
+                  return Promise.reject(e);
+                }
+              };
+            }
+            return Reflect.get(rTarget, rProp);
+          }
+        });
+      }
+      return Reflect.get(target, prop);
+    }
+  }) : void 0;
+
   // src/content/panel.ts
   var TYPE_KEYS = ["character", "class", "race", "location", "faction", "custom", "memoraid"];
   function setSafeHTML(el, html) {
@@ -136,9 +171,9 @@ HARD RULES (weaker models break these \u2014 do not):
       } catch (e) {
       }
       try {
-        const g = globalThis;
-        if (typeof g.chrome !== "undefined" && g.chrome.runtime?.getManifest) {
-          const manifest = g.chrome.runtime.getManifest();
+        const g2 = globalThis;
+        if (typeof g2.chrome !== "undefined" && g2.chrome.runtime?.getManifest) {
+          const manifest = g2.chrome.runtime.getManifest();
           if (manifest && manifest.version) return manifest.version;
         }
       } catch (e) {
@@ -2062,6 +2097,28 @@ HARD RULES (weaker models break these \u2014 do not):
     const toggle = root.getElementById("min-toggle");
     const contentBody = root.getElementById("content-body");
     let isMinimized = localStorage.getItem("aid-tracker-minimized") === "true";
+    function ensureHostInsideViewport() {
+      let width = 320;
+      let height = 400;
+      if (isMinimized) {
+        width = 130;
+        height = 32;
+      } else {
+        const sw = localStorage.getItem("aid-tracker-size-width");
+        const sh = localStorage.getItem("aid-tracker-size-height");
+        if (sw) width = parseInt(sw, 10) || 320;
+        if (sh) height = parseInt(sh, 10) || 400;
+      }
+      const currentLeft = host.offsetLeft;
+      const currentTop = host.offsetTop;
+      const clampedLeft = Math.min(Math.max(0, currentLeft), window.innerWidth - width);
+      const clampedTop = Math.min(Math.max(0, currentTop), window.innerHeight - height);
+      host.style.bottom = "auto";
+      host.style.left = clampedLeft + "px";
+      host.style.top = clampedTop + "px";
+      localStorage.setItem("aid-tracker-pos-left", host.style.left);
+      localStorage.setItem("aid-tracker-pos-top", host.style.top);
+    }
     function updateMinState() {
       const pendingCount = lastState?.versions.filter((v) => v.status === "pending").length ?? 0;
       if (isMinimized) {
@@ -2085,6 +2142,7 @@ HARD RULES (weaker models break these \u2014 do not):
         if (sw) box.style.width = sw;
         if (sh) box.style.height = sh;
       }
+      ensureHostInsideViewport();
     }
     toggle.addEventListener("click", () => {
       isMinimized = !isMinimized;
@@ -2092,6 +2150,7 @@ HARD RULES (weaker models break these \u2014 do not):
       updateMinState();
     });
     updateMinState();
+    window.addEventListener("resize", ensureHostInsideViewport);
     box.addEventListener("mouseup", () => {
       if (!isMinimized) {
         localStorage.setItem("aid-tracker-size-width", box.style.width);
@@ -2115,9 +2174,24 @@ HARD RULES (weaker models break these \u2014 do not):
         pos2 = pos4 - e.clientY;
         pos3 = e.clientX;
         pos4 = e.clientY;
+        let width = 320;
+        let height = 400;
+        if (isMinimized) {
+          width = 130;
+          height = 32;
+        } else {
+          const sw = localStorage.getItem("aid-tracker-size-width");
+          const sh = localStorage.getItem("aid-tracker-size-height");
+          if (sw) width = parseInt(sw, 10) || 320;
+          if (sh) height = parseInt(sh, 10) || 400;
+        }
+        let newLeft = el.offsetLeft - pos1;
+        let newTop = el.offsetTop - pos2;
+        newLeft = Math.min(Math.max(0, newLeft), window.innerWidth - width);
+        newTop = Math.min(Math.max(0, newTop), window.innerHeight - height);
         el.style.bottom = "auto";
-        el.style.left = el.offsetLeft - pos1 + "px";
-        el.style.top = el.offsetTop - pos2 + "px";
+        el.style.left = newLeft + "px";
+        el.style.top = newTop + "px";
         localStorage.setItem("aid-tracker-pos-left", el.style.left);
         localStorage.setItem("aid-tracker-pos-top", el.style.top);
       }
@@ -4509,7 +4583,14 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
   var lastShortId = null;
   var lastPath = null;
   var lastDocTitle = null;
+  var checkNavigationInterval = null;
   function checkNavigation() {
+    if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.id) {
+      if (checkNavigationInterval) {
+        clearInterval(checkNavigationInterval);
+      }
+      return;
+    }
     const sid = currentShortId();
     const path = location.pathname;
     const docTitle = document.title;
@@ -4544,9 +4625,10 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       refresh();
     }
   }
-  setInterval(checkNavigation, 1e3);
+  checkNavigationInterval = setInterval(checkNavigation, 1e3);
   checkNavigation();
   window.addEventListener("message", (ev) => {
+    if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.id) return;
     if (ev.source !== window || ev.data?.source !== "aid-tracker") return;
     const detail = ev.data.detail;
     if (detail?.transport === "adventureLoaded") {
@@ -5132,6 +5214,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
   });
   window.addEventListener("aid-refresh-panel", () => {
+    if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.id) return;
     dlog("[AID content] Direct refresh requested by panel");
     refresh();
   });

@@ -8,6 +8,7 @@ import {
 } from "../inference/engine";
 import { DEFAULT_CARD_COMMANDS, DEFAULT_FORMATTING_MODE } from "../inference/card-command";
 import type { GlobalAsset, CardRow } from "../shared/types";
+import { browser } from "./browser-helper";
 
 const TYPE_KEYS = ["character", "class", "race", "location", "faction", "custom", "memoraid"] as const;
 
@@ -2076,6 +2077,32 @@ export function mountPanel(): PanelHandle {
   const contentBody = root.getElementById("content-body") as HTMLElement;
 
   let isMinimized = localStorage.getItem("aid-tracker-minimized") === "true";
+  function ensureHostInsideViewport() {
+    let width = 320;
+    let height = 400;
+    if (isMinimized) {
+      width = 130;
+      height = 32;
+    } else {
+      const sw = localStorage.getItem("aid-tracker-size-width");
+      const sh = localStorage.getItem("aid-tracker-size-height");
+      if (sw) width = parseInt(sw, 10) || 320;
+      if (sh) height = parseInt(sh, 10) || 400;
+    }
+
+    const currentLeft = host.offsetLeft;
+    const currentTop = host.offsetTop;
+
+    const clampedLeft = Math.min(Math.max(0, currentLeft), window.innerWidth - width);
+    const clampedTop = Math.min(Math.max(0, currentTop), window.innerHeight - height);
+
+    host.style.bottom = "auto";
+    host.style.left = clampedLeft + "px";
+    host.style.top = clampedTop + "px";
+    localStorage.setItem("aid-tracker-pos-left", host.style.left);
+    localStorage.setItem("aid-tracker-pos-top", host.style.top);
+  }
+
   function updateMinState() {
     const pendingCount = lastState?.versions.filter((v) => v.status === "pending").length ?? 0;
     if (isMinimized) {
@@ -2099,6 +2126,7 @@ export function mountPanel(): PanelHandle {
       if (sw) box.style.width = sw;
       if (sh) box.style.height = sh;
     }
+    ensureHostInsideViewport();
   }
   toggle.addEventListener("click", () => {
     isMinimized = !isMinimized;
@@ -2106,6 +2134,7 @@ export function mountPanel(): PanelHandle {
     updateMinState();
   });
   updateMinState();
+  window.addEventListener("resize", ensureHostInsideViewport);
 
   box.addEventListener("mouseup", () => {
     if (!isMinimized) {
@@ -2133,9 +2162,28 @@ export function mountPanel(): PanelHandle {
       pos2 = pos4 - e.clientY;
       pos3 = e.clientX;
       pos4 = e.clientY;
+
+      let width = 320;
+      let height = 400;
+      if (isMinimized) {
+        width = 130;
+        height = 32;
+      } else {
+        const sw = localStorage.getItem("aid-tracker-size-width");
+        const sh = localStorage.getItem("aid-tracker-size-height");
+        if (sw) width = parseInt(sw, 10) || 320;
+        if (sh) height = parseInt(sh, 10) || 400;
+      }
+
+      let newLeft = el.offsetLeft - pos1;
+      let newTop = el.offsetTop - pos2;
+
+      newLeft = Math.min(Math.max(0, newLeft), window.innerWidth - width);
+      newTop = Math.min(Math.max(0, newTop), window.innerHeight - height);
+
       el.style.bottom = "auto";
-      el.style.left = (el.offsetLeft - pos1) + "px";
-      el.style.top = (el.offsetTop - pos2) + "px";
+      el.style.left = newLeft + "px";
+      el.style.top = newTop + "px";
       localStorage.setItem("aid-tracker-pos-left", el.style.left);
       localStorage.setItem("aid-tracker-pos-top", el.style.top);
     }

@@ -1,6 +1,7 @@
 import { mountPanel } from "./panel";
 import type { ActionUpdatePayload } from "../shared/types";
 import type { BgMessage } from "../background/orchestrator";
+import { browser } from "./browser-helper";
 
 // The interceptor runs as a separate MAIN-world content script (manifest), so it installs
 // before the page's app boots and beats the page CSP. This script only bridges its
@@ -178,7 +179,14 @@ async function refresh() {
 let lastShortId: string | null = null;
 let lastPath: string | null = null;
 let lastDocTitle: string | null = null;
+let checkNavigationInterval: any = null;
 function checkNavigation() {
+  if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.id) {
+    if (checkNavigationInterval) {
+      clearInterval(checkNavigationInterval);
+    }
+    return;
+  }
   const sid = currentShortId();
   const path = location.pathname;
   const docTitle = document.title;
@@ -217,11 +225,12 @@ function checkNavigation() {
     refresh();
   }
 }
-setInterval(checkNavigation, 1000);
+checkNavigationInterval = setInterval(checkNavigation, 1000);
 checkNavigation();
 
 // 3) Relay page -> background.
 window.addEventListener("message", (ev) => {
+  if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.id) return;
   if (ev.source !== window || (ev.data as any)?.source !== "aid-tracker") return;
   const detail = (ev.data as any).detail;
 
@@ -875,6 +884,7 @@ browser.runtime.onMessage.addListener((msg: any) => {
 });
 
 window.addEventListener("aid-refresh-panel", () => {
+  if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.id) return;
   dlog("[AID content] Direct refresh requested by panel");
   refresh();
 });

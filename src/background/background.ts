@@ -62,7 +62,7 @@ async function fetchOffMetaRepositoryIfNeeded(): Promise<OffMetaSection[]> {
   }
 
   try {
-    const res = await fetch("https://docs.google.com/document/d/1na9MeTcx0QY6MkZdQSkFQFL91sT8BSiJ_6gxrC5sNEU/export?format=txt");
+    const res = await fetch("https://docs.google.com/document/d/1na9MeTcx0QY6MkZdQSkFQFL91sT8BSiJ_6gxrC5sNEU/export?format=txt", { credentials: "omit" });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
@@ -889,11 +889,16 @@ async function seedBaselines(
     if (!e.name) continue;
 
     let isSeen = false;
-    if (e.cardId && seenKeys.has(`id:${e.cardId}`)) {
-      isSeen = true;
+    if (e.cardId) {
+      // A real Story Card's identity is its cardId — NOT its name. Two cards may share a name
+      // across categories (e.g. a Character "Adrian" and a Plan "Adrian"); each must get its own
+      // baseline. Never fall through to the bare-name check for a card that carries a cardId.
+      isSeen = seenKeys.has(`id:${e.cardId}`);
     } else if (e.type && seenKeys.has(`name-type:${e.name.trim().toLowerCase()}:${e.type.toLowerCase()}`)) {
       isSeen = true;
     } else if (seenKeys.has(`name:${e.name.trim().toLowerCase()}`)) {
+      // Cardless entries (Plot Essentials blocks) still collapse by name so a person tracked as
+      // both a Plot block and a Story Card is not double-seeded.
       isSeen = true;
     }
 
@@ -935,6 +940,50 @@ async function seedBaselines(
     return await promise;
   } finally {
     seedBaselinesInFlight.delete(shortId);
+  }
+}
+
+/** Dedicated Story Card type for MemorAID's own config card, so it files under its own category
+ *  in AID and the panel instead of polluting the generic "custom" group. */
+const MEMORAID_CONFIG_TYPE = "MemorAID";
+
+/**
+ * Lazily migrate a legacy "Configure MemorAID" config card (historically created with type
+ * "custom") to its dedicated {@link MEMORAID_CONFIG_TYPE}. Runs on adventure load (getState):
+ * the type change is pushed back to AID via UseAutoSaveStoryCard, and only on success is the local
+ * copy updated. Best-effort — if auth isn't ready yet or the push fails, the card is left as-is to
+ * retry on the next load, and getState is never blocked. Returns `cards` with any successful local
+ * migration applied so callers see the new type immediately.
+ */
+async function migrateConfigCardType(shortId: string, cards: CardRow[]): Promise<CardRow[]> {
+  const stale = cards.find(
+    (c) =>
+      !c.deletedAt &&
+      (c.title || "").toLowerCase() === "configure memoraid" &&
+      (c.type || "") !== MEMORAID_CONFIG_TYPE
+  );
+  if (!stale) return cards;
+  try {
+    await ensureAuth();
+    if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) return cards; // not ready — retry next load
+    const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+    const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
+    const migrated = { ...stale, type: MEMORAID_CONFIG_TYPE };
+    const req = buildCardSave(gqlEndpoint!, updateQuery, sessionToken!, migrated, migrated.value || "");
+    const res = await fetch(req.url, { method: "POST", headers: req.headers, body: req.body });
+    if (!res.ok) return cards;
+    const json = (await res.json()) as any;
+    const ok =
+      json?.[0]?.data?.updateStoryCard?.success ||
+      json?.[0]?.data?.updateStoryCard?.storyCard ||
+      json?.[0]?.data?.updateStoryCard;
+    if (!ok) return cards;
+    await repo.putCards(shortId, [migrated]);
+    dlog(`[AID bg] Migrated "Configure MemorAID" card ${stale.id} from type "${stale.type}" to "${MEMORAID_CONFIG_TYPE}".`);
+    return cards.map((c) => (c.id === stale.id ? migrated : c));
+  } catch (err) {
+    console.warn("[AID bg] Configure MemorAID type migration deferred:", err);
+    return cards;
   }
 }
 
@@ -2950,7 +2999,7 @@ async function handleMessage(msg: BgMessage): Promise<any> {
           const configCardRow: CardRow = {
             id: tempId,
             shortId: msg.shortId,
-            type: "custom",
+            type: MEMORAID_CONFIG_TYPE,
             title: "Configure MemorAID",
             keys: "configure memoraid",
             description: "IMPORTANT_CHARACTERS: ",
@@ -3373,7 +3422,9 @@ async function handleMessage(msg: BgMessage): Promise<any> {
         const settings = await repo.getSettings();
         debugEnabled = !!settings?.showDebug; // keep verbose logging in sync with the user's setting
         const adv = await repo.getAdventure(msg.shortId);
-        const cards = await repo.getCards(msg.shortId);
+        // Lazy, best-effort: rewrite a legacy "custom"-typed Configure MemorAID card to the
+        // dedicated MemorAID type (write-back to AID + local) on this load. No-op once migrated.
+        const cards = await migrateConfigCardType(msg.shortId, await repo.getCards(msg.shortId));
         const actionsCount = await repo.getActionCount(msg.shortId);
         const ops = await repo.getOps();
 

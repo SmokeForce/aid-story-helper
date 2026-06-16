@@ -21594,7 +21594,7 @@ ${e2.text}` : e2.text;
       return cachedOffMetaRepo;
     }
     try {
-      const res = await fetch2("https://docs.google.com/document/d/1na9MeTcx0QY6MkZdQSkFQFL91sT8BSiJ_6gxrC5sNEU/export?format=txt");
+      const res = await fetch2("https://docs.google.com/document/d/1na9MeTcx0QY6MkZdQSkFQFL91sT8BSiJ_6gxrC5sNEU/export?format=txt", { credentials: "omit" });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
@@ -22573,8 +22573,8 @@ ${e2.text}` : e2.text;
       for (const e2 of entries) {
         if (!e2.name) continue;
         let isSeen = false;
-        if (e2.cardId && seenKeys.has(`id:${e2.cardId}`)) {
-          isSeen = true;
+        if (e2.cardId) {
+          isSeen = seenKeys.has(`id:${e2.cardId}`);
         } else if (e2.type && seenKeys.has(`name-type:${e2.name.trim().toLowerCase()}:${e2.type.toLowerCase()}`)) {
           isSeen = true;
         } else if (seenKeys.has(`name:${e2.name.trim().toLowerCase()}`)) {
@@ -22616,6 +22616,32 @@ ${e2.text}` : e2.text;
       return await promise;
     } finally {
       seedBaselinesInFlight.delete(shortId);
+    }
+  }
+  var MEMORAID_CONFIG_TYPE = "MemorAID";
+  async function migrateConfigCardType(shortId, cards) {
+    const stale = cards.find(
+      (c2) => !c2.deletedAt && (c2.title || "").toLowerCase() === "configure memoraid" && (c2.type || "") !== MEMORAID_CONFIG_TYPE
+    );
+    if (!stale) return cards;
+    try {
+      await ensureAuth();
+      if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) return cards;
+      const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+      const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
+      const migrated = { ...stale, type: MEMORAID_CONFIG_TYPE };
+      const req = buildCardSave(gqlEndpoint, updateQuery, sessionToken, migrated, migrated.value || "");
+      const res = await fetch2(req.url, { method: "POST", headers: req.headers, body: req.body });
+      if (!res.ok) return cards;
+      const json = await res.json();
+      const ok = json?.[0]?.data?.updateStoryCard?.success || json?.[0]?.data?.updateStoryCard?.storyCard || json?.[0]?.data?.updateStoryCard;
+      if (!ok) return cards;
+      await repo.putCards(shortId, [migrated]);
+      dlog(`[AID bg] Migrated "Configure MemorAID" card ${stale.id} from type "${stale.type}" to "${MEMORAID_CONFIG_TYPE}".`);
+      return cards.map((c2) => c2.id === stale.id ? migrated : c2);
+    } catch (err) {
+      console.warn("[AID bg] Configure MemorAID type migration deferred:", err);
+      return cards;
     }
   }
   async function runAnalyze(shortId) {
@@ -24321,7 +24347,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
             const configCardRow = {
               id: tempId,
               shortId: msg.shortId,
-              type: "custom",
+              type: MEMORAID_CONFIG_TYPE,
               title: "Configure MemorAID",
               keys: "configure memoraid",
               description: "IMPORTANT_CHARACTERS: ",
@@ -24705,7 +24731,7 @@ ${toAppend}` : toAppend;
           const settings = await repo.getSettings();
           debugEnabled = !!settings?.showDebug;
           const adv = await repo.getAdventure(msg.shortId);
-          const cards = await repo.getCards(msg.shortId);
+          const cards = await migrateConfigCardType(msg.shortId, await repo.getCards(msg.shortId));
           const actionsCount = await repo.getActionCount(msg.shortId);
           const ops = await repo.getOps();
           const db = await openAidDb();

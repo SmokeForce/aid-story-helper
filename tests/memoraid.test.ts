@@ -1609,6 +1609,84 @@ describe("MemorAID NPC Memory Cards", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("seeds independent baselines for two cards that share a name in different categories", async () => {
+    await repo.upsertAdventure({ shortId, title: "T", protagonistName: "Smoke" });
+
+    const actions = Array.from({ length: 5 }, (_, i) => ({
+      id: `a-${i}`,
+      type: "continue",
+      text: `Action ${i}.`,
+      createdAt: new Date(2026, 5, 13, 12, 0, i).toISOString()
+    }));
+    await repo.putActions(shortId, actions);
+
+    // A Character "Adrian" and a Plan "Adrian" — same name + same triggers, different category.
+    await repo.putCards(shortId, [
+      { shortId, id: "char-adrian", type: "character", title: "Adrian", keys: "adrian", value: "[Name: Adrian]" },
+      { shortId, id: "plan-adrian", type: "Plan", title: "Adrian", keys: "adrian", value: "Adrian's goal is..." },
+    ]);
+
+    // getState seeds baselines for both cards.
+    const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
+    await listener({ kind: "getState", shortId });
+
+    const versions = await repo.getVersions(shortId);
+    const baselines = versions.filter(v => v.characterName === "Adrian" && v.status === "applied");
+    const baselineCardIds = baselines.map(v => (v as any).cardId).sort();
+    expect(baselineCardIds).toEqual(["char-adrian", "plan-adrian"]);
+  });
+
+  it("migrates a legacy 'custom'-typed Configure MemorAID card to the 'MemorAID' type on load (write-back + local)", async () => {
+    await repo.upsertAdventure({ shortId, title: "T", protagonistName: "Smoke" });
+    await repo.putOp({
+      operationName: "UseAutoSaveStoryCard",
+      query: "mutation UseAutoSaveStoryCard($input: UpdateStoryCardInput!) { updateStoryCard(input: $input) { success } }",
+      variableKeys: [],
+      kind: "write",
+      learnedAt: new Date().toISOString()
+    });
+    await repo.putCards(shortId, [
+      { shortId, id: "cfg-1", type: "custom", title: "Configure MemorAID", keys: "configure memoraid", value: "List important characters.", description: "IMPORTANT_CHARACTERS: " }
+    ]);
+
+    const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
+    fetchMock.mockClear();
+    await listener({ kind: "getState", shortId });
+
+    // The type change is pushed back to AID via UseAutoSaveStoryCard for the config card.
+    const gqlBodies = fetchMock.mock.calls
+      .filter((c: any) => typeof c[1]?.body === "string")
+      .map((c: any) => { try { return JSON.parse(c[1].body); } catch { return null; } })
+      .flat()
+      .filter(Boolean);
+    const save = gqlBodies.find((b: any) => b?.operationName === "UseAutoSaveStoryCard" && b?.variables?.input?.id === "cfg-1");
+    expect(save).toBeTruthy();
+    expect(save.variables.input.type).toBe("MemorAID");
+
+    // The local copy reflects the migration so it won't re-fire next load.
+    const dbCards = await repo.getCards(shortId);
+    expect(dbCards.find(c => c.id === "cfg-1")?.type).toBe("MemorAID");
+  });
+
+  it("does NOT rewrite a Configure MemorAID card already typed 'MemorAID' (idempotent)", async () => {
+    await repo.upsertAdventure({ shortId, title: "T", protagonistName: "Smoke" });
+    await repo.putCards(shortId, [
+      { shortId, id: "cfg-1", type: "MemorAID", title: "Configure MemorAID", keys: "configure memoraid", value: "List important characters.", description: "IMPORTANT_CHARACTERS: " }
+    ]);
+
+    const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
+    fetchMock.mockClear();
+    await listener({ kind: "getState", shortId });
+
+    const gqlBodies = fetchMock.mock.calls
+      .filter((c: any) => typeof c[1]?.body === "string")
+      .map((c: any) => { try { return JSON.parse(c[1].body); } catch { return null; } })
+      .flat()
+      .filter(Boolean);
+    const save = gqlBodies.find((b: any) => b?.operationName === "UseAutoSaveStoryCard" && b?.variables?.input?.id === "cfg-1");
+    expect(save).toBeUndefined();
+  });
+
   it("creates a memory card for a virtual character like Celeste in processInterceptedAction", async () => {
     // 1. Setup config card only (no character card for Celeste exists)
     await repo.putCards(shortId, [

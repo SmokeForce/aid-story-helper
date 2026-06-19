@@ -41,6 +41,24 @@ panel.onRefresh(() => {
   dlog("[AID content] Direct refresh requested by panel callback");
   refresh();
 });
+
+panel.onBackupAll(async () => {
+  return browser.runtime.sendMessage({ kind: "exportAll" });
+});
+
+panel.onRestoreAll(async (data) => {
+  const res = await browser.runtime.sendMessage({ kind: "importAll", data });
+  refresh();
+  return res;
+});
+
+panel.onSaveCardValue(async (cardId, value) => {
+  const sid = currentShortId();
+  if (!sid) return { error: "No active adventure." };
+  const res = await browser.runtime.sendMessage({ kind: "saveCardValue", shortId: sid, cardId, value });
+  refresh();
+  return res;
+});
 let count = 0;
 
 // Debug-gated logging: verbose info traces only print when "Show debug" is enabled (synced in
@@ -156,7 +174,7 @@ async function refresh() {
       window.postMessage({
         source: "aid-extension-host",
         kind: "settingsUpdate",
-        interceptTimeout: state.settings?.interceptTimeout ?? 4,
+        interceptTimeout: state.settings?.interceptTimeout ?? 10,
         debug: !!state.settings?.showDebug
       }, location.origin);
     }
@@ -466,7 +484,7 @@ panel.onBackfill(async () => {
   refresh();
 });
 
-panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow, showDebug, theme, s1, s2, s3, s4, cardCommands, useMemories, formattingMode, memoraidLookback, memoraidPresenceLookback, autoRegenerateNativeMemories, interceptTimeout, useSinglePassGeneration, locationMode, enableProperNounDetection, manualMode) => {
+panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow, showDebug, theme, s1, s2, s3, s4, cardCommands, useMemories, formattingMode, memoraidLookback, memoraidThoughtLookback, memoraidPresenceLookback, autoRegenerateNativeMemories, interceptTimeout, useSinglePassGeneration, locationMode, enableProperNounDetection, manualMode, logPlotEssentials, characterCardLimit, thoughtCardLimit) => {
   const sid = currentShortId(); if (!sid) return;
   const settings: any = {
     provider,
@@ -482,13 +500,17 @@ panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow,
     formattingMode,
     useMemories,
     memoraidLookback,
+    memoraidThoughtLookback,
     memoraidPresenceLookback,
     autoRegenerateNativeMemories,
     interceptTimeout,
     useSinglePassGeneration,
     locationMode,
     enableProperNounDetection,
-    manualMode
+    manualMode,
+    logPlotEssentials,
+    characterCardLimit,
+    thoughtCardLimit
   };
   if (apiKey) settings.apiKeys = { [provider]: apiKey };
   await browser.runtime.sendMessage({ kind: "setSettings", settings });

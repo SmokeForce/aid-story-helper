@@ -19,10 +19,13 @@ import { replaceBlock, parsePlotEssentials, parseMemories } from "../inference/p
 import { countActions, sliceLastActions, determineFellOutCards, isCharacterTriggered, type CardRow, type Settings, type CanonicalAction, type Version } from "../shared/types";
 import { parseOffMetaText, type OffMetaSection } from "../shared/offmeta-parser";
 import { defaultCommandForType, resolveCommand, hasTitleToken, parseProtagonistName, DEFAULT_CARD_COMMANDS, DEFAULT_FORMATTING_MODE } from "../inference/card-command";
-import { parseMemoNotes, buildMemoNotes, pushThought, thoughtsSince } from "../inference/memoraid-notes";
+import { parseMemoNotes, buildMemoNotes, pushThought, thoughtsSince, buildThoughtContext, renderThoughtWindow } from "../inference/memoraid-notes";
 
 
 const repo = new Repo();
+// One-time security cleanup: earlier builds mirrored the bearer token to storage.local (disk).
+// Auth now lives only in memory + storage.session, so scrub any token a prior build left on disk.
+try { (browser.storage as any).local?.remove?.(["aidToken", "aidEndpoint"]); } catch {}
 let sessionToken: string | null = null;       // in-memory only; never persisted to disk
 let gqlEndpoint: string | null = null;        // learned AID GraphQL endpoint
 
@@ -541,10 +544,15 @@ async function rememberAuth(opts: { token?: string; endpoint?: string }): Promis
   const patch: Record<string, string> = {};
   if (opts.token) { sessionToken = opts.token; patch.aidToken = opts.token; }
   if (opts.endpoint) { gqlEndpoint = opts.endpoint; patch.aidEndpoint = opts.endpoint; }
-  if (sessionStore && Object.keys(patch).length) { try { await sessionStore.set(patch); } catch {} }
+  // Persist ONLY to storage.session: it is in-memory and session-scoped, so the bearer token is
+  // never written to persistent disk. It survives MV3 worker recycling within a browser session;
+  // a fresh session re-captures the token from the first authenticated page request the interceptor
+  // sees (every background op that needs auth is downstream of page activity), so disk persistence
+  // bought almost nothing and exposed the token at rest.
+  if (sessionStore && Object.keys(patch).length > 0) { try { await sessionStore.set(patch); } catch {} }
 }
 
-/** Rehydrate token/endpoint from storage.session if the in-memory copies were lost to recycling. */
+/** Rehydrate token/endpoint from storage.session if the in-memory copies were lost to worker recycling. */
 async function ensureAuth(): Promise<void> {
   if (sessionToken && gqlEndpoint) return;
   if (!sessionStore) return;
@@ -1330,6 +1338,7 @@ async function runGenerateCard(
   const name = card.title || card.keys;
 
   const settings = await repo.getSettings();
+  const characterCardLimit = settings?.characterCardLimit ?? 600;
   const providerOrError = await getActiveProvider();
   if ("error" in providerOrError) return { error: providerOrError.error };
   const provider = providerOrError;
@@ -1462,7 +1471,8 @@ async function runGenerateCard(
         `All fields (Appearance, Personality, Psychology, Worldview, Quirks, Voice, Goals) must describe "${name}" and only "${name}". ` +
         `The "Dynamic (${protagonist})" field must describe "${name}"'s relationship and attitude towards the protagonist "${protagonist}". ` +
         `Do not mix them up. Follow the format and instructions exactly. ` +
-        `CRITICAL LENGTH CONSTRAINT: Keep descriptions highly concise, dense, and condensed. Limit each field value strictly to 1-2 short, focused sentences (maximum 30 words per field). Avoid verbose, flowery, or redundant phrasing.`;
+        `CRITICAL LENGTH CONSTRAINT: Keep descriptions highly concise, dense, and condensed. Limit each field value strictly to 1-2 short, focused sentences (maximum 30 words per field). Avoid verbose, flowery, or redundant phrasing.` +
+        `\nCRITICAL: The entire generated card entry must be strictly under ${characterCardLimit} characters in length.`;
       // The narrative context is identical across all passes for this character; cache it so passes
       // after the first read the shared prefix at ~0.1x instead of re-sending it at full price.
       const cachePrefix = `Narrative Context:\n${opts.storyInformation || "No narrative context."}\n\n`;
@@ -1511,7 +1521,8 @@ When generating or updating the "Dynamic ({protagonist}):" field, you must enfor
     finalCommand = resolveTitleToken(finalCommand, name);
 
     const system = `You are a creative writing assistant updating a card for ${name}. Follow the format and instructions exactly. ` +
-      `CRITICAL LENGTH CONSTRAINT: Keep descriptions highly concise, dense, and condensed. Limit each field value strictly to 1-2 short, focused sentences (maximum 30 words per field). Avoid verbose, flowery, or redundant phrasing.`;
+      `CRITICAL LENGTH CONSTRAINT: Keep descriptions highly concise, dense, and condensed. Limit each field value strictly to 1-2 short, focused sentences (maximum 30 words per field). Avoid verbose, flowery, or redundant phrasing.` +
+      `\nCRITICAL: The entire generated card entry must be strictly under ${characterCardLimit} characters in length.`;
     const user = `Narrative Context:\n${opts.storyInformation || "No narrative context."}\n\nInstructions:\n${finalCommand}`;
 
     const rawResponse = await provider.complete(system, user);
@@ -1528,6 +1539,14 @@ When generating or updating the "Dynamic ({protagonist}):" field, you must enfor
 
   if (!isMemoraid) {
     entry = applyFormattingMode(entry, formattingMode);
+  }
+
+  if (!isMemoraid && entry.length > characterCardLimit) {
+    if (entry.startsWith("[") && entry.endsWith("]")) {
+      entry = entry.slice(0, characterCardLimit - 2).trimEnd() + "\n]";
+    } else {
+      entry = entry.slice(0, characterCardLimit);
+    }
   }
 
   const totalActionsCount = await repo.getActionCount(shortId);
@@ -1731,16 +1750,37 @@ export function extractThoughtLoop(text: string): string | null {
     return null;
   }
 
-  const found: Record<string, string> = {};
+  const loops: Record<string, string>[] = [];
+  let currentLoop: Record<string, string> = {};
   const re = /^[ \t]*[*\-]?[ \t]*(Intake|Thought|Action)[ \t]*:[ \t]*(.+?)[ \t]*$/gim;
   let m: RegExpExecArray | null;
+  
   while ((m = re.exec(text)) !== null) {
     const key = m[1]![0]!.toUpperCase() + m[1]!.slice(1).toLowerCase();
-    if (!found[key]) found[key] = m[2]!.trim().replace(/^\*+\s*/, "");
+    const val = m[2]!.trim().replace(/^\*+\s*/, "");
+    
+    if (currentLoop[key] !== undefined) {
+      // We already have this key in the current loop, so start a new loop
+      loops.push(currentLoop);
+      currentLoop = {};
+    }
+    currentLoop[key] = val;
   }
+  if (Object.keys(currentLoop).length > 0) {
+    loops.push(currentLoop);
+  }
+
   const order = ["Intake", "Thought", "Action"];
-  const parts = order.filter((k) => found[k]).map((k) => `- ${k}: ${found[k]}`);
-  return parts.length >= 2 ? parts.join("\n") : null;
+  const formattedLoops: string[] = [];
+  
+  for (const loop of loops) {
+    const parts = order.filter((k) => loop[k]).map((k) => `- ${k}: ${loop[k]}`);
+    if (parts.length >= 2) {
+      formattedLoops.push(parts.join("\n"));
+    }
+  }
+  
+  return formattedLoops.length > 0 ? formattedLoops.join("\n") : null;
 }
 
 
@@ -1750,6 +1790,7 @@ export async function checkMemorAIDUpdates(
   pendingActionType?: string,
   recordTiming = false
 ): Promise<string[]> {
+  await ensureAuth();
   const updatedNames: string[] = [];
   // Wall-clock start for the intercept-path timing readout. Only recorded (at function exit)
   // when recordTiming is set AND the run actually invoked the model — short-circuits don't count.
@@ -1763,6 +1804,7 @@ export async function checkMemorAIDUpdates(
     formattingMode: DEFAULT_FORMATTING_MODE,
     cardCommands: DEFAULT_CARD_COMMANDS
   }) as Settings;
+  const thoughtCardLimit = settings?.thoughtCardLimit ?? 2000;
   dlog(`[MemorAID] Settings loaded:`, (await repo.getSettings()) ? "yes" : "no (using defaults)");
 
   // 1. Check if Configure MemorAID card exists
@@ -1845,7 +1887,21 @@ export async function checkMemorAIDUpdates(
       const titleLower = (c.title || "").toLowerCase();
       const keysList = (c.keys || "").split(/[,;]+/).map(k => k.trim().toLowerCase()).filter(Boolean);
 
-      return titleLower === impName || keysList.includes(impName);
+      if (titleLower === impName || keysList.includes(impName)) return true;
+
+      if (titleLower.includes(" and ") || titleLower.includes(" & ")) {
+        const parts = titleLower.split(/\s+(?:and|&)\s+/);
+        if (parts.includes(impName)) return true;
+      }
+
+      for (const k of keysList) {
+        if (k.includes(" and ") || k.includes(" & ")) {
+          const parts = k.split(/\s+(?:and|&)\s+/);
+          if (parts.includes(impName)) return true;
+        }
+      }
+
+      return false;
     });
 
     const title = baseCard ? (baseCard.title || "") : capitalizeWords(impName);
@@ -1866,7 +1922,16 @@ export async function checkMemorAIDUpdates(
     }
   }
 
-  if (triggered.length === 0) {
+  const seenIds = new Set<string>();
+  const dedupledTriggered: typeof triggered = [];
+  for (const item of triggered) {
+    if (!seenIds.has(item.id)) {
+      seenIds.add(item.id);
+      dedupledTriggered.push(item);
+    }
+  }
+
+  if (dedupledTriggered.length === 0) {
     dlog("[MemorAID] No important characters were triggered in the active scene lookback window.");
     return updatedNames;
   }
@@ -1878,7 +1943,7 @@ export async function checkMemorAIDUpdates(
   const creationsToRun: { character: any; cardRow: CardRow; req: GqlMutationRequest }[] = [];
   const characterToMemCardMap = new Map<string, CardRow>();
 
-  for (const c of triggered) {
+  for (const c of dedupledTriggered) {
     const titleVal = c.title || "";
     const memCardTitle = `${titleVal} (Memory)`;
     const memCardKeys = c.keys || titleVal;
@@ -1968,13 +2033,13 @@ export async function checkMemorAIDUpdates(
   }
   const generationResults: { character: any; targetMemCard: CardRow; trimmedMemory: string; newDesc: string }[] = [];
 
-  if (triggered.length > 0) {
+  if (dedupledTriggered.length > 0) {
     const providerOrError = await getActiveProvider();
     if ("error" in providerOrError) {
       console.warn(`[MemorAID] Cannot generate memories: ${providerOrError.error}`);
     } else {
       const provider = providerOrError;
-      await Promise.all(triggered.map(async (c) => {
+      await Promise.all(dedupledTriggered.map(async (c) => {
         const targetMemCard = characterToMemCardMap.get(c.id);
         if (!targetMemCard) return;
 
@@ -2057,17 +2122,31 @@ export async function checkMemorAIDUpdates(
         const protagonist = (adv?.protagonistName && adv.protagonistName.trim()) || parseProtagonistName(adv?.memory) || "the player character";
         const title = c.title || "Character";
         const titleWithKeys = c.keys ? `${title} (also referred to as: ${c.keys})` : title;
-        const resolvedCommand = resolveTitleToken(resolveCommand(template, protagonist), titleWithKeys);
+        let resolvedCommand = resolveTitleToken(resolveCommand(template, protagonist), titleWithKeys);
+        if (title.toLowerCase().includes(" and ") || title.toLowerCase().includes(" & ")) {
+          const names = title.split(/\s+(?:and|&)\s+/i).map(n => n.trim());
+          resolvedCommand += `\n\n[JOINT CHARACTER CARD DIRECTIVE]: Since ${title} is a joint character card representing multiple characters, you MUST generate separate, consecutive Intake-Thought-Action loops for each character individually, in this exact order: first a loop for ${names[0]}, and then a loop for ${names[1]}.
+- You must explicitly start each character's Intake line by referencing that character by name as the subject (for example: "- Intake: ${names[0]} perceives..." and "- Intake: ${names[1]} perceives...").
+- Output both loops sequentially within the single outer brackets, with each line starting with a bullet point. Do not combine their thoughts into a single loop.`;
+        }
 
-        const charProfile = c.baseCard?.value ? `Character Profile for ${title}:\n${stripOuterBrackets(c.baseCard.value)}\n\n` : "";
-        const system = `You are a creative writing assistant. Your task is to generate first-person subjective thoughts for a character based on their profile and the narrative context. Follow the instructions and formatting rules exactly.`;
+        const thoughtLookbackVal = settings?.memoraidThoughtLookback ?? 0;
+        const thoughtContext = thoughtLookbackVal > 0
+          ? buildThoughtContext(prevNotes.thoughtLog, thoughtLookbackVal, title, 3000)
+          : "";
+
+        let charProfile = c.baseCard?.value ? `Character Profile for ${title}:\n${stripOuterBrackets(c.baseCard.value)}\n\n` : "";
+        if (thoughtContext) {
+          charProfile = thoughtContext + "\n\n" + charProfile;
+        }
+        const system = `You are a creative writing assistant. Your task is to generate first-person subjective thoughts for a character based on their profile and the narrative context. Follow the instructions and formatting rules exactly.\nCRITICAL: The generated thoughts must be strictly under ${thoughtCardLimit} characters in length.`;
         const { cachePrefix, user } = buildMemoraidPrompt({ charProfile, priorActionsText, latestActionText, presentEntities, instructions: resolvedCommand });
         try {
           didGenerate = true;
           // Prompt-cache the shared scene prefix only when ≥2 characters react this turn (guaranteed
           // reuse); for a lone character there is no second read to amortize the cache-write premium,
           // so fold the prefix into the user content instead.
-          const rawResponse = triggered.length >= 2
+          const rawResponse = dedupledTriggered.length >= 2
             ? await provider.complete(system, user, cachePrefix)
             : await provider.complete(system, cachePrefix + user);
           dlog(`[MemorAID] Raw provider response for ${c.title}: ${JSON.stringify(rawResponse).slice(0, 600)}`);
@@ -2110,16 +2189,24 @@ export async function checkMemorAIDUpdates(
             inner = cleanedInner;
           }
           const thoughtsHeader = `${title.trim()}'s Thoughts:`;
-          let trimmedMemory = `[${thoughtsHeader}\n${inner}\n]`;
-          const ENTRY_CAP = 600;
+          const newThoughtBlock = `[${thoughtsHeader}\n${inner}\n]`;
+          const newLog = pushThought(prevNotes.thoughtLog, { turn: turnNow, text: newThoughtBlock });
+          const newDesc = buildMemoNotes({ thoughtLog: newLog });
+
+          const thoughtLookbackVal = settings?.memoraidThoughtLookback ?? 1;
+          let trimmedMemory = "";
+          if (thoughtLookbackVal > 1) {
+            trimmedMemory = renderThoughtWindow(newLog, thoughtLookbackVal, title, thoughtCardLimit);
+          }
+          if (!trimmedMemory) {
+            trimmedMemory = newThoughtBlock;
+          }
+
+          const ENTRY_CAP = thoughtCardLimit;
           if (trimmedMemory.length > ENTRY_CAP) {
             trimmedMemory = trimmedMemory.slice(0, ENTRY_CAP - 1).trimEnd() + "]";
           }
           dlog(`[MemorAID] Successfully generated 3rd-party memories for ${c.title}: "${trimmedMemory}"`);
-
-          const newDesc = buildMemoNotes({
-            thoughtLog: pushThought(prevNotes.thoughtLog, { turn: turnNow, text: trimmedMemory }),
-          });
 
           generationResults.push({ character: c, targetMemCard, trimmedMemory, newDesc });
         } catch (err) {
@@ -2240,6 +2327,7 @@ function capNativeMemory(text: string): string {
 }
 
 export async function regenerateMemoryBlock(shortId: string, index: number): Promise<{ ok: boolean; error?: string; memories?: any[] }> {
+  await ensureAuth();
   if (!sessionToken || !gqlEndpoint) {
     return { ok: false, error: "No session token yet — interact with the page once, then retry." };
   }
@@ -2434,6 +2522,7 @@ async function handleMessage(msg: BgMessage): Promise<any> {
             
             const cards = await repo.getCards(msg.shortId) || [];
             const charactersToCheck: { title: string; keys: string }[] = [];
+            const seenTitles = new Set<string>();
             for (const impName of importantNames) {
               const baseCard = cards.find(c => {
                 if (c.type.toLowerCase() !== "character") return false;
@@ -2441,12 +2530,30 @@ async function handleMessage(msg: BgMessage): Promise<any> {
                 if ((c.title || "").toLowerCase().endsWith(" (memory)")) return false;
                 const titleLower = (c.title || "").toLowerCase();
                 const keysList = (c.keys || "").split(/[,;]+/).map(k => k.trim().toLowerCase()).filter(Boolean);
-                return titleLower === impName || keysList.includes(impName);
+                
+                if (titleLower === impName || keysList.includes(impName)) return true;
+                
+                if (titleLower.includes(" and ") || titleLower.includes(" & ")) {
+                  const parts = titleLower.split(/\s+(?:and|&)\s+/);
+                  if (parts.includes(impName)) return true;
+                }
+                
+                for (const k of keysList) {
+                  if (k.includes(" and ") || k.includes(" & ")) {
+                    const parts = k.split(/\s+(?:and|&)\s+/);
+                    if (parts.includes(impName)) return true;
+                  }
+                }
+                return false;
               });
-              if (baseCard) {
-                charactersToCheck.push({ title: baseCard.title || "", keys: baseCard.keys || "" });
-              } else {
-                charactersToCheck.push({ title: capitalizeWords(impName), keys: impName });
+              
+              const title = baseCard ? baseCard.title || "" : capitalizeWords(impName);
+              const keys = baseCard ? baseCard.keys || "" : impName;
+              const titleLower = title.toLowerCase();
+              
+              if (!seenTitles.has(titleLower)) {
+                seenTitles.add(titleLower);
+                charactersToCheck.push({ title, keys });
               }
             }
             
@@ -2942,6 +3049,7 @@ async function handleMessage(msg: BgMessage): Promise<any> {
         return;
       }
       case "updateAidMemories": {
+        await ensureAuth();
         const normalized = msg.memories.map((m: any) => typeof m === "string" ? { actionIds: [], text: m } : m);
         const adv = await repo.getAdventure(msg.shortId);
         const oldMemories = adv?.aidMemories || [];
@@ -3402,19 +3510,23 @@ async function handleMessage(msg: BgMessage): Promise<any> {
         return runApplyToAid(msg.id);
       case "listModels": {
         const s = await repo.getSettings();
-        if (!s) return { models: [] };
-        const providerName = msg.provider || s.provider || "claude";
-        const key = msg.apiKey !== undefined ? msg.apiKey : s.apiKeys?.[providerName];
+        const providerName = msg.provider || s?.provider || "claude";
+        const key = msg.apiKey !== undefined ? msg.apiKey : s?.apiKeys?.[providerName];
         if (!key && providerName !== "ollama") return { models: [] };
         
-        if (providerName === "openai") {
-          return { models: await listOpenAIModels(key || "") };
-        } else if (providerName === "gemini") {
-          return { models: await listGeminiModels(key || "") };
-        } else if (providerName === "ollama") {
-          return { models: await listOllamaModels(key || "http://localhost:11434") };
-        } else {
-          return { models: await listClaudeModels(key || "") };
+        try {
+          if (providerName === "openai") {
+            return { models: await listOpenAIModels(key || "") };
+          } else if (providerName === "gemini") {
+            return { models: await listGeminiModels(key || "") };
+          } else if (providerName === "ollama") {
+            return { models: await listOllamaModels(key || "http://localhost:11434") };
+          } else {
+            return { models: await listClaudeModels(key || "") };
+          }
+        } catch (e) {
+          console.error(`[AID bg] listModels failed for ${providerName}:`, e);
+          return { models: [] };
         }
       }
       case "getState": {
@@ -3573,13 +3685,16 @@ async function handleMessage(msg: BgMessage): Promise<any> {
             formattingMode: settings.formattingMode || DEFAULT_FORMATTING_MODE,
             useMemories: settings.useMemories,
             memoraidLookback: settings.memoraidLookback,
+            memoraidThoughtLookback: settings.memoraidThoughtLookback ?? 1,
             memoraidPresenceLookback: settings.memoraidPresenceLookback,
             autoRegenerateNativeMemories: !!settings.autoRegenerateNativeMemories,
-            interceptTimeout: settings.interceptTimeout ?? 4,
+            interceptTimeout: settings.interceptTimeout ?? 10,
             locationMode: settings.locationMode || "optionA",
             enableProperNounDetection: settings.enableProperNounDetection !== false, // opt-out: checked unless explicitly disabled
             manualMode: !!settings.manualMode,
             memoraidBannerDismissed: !!settings.memoraidBannerDismissed,
+            characterCardLimit: settings.characterCardLimit ?? 600,
+            thoughtCardLimit: settings.thoughtCardLimit ?? 2000,
           } : null,
           protagonist: adv?.protagonistName ?? null,
           scenario: adv?.title ?? null,
@@ -3850,6 +3965,69 @@ async function handleMessage(msg: BgMessage): Promise<any> {
               return { ok: true, message: `Successfully applied to ${asset.type === "an" ? "Author's Note" : "Plot Essentials"}.` };
             }
           }
+        } catch (err: any) {
+          return { error: err?.message || String(err) };
+        }
+      }
+      case "saveCardValue": {
+        await ensureAuth();
+        if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) {
+          return { error: "No session token yet — interact with the page once, then retry." };
+        }
+        const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+        const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
+        try {
+          const cards = await repo.getCards(msg.shortId);
+          const card = cards.find(c => c.id === msg.cardId);
+          if (!card) {
+            return { error: "Card not found in local database." };
+          }
+          const updatedCard = { ...card, value: msg.value };
+          const req = buildCardSave(gqlEndpoint!, updateQuery, sessionToken!, updatedCard, msg.value);
+          const res = await fetch(req.url, { method: "POST", headers: req.headers, body: req.body });
+          if (!res.ok) {
+            return { error: `Save failed with HTTP ${res.status}` };
+          }
+          const json = await res.json() as any;
+          const returnedCard = json?.[0]?.data?.updateStoryCard?.storyCard ||
+                               json?.[0]?.data?.updateStoryCard;
+          const isSuccess = json?.[0]?.data?.updateStoryCard?.success || returnedCard;
+          if (!isSuccess) {
+            const msgStr = json?.[0]?.data?.updateStoryCard?.message || json?.[0]?.errors?.[0]?.message || "Mutation failed";
+            return { error: `AI Dungeon rejected save: ${msgStr}` };
+          }
+          await repo.putCards(msg.shortId, [updatedCard]);
+
+          // Broadcast update
+          broadcastToTabs({
+            kind: "approvedCardSync",
+            payload: { ok: true, source: "card", cardId: msg.cardId, value: msg.value, description: updatedCard.description || "" }
+          });
+          return { ok: true };
+        } catch (err: any) {
+          return { error: err?.message || String(err) };
+        }
+      }
+      case "exportAll": {
+        try {
+          const data = await repo.exportAll();
+          return { ok: true, data };
+        } catch (err: any) {
+          return { error: err?.message || String(err) };
+        }
+      }
+      case "importAll": {
+        try {
+          const res = await repo.importAll(msg.data);
+          return res;
+        } catch (err: any) {
+          return { error: err?.message || String(err) };
+        }
+      }
+      case "isDbEmpty": {
+        try {
+          const empty = await repo.isDbEmpty();
+          return { ok: true, empty };
         } catch (err: any) {
           return { error: err?.message || String(err) };
         }

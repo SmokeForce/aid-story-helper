@@ -1,6 +1,8 @@
 import { openAidDb, type AdventureMeta, type ActionRow } from "./db";
 import type { CanonicalAction, OpRecord, CardRow, Version, Settings, GlobalAsset } from "../shared/types";
 
+const BACKUP_STORES = ["adventures", "actions", "operations", "cards", "versions", "settings", "globalAssets"] as const;
+
 
 function byCreatedAt(a: CanonicalAction, b: CanonicalAction): number {
   const ta = a.createdAt ?? "", tb = b.createdAt ?? "";
@@ -248,6 +250,56 @@ export class Repo {
   }
 
   async setSettings(s: Settings): Promise<void> { const db = await openAidDb(); await db.put("settings", { ...s, _k: "singleton" }); }
+
+  /** True when there are no adventures (a freshly-installed / origin-swapped empty DB). */
+  async isDbEmpty(): Promise<boolean> {
+    const db = await openAidDb();
+    return (await db.count("adventures").catch(() => 0)) === 0;
+  }
+
+  /** Full backup of every store — survives the moz-extension UUID change that wipes IndexedDB
+   *  when the signed XPI is swapped for a test build. API keys are deliberately STRIPPED from the
+   *  settings singleton so the backup file is safe to store/share; the user keeps their existing
+   *  keys (see importAll) or re-enters them. All other settings are preserved. */
+  async exportAll(): Promise<{ __aidBackup: true; dbVersion: number; exportedAt: string; stores: Record<string, any[]> }> {
+    const db = await openAidDb();
+    const stores: Record<string, any[]> = {};
+    for (const s of BACKUP_STORES) {
+      const rows = await (db.getAll as any)(s).catch(() => []);
+      stores[s] = s === "settings"
+        ? rows.map(({ apiKeys, ...rest }: any) => rest) // never export secrets
+        : rows;
+    }
+    return { __aidBackup: true, dbVersion: 4, exportedAt: new Date().toISOString(), stores };
+  }
+
+  /** Restore a backup produced by exportAll. Upserts by key (merges into, never wipes, existing data).
+   *  The settings singleton is merged so the device's existing API keys are NEVER clobbered: keys
+   *  already on this device win; otherwise any keys present in the backup (legacy backups) are kept. */
+  async importAll(data: any): Promise<{ ok?: boolean; error?: string; counts?: Record<string, number> }> {
+    if (!data || data.__aidBackup !== true || !data.stores || typeof data.stores !== "object") {
+      return { error: "Not a valid AID Story Helper backup file." };
+    }
+    const db = await openAidDb();
+    const counts: Record<string, number> = {};
+    const hasKeys = (o: any) => o?.apiKeys && Object.keys(o.apiKeys).length > 0;
+    for (const s of BACKUP_STORES) {
+      const rows = (data.stores as any)[s];
+      if (!Array.isArray(rows) || rows.length === 0) continue;
+      const existingSettings = s === "settings" ? await db.get("settings", "singleton").catch(() => null) : null;
+      const tx = db.transaction(s as any, "readwrite");
+      let n = 0;
+      for (const row of rows) {
+        const toPut = s === "settings"
+          ? { ...row, apiKeys: hasKeys(existingSettings) ? (existingSettings as any).apiKeys : (row.apiKeys ?? {}) }
+          : row;
+        try { await tx.store.put(toPut); n++; } catch { /* skip malformed row */ }
+      }
+      await tx.done;
+      counts[s] = n;
+    }
+    return { ok: true, counts };
+  }
 
   async getGlobalAssets(): Promise<GlobalAsset[]> {
     const db = await openAidDb();

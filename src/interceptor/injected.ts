@@ -1,5 +1,6 @@
 import { WsTracker } from "../shared/ws-tracker";
 import { extractOps } from "../shared/gql-detect";
+import { pickActiveField } from "./gui-edit";
 
 // Runs in the PAGE (MAIN) world. No extension APIs here — only postMessage.
 (() => {
@@ -117,14 +118,8 @@ import { extractOps } from "../shared/gql-detect";
       return true;
     }
 
-    const active = (document.activeElement || lastActiveElement) as HTMLTextAreaElement | HTMLInputElement | null;
-    const isRecent = (Date.now() - lastActiveTime) < 15000;
-
-    const el = (active && isRecent) ? active : null;
+    const el = pickActiveField(document.activeElement, lastActiveElement, lastActiveTime, Date.now()) as HTMLTextAreaElement | HTMLInputElement | null;
     if (!el) return false;
-
-    const tagName = el.tagName.toLowerCase();
-    if (tagName !== "textarea" && tagName !== "input") return false;
 
     if (cardInput) {
       const activeVal = (el.value || "").trim().replace(/\r\n/g, "\n");
@@ -259,22 +254,65 @@ import { extractOps } from "../shared/gql-detect";
 
   function getShortIdFromAdventureId(advId: string): string {
     if (!advId) return "";
-    // If advId is already a public shortId (e.g. 8-12 characters, no hyphens), return it directly.
-    // A public shortId is never purely numeric — beta's ActionRequest carries the numeric internal
-    // adventureId (e.g. "203001493"), which must be reverse-mapped to the public shortId below, not
-    // returned verbatim (doing so keys MemorAID off the wrong id, so no cards match and the pre-run
-    // intercept generates nothing — the thought only lands via the post-turn check, too late).
-    if (advId.length < 15 && !advId.includes("-") && !/^\d+$/.test(advId)) {
-      return advId;
+    const cleanAdvId = String(advId).replace(/^Adventure:/, "");
+    // If cleanAdvId is already a public shortId (e.g. 8-12 characters, no hyphens), return it directly.
+    if (cleanAdvId.length < 15 && !cleanAdvId.includes("-") && !/^\d+$/.test(cleanAdvId)) {
+      return cleanAdvId;
     }
+    
+    // 1. Check adventureIdMap cache
     for (const [sid, id] of adventureIdMap.entries()) {
-      if (id === advId) return sid;
+      const cleanId = String(id).replace(/^Adventure:/, "");
+      if (cleanId === cleanAdvId) return sid;
     }
+    
+    // 2. Check Apollo Cache
+    try {
+      const client = getApolloClient();
+      const data = client?.cache?.extract();
+      if (data) {
+        // Try exact cache key first
+        const exactKey = `Adventure:${cleanAdvId}`;
+        if (data[exactKey]?.shortId) {
+          const sid = data[exactKey].shortId;
+          if (sid && !/^\d+$/.test(sid)) {
+            adventureIdMap.set(sid, cleanAdvId);
+            return sid;
+          }
+        }
+        // Fallback: search all Adventure: keys
+        for (const key of Object.keys(data)) {
+          if (key.startsWith("Adventure:") && key.includes(cleanAdvId)) {
+            const sid = data[key]?.shortId;
+            if (sid && !/^\d+$/.test(sid)) {
+              adventureIdMap.set(sid, cleanAdvId);
+              return sid;
+            }
+          }
+        }
+      }
+    } catch {}
+
+    // 3. Fallback: Parse URL pathname segments
+    const segments = window.location.pathname.split('/');
+    for (const segment of segments) {
+      if (segment && segment.length >= 8 && segment.length <= 22 && !/^\d+$/.test(segment)) {
+        if (!["adventure", "scenario", "play", "settings", "profile", "explore", "featured", "main"].includes(segment.toLowerCase())) {
+          return segment;
+        }
+      }
+    }
+
+    // 4. Regex URL fallback
     const m = window.location.pathname.match(/\/(?:play|adventure|scenario)\/([^\/]+)/);
-    return m ? m[1]! : advId;
+    if (m && !/^\d+$/.test(m[1]!) && m[1]!.length < 15) {
+      return m[1]!;
+    }
+    
+    return cleanAdvId;
   }
 
-  let interceptTimeoutMs = 4000;
+  let interceptTimeoutMs = 10000;
   let warnedNoApollo = false;
   let showDebug = false;
 
@@ -1014,6 +1052,87 @@ import { extractOps } from "../shared/gql-detect";
     }
   }
 
+  async function maybeInterceptAction(batch: any[]): Promise<string[]> {
+    const actionReq = batch.find((item: any) => item.operationName === "ActionRequest");
+    if (!actionReq) return [];
+
+    const actionInput = actionReq.variables?.input;
+    const actionText = actionInput?.text;
+    const actionType = actionInput?.type;
+    const adventureId = actionInput?.adventureId;
+    let shortId = adventureId ? getShortIdFromAdventureId(adventureId) : null;
+
+    if (!shortId || /^\d+$/.test(String(shortId))) {
+      for (const sib of batch) {
+        const sid = sib?.variables?.shortId || sib?.variables?.input?.shortId || sib?.variables?.adventureId || sib?.variables?.input?.adventureId;
+        if (sid) {
+          const resolved = getShortIdFromAdventureId(String(sid));
+          if (resolved && !/^\d+$/.test(resolved)) {
+            shortId = resolved;
+            break;
+          }
+        }
+      }
+    }
+
+    const isInterceptionTarget = !!(shortId && (
+      (actionText && (actionType === "do" || actionType === "say" || actionType === "story")) ||
+      (actionType === "retry" || actionType === "continue")
+    ));
+
+    var startTime = Date.now();
+    dlog("[AID injected] maybeInterceptAction check:", {
+      adventureId,
+      resolvedShortId: shortId,
+      actionType,
+      hasText: !!actionText,
+      isTarget: isInterceptionTarget
+    });
+
+    if (isInterceptionTarget) {
+      dlog("[AID injected] Intercepted ActionRequest for MemorAID pre-run:", actionText || `(${actionType})`);
+      setPlaceholderText("[MemorAID] Character is reflecting...");
+
+      var requestId = Math.random().toString(36).substring(7);
+      var promise = new Promise<string[]>((resolve) => {
+        pendingActionResolvers.set(requestId, resolve);
+      });
+
+      post({
+        transport: "interceptedAction",
+        requestId,
+        shortId,
+        text: actionText,
+        type: actionType
+      });
+
+      var timedOut = false;
+      const timeoutId = setTimeout(() => {
+        const resolve = pendingActionResolvers.get(requestId);
+        if (resolve) {
+          console.warn(`[AID injected] Interception timed out after ${Date.now() - startTime}ms. Releasing ActionRequest.`);
+          pendingActionResolvers.delete(requestId);
+          timedOut = true;
+          restorePlaceholder();
+          resolve([]);
+        }
+      }, interceptTimeoutMs);
+
+      const updatedNames = await promise;
+      if (!timedOut) {
+        clearTimeout(timeoutId);
+        dlog(`[AID injected] Interception approved after ${Date.now() - startTime}ms. updatedNames:`, updatedNames);
+        if (updatedNames && updatedNames.length > 0) {
+          flashPlaceholder(`[MemorAID] Thoughts synchronized: ${updatedNames.join(", ")}!`);
+        } else {
+          restorePlaceholder();
+        }
+      }
+      return updatedNames;
+    }
+    return [];
+  }
+
   // --- fetch ---
   const _fetch = window.fetch;
   window.fetch = async function (input: any, init?: any) {
@@ -1034,72 +1153,7 @@ import { extractOps } from "../shared/gql-detect";
         // 1. Intercept player action (ActionRequest) for MemorAID pre-run thought generation
         const actionReq = batch.find((item: any) => item.operationName === "ActionRequest");
         if (actionReq) {
-          const actionInput = actionReq.variables?.input;
-          const actionText = actionInput?.text;
-          const actionType = actionInput?.type;
-          const adventureId = actionInput?.adventureId;
-          let shortId = adventureId ? getShortIdFromAdventureId(adventureId) : null;
-
-          // Beta's ActionRequest input identifies the adventure by its NUMERIC internal id
-          // (e.g. "203001493"), not the public shortId the extension DB/cards are keyed by. If
-          // resolution didn't yield a public-looking shortId (map not yet populated / URL has no
-          // shortId), borrow it from a sibling batch item — the action is always batched with
-          // GetLatestActionForTimeout, whose variables.shortId IS the public shortId ("PKB5BoiBjTpd").
-          if (!shortId || /^\d+$/.test(String(shortId))) {
-            for (const sib of batch) {
-              const sid = sib?.variables?.shortId || sib?.variables?.input?.shortId;
-              if (sid && !/^\d+$/.test(String(sid)) && !String(sid).includes("-")) {
-                shortId = String(sid);
-                break;
-              }
-            }
-          }
-
-          const isInterceptionTarget = !!(shortId && (
-            (actionText && (actionType === "do" || actionType === "say" || actionType === "story")) ||
-            (actionType === "retry" || actionType === "continue")
-          ));
-
-          if (isInterceptionTarget) {
-            dlog("[AID injected] Intercepted ActionRequest for MemorAID pre-run:", actionText || `(${actionType})`);
-            setPlaceholderText("[MemorAID] Character is reflecting...");
-
-            const requestId = Math.random().toString(36).substring(7);
-            const promise = new Promise<string[]>((resolve) => {
-              pendingActionResolvers.set(requestId, resolve);
-            });
-
-            post({
-              transport: "interceptedAction",
-              requestId,
-              shortId,
-              text: actionText,
-              type: actionType
-            });
-
-            // 4 second timeout safety gate
-            let timedOut = false;
-            const timeoutId = setTimeout(() => {
-              const resolve = pendingActionResolvers.get(requestId);
-              if (resolve) {
-                console.warn("[AID injected] Interception timed out. Releasing ActionRequest.");
-                pendingActionResolvers.delete(requestId);
-                timedOut = true;
-                restorePlaceholder();
-                resolve([]);
-              }
-            }, interceptTimeoutMs);
-
-            const updatedNames = await promise;
-            if (!timedOut) {
-              clearTimeout(timeoutId);
-              if (updatedNames && updatedNames.length > 0) {
-                flashPlaceholder(`[MemorAID] Thoughts synchronized: ${updatedNames.join(", ")}!`);
-              } else {
-                restorePlaceholder();
-              }
-            }
-          }
+          await maybeInterceptAction(batch);
         }
 
         // 2. Perform client-side GraphQL Deduplication & Debouncing
@@ -1438,6 +1492,52 @@ import { extractOps } from "../shared/gql-detect";
     return res;
   };
 
+  // --- XMLHttpRequest interceptor ---
+  const _xhrOpen = XMLHttpRequest.prototype.open;
+  const _xhrSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (this: any, method: string, url: string, ...rest: any[]) {
+    this.__aidUrl = url;
+    return (_xhrOpen as any).apply(this, [method, url, ...rest]);
+  };
+  XMLHttpRequest.prototype.send = function (this: any, body?: any) {
+    const self = this;
+    const args = arguments;
+
+    self.addEventListener("load", function() {
+      try {
+        if (isGql(self.__aidUrl) && self.responseText) {
+          const resJson = JSON.parse(self.responseText);
+          postAdventureLoaded(resJson, body);
+        }
+      } catch { /* ignore */ }
+    });
+
+    try {
+      if (isGql(self.__aidUrl) && typeof body === "string") {
+        const parsed = JSON.parse(body);
+        const batch = Array.isArray(parsed) ? parsed : [parsed];
+        const actionReq = batch.find((item: any) => item.operationName === "ActionRequest");
+        if (actionReq) {
+          dlog("[AID injected] Intercepted ActionRequest over XHR for MemorAID pre-run!");
+          (async () => {
+            try {
+              await maybeInterceptAction(batch);
+            } catch (err) {
+              console.error("[AID injected] Error during XHR ActionRequest interception:", err);
+            } finally {
+              _xhrSend.apply(self, args as any);
+            }
+          })();
+          return;
+        }
+      }
+    } catch (err) {
+      dlog("[AID injected] Error checking XHR body for ActionRequest:", err);
+    }
+
+    return (_xhrSend as any).apply(self, args);
+  };
+
   // --- WebSocket (graphql-ws) ---
   const tracker = new WsTracker();
   const _WS = window.WebSocket;
@@ -1449,6 +1549,24 @@ import { extractOps } from "../shared/gql-detect";
       ws.send = function (data: any) {
         if (typeof data === "string") {
           tracker.handle(data); // learn subscribe ids
+          try {
+            const p = JSON.parse(data);
+            const op = p?.payload?.operationName || p?.operationName;
+            if (op === "ActionRequest") {
+              dlog("[AID injected] Intercepted ActionRequest over WebSocket for MemorAID pre-run!");
+              const batch = [p?.payload || p];
+              (async () => {
+                try {
+                  await maybeInterceptAction(batch);
+                } catch (err) {
+                  console.error("[AID injected] Error during WebSocket ActionRequest interception:", err);
+                } finally {
+                  _send(data);
+                }
+              })();
+              return;
+            }
+          } catch { /* ignore */ }
         }
         return _send(data);
       };

@@ -29,8 +29,9 @@ graph TD
 ### Context Isolation & Responsibilities
 1. **Injected Script (`src/interceptor/injected.ts`)**:
    - Runs directly in the context of the AI Dungeon page.
-   - Proxies the browser's global `window.fetch` to intercept GQL requests/responses.
+   - Proxies the browser's global `window.fetch` **and `XMLHttpRequest`** (`open`/`send`) to intercept GQL requests/responses on whichever transport AID uses for a given call.
    - Hooks outgoing WebSocket frames to intercept streaming actions.
+   - **Unified action interception (`maybeInterceptAction(batch)`)**: a single helper detects an `ActionRequest` in a (possibly batched) GQL payload, holds transmission, and awaits MemorAID thoughts before release — shared by the fetch and XHR proxies (correlated by a per-request id via `pendingActionResolvers`).
    - Implements **Synchronous Action Interception**: pauses action execution, updates the user interface placeholder to reflecting states, blocks GQL transmission until thoughts are updated, and releases GQL calls.
    - Updates open card editor textareas (`ENTRY` and `NOTES` / `description`) directly in the DOM when approved or synchronized card updates are received, bypassing React state synchronization lag.
    - **Page Card-Write Forwarding (`cardWrites`)**: Forwards the FINAL (post-override, post-dedup) inputs of every page-originated `UseAutoSaveStoryCard`/`SaveQueueStoryCard` to the content script, which routes them into the background `cardsUpdate` handler (local DB + MemorAID config cache). This is the live propagation path for GUI card edits (e.g. `Configure MemorAID`) on beta, where the server does not reliably broadcast `AdventureStoryCardsUpdate` over WS — previously such edits only reached the extension on the next page reload.
@@ -116,6 +117,8 @@ All data is stored locally in IndexedDB under the database name `"aid-tracker"` 
   - `source` (`"card" | "plot"`)
   - `pushedAt` (string, optional ISO timestamp of AID server sync)
   - `actionCount` (number, optional)
+  - `cardId` (string, optional — the Story Card this version targets; rename-proof tracking, see §D)
+  - `cardType` (string, optional — the targeted card's type, stamped at generation time)
 
 ### 6. `settings` (Extension settings singleton)
 - **Key Path**: `_k` (string, hardcoded to `"singleton"`)
@@ -132,9 +135,15 @@ All data is stored locally in IndexedDB under the database name `"aid-tracker"` 
   - `useMemories` (boolean, optional)
   - `cardCommands` (Record<string, string>, GQL Generation templates per type)
   - `formattingMode` (string, default `"squareBrackets"`)
-  - `memoraidLookback` (number, default `8`)
+  - `memoraidLookback` (number, default `8`, narrative-action context window for thought generation)
+  - `memoraidThoughtLookback` (number, default `0`, rolling thought window: N complete PRIOR thoughts kept in the card entry and fed as context; `0` = single fresh thought only — see §A)
   - `memoraidPresenceLookback` (number, default `5`)
   - `interceptTimeout` (number, default `4`)
+  - `autoRegenerateNativeMemories` (boolean, optional — auto-regen the latest Memory Bank block, see §H)
+  - `useSinglePassGeneration` (boolean, optional — 1-pass vs 4-pass character generation, see §E)
+  - `locationMode` (`"optionA" | "optionB"`, default `"optionA"`, Active Location Manager mode, see §K)
+  - `enableProperNounDetection` (boolean, opt-out/ON by default, see §K)
+  - `manualMode` (boolean, optional — when set, suppresses automatic background auto-update triggers)
 
 ### 7. `globalAssets`
 - **Key Path**: `id` (string)
@@ -184,14 +193,19 @@ The communication contract between content scripts (panel UI) and the background
 | `saveGlobalAsset` | `asset: GlobalAsset` | Saves or updates a global asset in the local IndexedDB. |
 | `deleteGlobalAsset` | `id: string` | Deletes a global asset from the local IndexedDB. |
 | `importGlobalAsset` | `shortId`, `assetId` | Fetches a global asset and applies it to the active play session using GraphQL mutations. |
+| `saveCardValue` | `shortId`, `cardId`, `value` | Saves a Story Card's entry `value` directly (panel-side card editing) and replays `UseAutoSaveStoryCard` to AID (+ `approvedCardSync` broadcast). |
+| `exportAll` | *(none)* | Returns a full backup of every IndexedDB store as `{ __aidBackup, dbVersion, exportedAt, stores }` — **API keys are stripped** from the settings singleton (see §M). |
+| `importAll` | `data` | Restores a backup produced by `exportAll`; upserts by key (merges into, never wipes, existing data; device API keys are preserved). |
+| `isDbEmpty` | *(none)* | Returns `{ empty }` — true when no adventures exist (freshly-installed / origin-swapped empty DB), used to surface the self-heal restore banner. |
 
 ---
 
 ## 1.3 Authentication Caching & Session Store
 
-- **Auth Token & Endpoint Storage**: The GQL `sessionToken` (AID Authorization header) and `gqlEndpoint` are **never written to persistent disk storage** to prevent security leaks.
-- **Session Caching**: They are cached in memory within the background worker and mirrored in Chrome's transient `browser.storage.session` store. This keeps the auth alive when the MV3 background event page unloads/suspends due to inactivity, and is destroyed when the browser closes.
-- **Rehydration**: `ensureAuth()` (in `src/background/background.ts`) retrieves `aidToken` and `aidEndpoint` from the session store on subsequent background wakeups.
+- **Auth Token & Endpoint Storage**: The GQL `sessionToken` (AID Authorization header) and `gqlEndpoint` are held in memory in the background worker and mirrored ONLY to `browser.storage.session` — an in-memory, session-scoped store that is **never written to persistent disk**. `rememberAuth()` writes there alone (no `storage.local`).
+- **Why session-only is sufficient**: `storage.session` already survives MV3 worker recycling *within* a browser session — the actual problem `ensureAuth` solves. It is cleared on browser close, but every background op that needs auth (auto-update, MemorAID, memory regen) is downstream of page activity, and the fetch/XHR interceptor re-captures a fresh token from the first authenticated page request each session. So disk persistence bought almost nothing while exposing the bearer token at rest — it was removed.
+- **Disk scrub**: at module load the worker calls `browser.storage.local.remove(["aidToken", "aidEndpoint"])` once, to clean up any token a prior build had mirrored to disk. (The `storage` permission in `manifest.json` backs `storage.session` and this scrub.)
+- **Rehydration**: `ensureAuth()` (in `src/background/background.ts`) is idempotent — returns early if both are in memory, else fills them from `storage.session`. It is `await`ed at the top of every handler that performs a GQL write (`checkMemorAIDUpdates`, `regenerateMemoryBlock`, `updateAidMemories`, `saveCardValue`, …) so a recycled worker never proceeds tokenless.
 
 ---
 
@@ -225,6 +239,10 @@ The Claude provider (`src/inference/claude.ts`) uses Anthropic **prompt caching*
 - **MemorAID multi-character turns** — the scene prefix (roster + prior context + latest action from `buildMemoraidPrompt`) is identical for every character; cached only when `triggered.length >= 2`. Single-character turns fold the prefix into `user` (no write premium). The prompt was reordered so the shared scene context leads and the per-character profile + instructions trail — required because caching is a prefix match.
 - **Caveats:** caching only triggers above the model's minimum cacheable prefix (Opus 4.8: 4096 tokens; Sonnet 4.6: 2048; Haiku 4.5: 4096) — smaller prefixes silently won't cache. TTL is 5 min, so reuse must be within-operation (same turn). `claude.ts` logs `[AID claude] usage: … cache_read=N` — `cache_read > 0` confirms a hit; persistent 0 means the prefix is sub-threshold or a byte changed in it.
 
+### 1.5.2 MV3 Permissions & Extension-Context-Invalidation Safety
+- **Manifest permissions**: `permissions: ["storage", "unlimitedStorage"]` (`storage` backs the `storage.session` auth caching + disk scrub in §1.3; `unlimitedStorage` lifts the IndexedDB quota for large backfilled adventures — the §M backup/restore uses IndexedDB directly, not a permission). `host_permissions` are declared **explicitly** rather than relying on broad `<all_urls>`: AID origins (`*://*.aidungeon.com/*`), the OffMeta Google Doc, the AI provider APIs (Anthropic/OpenAI/Google/localhost), so Chromium grants them on install instead of silently dropping cross-origin fetches (the "Chromium MV3 permissions" class of bugs).
+- **`browser-helper.ts` (`src/content/browser-helper.ts`)**: A `Proxy` wrapper around the page/content-context `browser`/`chrome` namespace that hardens `runtime.sendMessage` against **"Extension context invalidated"** errors. After the extension is reloaded/updated while a page is still open, the old content script's `runtime` handle is dead; calling it throws and rejects unhandled. The proxy guards `runtime.id` before each call and converts the invalidated-context failure into a resolved `{ error: "Extension context invalidated" }` (or a clean rejection) so callers degrade gracefully instead of surfacing uncaught errors. Cross-origin OffMeta/provider fetches also pass `credentials: "omit"` to avoid sending cookies to third-party hosts.
+
 ### 1.6 Performance & Compute Optimizations
 
 To reduce local database overhead, lower IPC latency, and comply with server compute guidelines:
@@ -255,7 +273,8 @@ C:\Users\x509x\Documents\Claude\
 │   │   └── orchestrator.ts   # Message type declarations (BgMessage)
 │   ├── content/              # Content & UI Context
 │   │   ├── content.ts        # Bridge between injected script, panel, and background
-│   │   └── panel.ts          # Shadow DOM sidebar panel layout, styles, and events (using setSafeHTML)
+│   │   ├── panel.ts          # Shadow DOM sidebar panel layout, styles, and events (using setSafeHTML)
+│   │   └── browser-helper.ts # Safe browser/chrome namespace Proxy (survives extension-context invalidation)
 │   ├── inference/            # AI Provider & Prompt Generation Helpers
 │   │   ├── claude.ts         # Anthropic Claude provider handler
 │   │   ├── gemini.ts         # Google Gemini provider handler
@@ -269,11 +288,16 @@ C:\Users\x509x\Documents\Claude\
 │   │   ├── plot.ts           # Parser/serializer for Plot Essentials memory blocks
 │   │   └── writeback.ts      # GraphQL mutation request builders
 │   ├── interceptor/          # Page Injection Context
-│   │   └── injected.ts       # window.fetch & WebSocket proxy, GQL interceptor
+│   │   ├── injected.ts       # window.fetch & WebSocket proxy, GQL interceptor
+│   │   └── gui-edit.ts       # Pure helper: picks the user's active card-edit field (isEditingInGui heuristic)
+│   ├── permissions/          # Optional-permission request page
+│   │   ├── permissions.html  # Standalone page to prompt/grant host permissions
+│   │   └── permissions.ts    # Permission request handler logic
 │   ├── shared/               # Universal Utilities
-│   │   ├── types.ts          # Core interfaces (Settings, CardRow, StoryCard)
+│   │   ├── types.ts          # Core interfaces (Settings, CardRow, StoryCard); trigger-match & fell-out helpers
 │   │   ├── op-registry.ts    # Replay GQL operation schema registry
 │   │   ├── ws-tracker.ts     # Correlates GQL WebSocket subscription IDs to events
+│   │   ├── offmeta-parser.ts # Parses the OffMeta AIN Google-Doc repository into sections
 │   │   └── gql-detect.ts     # Normalizes and detects GraphQL operation payloads
 │   ├── storage/              # Database Layer
 │   │   ├── db.ts             # IndexedDB stores & migrations
@@ -283,7 +307,7 @@ C:\Users\x509x\Documents\Claude\
 │       ├── backfill.ts       # Scraping game actions via paginated GQL reads
 │       ├── gameplay-fetch.ts # GQL network payload constructors
 │       └── reconcile.ts      # Merging streaming action updates
-└── tests/                    # Vitest Test Suite (23 test files covering all modules)
+└── tests/                    # Vitest Test Suite (27 test files covering all modules)
     ├── fixtures/             # Mock DB snapshots & GQL references
     └── *.test.ts             # Integration & unit tests for all background/UI behaviors
 ```
@@ -314,6 +338,9 @@ C:\Users\x509x\Documents\Claude\
   - Action: [Impulse/Plan]
   ```
 - **Description Archive**: Updates the memory card `value` with the new thought, and prepends historical thought logs into the card's `description`.
+- **Rolling Thought Window (`memoraidThoughtLookback`, `src/inference/memoraid-notes.ts`)**: When `memoraidThoughtLookback > 0`, the memory card's `value` holds the last **N complete thoughts** as a rolling window instead of a single fresh thought. `renderThoughtWindow(log, n, name, maxChars)` renders them NEWEST→OLDEST under a `"<name>'s Thoughts (newest to oldest):"` header for the card entry (capped at the 600-char `ENTRY_CAP`), and `buildThoughtContext(log, n, name, maxChars)` renders the same N thoughts OLDEST→NEWEST (≤3000 chars) prepended to the character profile as generation context, so each new thought is written with continuity from the prior ones. Both reuse `renderThoughtBlock`, which keeps only whole thoughts that fit the budget (oldest dropped first, never split) and wraps each in `{…}` so discrete thoughts stay unambiguous. `memoraidThoughtLookback = 0` (default) preserves the original single-thought behavior. Configurable under Settings → General ("MemorAID Thought Lookback (previous thoughts)").
+- **GUI-Edit Field Detection (`pickActiveField`, `src/interceptor/gui-edit.ts`)**: The "is the user editing this card in AID's GUI?" guard (which decides whether a page card-write is a genuine user edit vs a stale autosave to be rewritten) picks the active edit field via `pickActiveField(activeEl, lastActiveEl, lastActiveTime, now, recentMs=15000)`. Because `document.activeElement` is never null (it becomes the clicked "Finish"/"Update" button by the time autosave fires), the helper prefers the currently-focused textarea/input but falls back to the most-recently-focused field (tracked on input/change/focusin) when focus has moved off a text field within the last 15 s — without this fallback, clicking Save left focus on the button, the edit was misclassified as a stale autosave, and the genuine edit was overwritten with the seeded approved value.
+- **Config Card Type (`Configure MemorAID`)**: The MemorAID settings card is created with its own dedicated card type `"MemorAID"` (constant `MEMORAID_CONFIG_TYPE`) so it files under its own category in AID and the panel instead of the generic `custom` group. Legacy cards created as `custom` are lazily migrated on adventure load (`getState`) by `migrateConfigCardType()`: it pushes the type change back to AID via `UseAutoSaveStoryCard` and updates the local copy only on success — best-effort and idempotent (a not-ready/failed push is retried on the next load; `getState` is never blocked).
 - **Real-Time UI DOM Synchronization**: To eliminate lag in the card editor UI when new thoughts or descriptions (Notes) are generated or approved, `injected.ts` features `updateOpenEditorDom`. This helper queries the DOM for open textareas (filtering out the main game input), sets their value directly, and dispatches a React-compatible input event to update React component states immediately.
 ### B. Plot Essentials (PE) Updates
 - **Trigger**: Manual click on "Update Plot Essentials" or automatic background triggers.
@@ -326,12 +353,13 @@ C:\Users\x509x\Documents\Claude\
 
 ### D. Scene Exit & Active Character Auto-Updates
 - **Trigger**: Automatic background trigger in `checkLookbackAutoUpdates` after gameplay actions update.
-- **Scene Exit Detection**: Invokes `determineFellOutCards(lookbackSize, allActions, newActionsCount, cards)`. It looks back at the last `N` actions (defined by `settings.analyzeWindow`, default 20) and compares presence. If a character's name/trigger keys were present in the previous lookback window but disappear in the current window (indicating **they exited the active scene**), the script automatically triggers a card update proposal in the background.
+- **Scene Exit Detection**: Invokes `determineFellOutCards(lookbackSize, allActions, newActionsCount, cards)`. It looks back at the last `N` actions (defined by `settings.analyzeWindow`, default 20) and compares presence. If a card's name/trigger keys were present in the previous lookback window but disappear in the current window (indicating **it exited the active scene**), the script automatically triggers a card update proposal in the background. The active set is `type === "character"` OR `type === "custom"`, excluding any `… (Memory)` thought card — so user-defined custom categories are auto-tracked alongside characters, while MemorAID's own machinery cards are not.
 - **Active Character Updates**: Checks characters that are active in the current lookback window. If they have stayed active for $N$ turns (lookback size, default 20) since their last update action count, the script automatically triggers an update.
 - **Baseline Action-Count Stamping**: `seedBaselines` stamps each card's initial "applied" baseline version at the **current action count** (`totalActions`), NOT 0. A baseline means "captured as of now," so the card is only due after `analyzeWindow` more turns of sustained presence. (Bug history: stamping `actionCount: 0` made every newly-seen card read `total − 0 ≥ window` → instantly "due", so a brand-new card — e.g. one AI Dungeon auto-creates when you mention a new proper noun — got a full 4-pass profile generated the moment it synced in, even for a one-off mention. The current action count is the value `seedBaselines` already computes.)
 - **Action**: Runs `runGenerateCard(shortId, card.id)` in the background to create a pending card update proposal (avoiding duplicate triggers if a proposal is already pending).
 - **Ungated Decision Logging**: Every turn check `console.info`s one summary line — `[AID bg] Lookback check @ N actions (window W): fellOut=[...] "Name": DUE / active, not due (N - last < W) / not in window` — plus info on pending-proposal skips and proposal creation, and `console.warn` when `runGenerateCard` returns an error. NOTE: the due-predicate maxes `actionCount` over ALL version statuses (applied AND pending/rejected), so a rejected or stuck-pending test proposal suppresses the next auto-update for another `analyzeWindow` turns — read the summary line before assuming the trigger is broken.
 - **Rename-Proof Version Tracking**: Versions are keyed by `characterName`, which breaks when a card is renamed in AID (history orphans under the old title as a "ghost" roster entry, and the renamed card's due-predicate resets to 0 → it re-triggers every turn). Mitigations: (1) `runGenerateCard` stamps `cardId`/`cardType` on every new version; (2) `seedBaselines` migrates `characterName` to the card's CURRENT title for any version whose `cardId` points at a live card with a different title (deleted cards keep their historical name for the Archived view); (3) the due-predicate and pending-check match versions by `cardId` first, name as legacy fallback.
+- **Same-Name Cards Across Categories**: `seedBaselines` keys baseline de-duplication by `cardId` (authoritative), NOT by bare name — so two cards that share a name in different categories (e.g. a Character "Adrian" and a custom "Plan" card "Adrian") each get their own independent baseline version and panel entry instead of one collapsing into the other. Cardless Plot Essentials blocks still collapse by name so a person tracked as both a Plot block and a Story Card is not double-seeded.
 - **In-Flight Guard**: Multi-pass generation takes tens of seconds while debounced turn checks keep firing; `autoUpdateInFlight` (`${shortId}:${cardId}`) prevents concurrent duplicate generations for the same card, and the pending-proposal check re-reads `getVersions` fresh immediately before generating (the function-top snapshot may predate a proposal created moments earlier).
 
 ### E. Character Card Profile Generation (Multi-Pass vs. Single-Pass)
@@ -442,6 +470,15 @@ C:\Users\x509x\Documents\Claude\
 
 > [!NOTE]
 > **Intentionally NOT implemented — do not "restore":** bulk refiners for Story Cards (the old "⟳ Update Cards" bulk update) and for native Memory Bank (the old "⚡ Regenerate All (Oldest ➔ Newest)"). Their backends were deliberately removed; the dead panel buttons/plumbing were cleaned up on 2026-06-11. Single-target operations (per-card ⚡ Generate, per-memory regenerate, "⚡ Regenerate Latest") remain supported.
+
+---
+
+### M. Full Database Backup & Restore (Self-Heal)
+- **Purpose**: A signed Firefox XPI and a local/test build have **different `moz-extension://` UUIDs**, and IndexedDB is partitioned by origin — so swapping one for the other (or any reinstall that changes the UUID) presents as a totally empty database. Backup/restore lets the user carry their full local state (incl. settings and API keys) across that boundary.
+- **Backup (`repo.exportAll` ← `exportAll` msg)**: Serializes every store (`adventures`, `actions`, `operations`, `cards`, `versions`, `settings`, `globalAssets`) into `{ __aidBackup: true, dbVersion: 4, exportedAt, stores }`. The panel's **Settings → "Full Database Backup & Restore" → "Back Up Database"** triggers it and downloads `aid-story-helper-backup-<date>.json`. **API keys are stripped from the `settings` singleton** before export, so the backup file carries no secrets and is safe to store/share; all other settings are preserved.
+- **Restore (`repo.importAll` ← `importAll` msg)**: Validates the `__aidBackup` envelope, then `put`s every row into its store. It **upserts by key — it merges into, never wipes, existing data** (a malformed row is skipped, not fatal). The `settings` singleton is merged so **API keys already on the device are never clobbered** (device keys win; a legacy backup's keys are used only if the device has none). Returns per-store `counts`.
+- **Self-Heal Banner (state-driven)**: An "empty database detected — restore a backup?" banner with Restore + Dismiss buttons. Its visibility is computed every `render()` from `isLocalDbEmpty(state)` (`shared/types.ts`) — shown ONLY when the DB is genuinely empty (no adventures, no current actions, no cards) and not dismissed this session. This deliberately replaced an earlier one-shot `isDbEmpty` probe fired on content-script load, which raced auto-backfill and stuck the banner on populated adventures (it showed even with 203 actions, because the surgical `updateActionCount` never touched it). Driving it from the authoritative `getState` snapshot means it self-hides the moment backfill repopulates the adventure. Dismiss sets a session-scoped flag (`selfHealDismissed`) so a later empty render won't resurface it. The same Backup/Restore controls also live permanently in Settings → General. (The `isDbEmpty` repo method / message remain as a utility but no longer gate the banner.)
+- **Direct Card-Entry Editing (`saveCardValue`)**: The panel can edit a Story Card's `value` (entry text) in place; `onSaveCardValue(cardId, value)` → `saveCardValue` msg → background replays `UseAutoSaveStoryCard` and broadcasts `approvedCardSync` so an open AID card editor stays in sync.
 
 ---
 

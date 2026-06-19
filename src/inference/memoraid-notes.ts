@@ -71,3 +71,49 @@ export function thoughtsSince(log: ThoughtLogEntry[], sinceTurn: number, maxChar
   }
   return parts.join("\n\n");
 }
+
+/** Strip a stored "[Name's Thoughts:\n … \n]" wrapper, returning the bare inner thought text. */
+function extractThoughtInner(text: string): string {
+  let inner = (text || "").trim();
+  inner = inner.replace(/^\[?\s*[^\n\]]*\bThoughts:\s*/i, ""); // drop a leading "[Name's Thoughts:" header
+  inner = inner.replace(/^[\s[]+/, "").replace(/[\s\]]+$/, "").trim(); // drop remaining wrapping brackets
+  return inner;
+}
+
+/**
+ * Render the newest `n` COMPLETE thoughts under a single label. Input `log` is newest-first.
+ * Only whole thoughts that fit within `maxChars` are kept (oldest dropped first; a thought is
+ * never split). Returns "" when n <= 0, the log is empty, or not even one thought fits.
+ */
+function renderThoughtBlock(
+  log: ThoughtLogEntry[],
+  n: number,
+  label: string,
+  order: "newest-first" | "oldest-first",
+  maxChars: number
+): string {
+  if (!Array.isArray(log) || n <= 0) return "";
+  let selected = log.slice(0, n); // newest-first
+  while (selected.length > 0) {
+    const inners = selected.map((e) => extractThoughtInner(e.text)).filter((s) => s.length > 0);
+    if (inners.length === 0) return "";
+    const ordered = order === "oldest-first" ? [...inners].reverse() : inners;
+    // All thoughts are wrapped inside a single set of braces, so it is chronologically grouped
+    // as a single content block for AID's model, representing the window newest-to-oldest or oldest-to-newest.
+    const body = ordered.join("\n");
+    const full = `[${label}\n{${body}}\n]`;
+    if (full.length <= maxChars) return full;
+    selected = selected.slice(0, -1); // over budget: drop the oldest (tail of newest-first)
+  }
+  return "";
+}
+
+/** MemorAID generation context: the last N complete thoughts, OLDEST→NEWEST, thought text only. */
+export function buildThoughtContext(log: ThoughtLogEntry[], n: number, name: string, maxChars: number): string {
+  return renderThoughtBlock(log, n, `${name}'s recent thoughts (oldest to newest):`, "oldest-first", maxChars);
+}
+
+/** MemorAID card entry: the last N complete thoughts as a rolling window, NEWEST→OLDEST (position 1 = newest). */
+export function renderThoughtWindow(log: ThoughtLogEntry[], n: number, name: string, maxChars: number): string {
+  return renderThoughtBlock(log, n, `${name}'s Thoughts (newest to oldest):`, "newest-first", maxChars);
+}

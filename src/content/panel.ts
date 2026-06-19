@@ -8,6 +8,7 @@ import {
 } from "../inference/engine";
 import { DEFAULT_CARD_COMMANDS, DEFAULT_FORMATTING_MODE } from "../inference/card-command";
 import type { GlobalAsset, CardRow } from "../shared/types";
+import { isLocalDbEmpty } from "../shared/types";
 import { browser } from "./browser-helper";
 
 const TYPE_KEYS = ["character", "class", "race", "location", "faction", "custom", "memoraid"] as const;
@@ -33,6 +34,7 @@ export interface PanelState {
     formattingMode?: string;
     useMemories?: boolean;
     memoraidLookback?: number;
+    memoraidThoughtLookback?: number;
     memoraidPresenceLookback?: number;
     autoRegenerateNativeMemories?: boolean;
     interceptTimeout?: number;
@@ -41,6 +43,7 @@ export interface PanelState {
     useSinglePassGeneration?: boolean;
     memoraidBannerDismissed?: boolean;
     manualMode?: boolean;
+    logPlotEssentials?: boolean;
   } | null;
   versions: PanelStateVersion[];
   cards?: CardRow[];
@@ -71,7 +74,7 @@ export interface PanelHandle {
   showToast(text: string, isError?: boolean): void;
   onExport(cb: (type: "story" | "cards" | "pe" | "aidmemories" | "propernouns" | "all") => void): void;
   onBackfill(cb: () => void): void;
-  onSaveSettings(cb: (provider: string, apiKey: string, protagonist: string, model: string, analyzeWindow: number, showDebug: boolean, theme: string, s1: string, s2: string, s3: string, s4: string, cardCommands: Record<string, string>, useMemories: boolean, formattingMode: string, memoraidLookback: number, memoraidPresenceLookback: number, autoRegenerateNativeMemories: boolean, interceptTimeout: number, useSinglePassGeneration: boolean, locationMode: "optionA" | "optionB", enableProperNounDetection: boolean, manualMode: boolean) => void): void;
+  onSaveSettings(cb: (provider: string, apiKey: string, protagonist: string, model: string, analyzeWindow: number, showDebug: boolean, theme: string, s1: string, s2: string, s3: string, s4: string, cardCommands: Record<string, string>, useMemories: boolean, formattingMode: string, memoraidLookback: number, memoraidThoughtLookback: number, memoraidPresenceLookback: number, autoRegenerateNativeMemories: boolean, interceptTimeout: number, useSinglePassGeneration: boolean, locationMode: "optionA" | "optionB", enableProperNounDetection: boolean, manualMode: boolean, logPlotEssentials: boolean, characterCardLimit: number, thoughtCardLimit: number) => void): void;
   onDismissMemoraidBanner(cb: () => void): void;
   onThemeChange(cb: (theme: string) => void): void;
   onAnalyze(cb: () => void): void;
@@ -82,6 +85,7 @@ export interface PanelHandle {
   onCreateConfigCard(cb: () => void): void;
   onCreateStoryCard(cb: (card: { type: string; title: string; keys: string; value: string; description?: string }) => Promise<{ ok?: boolean; error?: string }>): void;
   onSaveCardKeys(cb: (cardId: string, keys: string) => Promise<{ ok?: boolean; error?: string }>): void;
+  onSaveCardValue(cb: (cardId: string, value: string) => Promise<{ ok?: boolean; error?: string }>): void;
   onRefineMemoryBlock(cb: (index: number) => void): void;
   onGrantPermissions(cb: () => void): void;
   onSetActiveLocation(cb: (cardId: string | null) => void): void;
@@ -93,7 +97,9 @@ export interface PanelHandle {
   onApplyInstruction(cb: () => void): void;
   onRefresh(cb: () => void): void;
   onProviderChange(cb: (provider: string, apiKey: string) => void): void;
-  
+  onBackupAll(cb: () => Promise<any>): void;
+  onRestoreAll(cb: (data: any) => Promise<any>): void;
+
   onSaveGlobalAsset(cb: (asset: GlobalAsset) => Promise<{ ok?: boolean; error?: string }>): void;
   onDeleteGlobalAsset(cb: (id: string) => Promise<{ ok?: boolean; error?: string }>): void;
   onImportGlobalAsset(cb: (assetId: string) => Promise<{ ok?: boolean; error?: string; message?: string }>): void;
@@ -160,6 +166,12 @@ export function mountPanel(): PanelHandle {
   let deleteGlobalAssetCb: ((id: string) => Promise<{ ok?: boolean; error?: string }>) | null = null;
   let importGlobalAssetCb: ((assetId: string) => Promise<{ ok?: boolean; error?: string; message?: string }>) | null = null;
   let providerChangeCb: ((provider: string, apiKey: string) => void) | null = null;
+  let backupAllCb: (() => Promise<any>) | null = null;
+  let restoreAllCb: ((data: any) => Promise<any>) | null = null;
+  let saveCardValueCb: ((cardId: string, value: string) => Promise<{ ok?: boolean; error?: string }>) | null = null;
+  // Session-scoped: once the user dismisses the empty-DB self-heal banner, keep it hidden for the
+  // life of this content script even if a later render still sees an empty DB.
+  let selfHealDismissed = false;
   const host = document.createElement("div");
   const savedLeft = localStorage.getItem("aid-tracker-pos-left");
   const savedTop = localStorage.getItem("aid-tracker-pos-top");
@@ -1316,6 +1328,14 @@ export function mountPanel(): PanelHandle {
         <div id="st">AID Story Helper</div>
         <button id="min-toggle">—</button>
       </div>
+      <div id="self-heal-banner" style="display:none;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:10px;margin:8px;box-sizing:border-box;">
+        <div style="font-weight:700;color:#f87171;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;">Empty Database Detected</div>
+        <div class="note" style="margin:4px 0 8px 0;font-size:11px;line-height:1.4;color:var(--text-secondary);">It looks like your local IndexedDB is empty. If you have a backup, you can restore it now.</div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <button class="db-restore-trigger" style="background:rgba(239,68,68,0.2);color:#f87171;border:1px solid rgba(239,68,68,0.4);padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px;font-weight:600;min-height:unset;width:auto;">Restore from Backup</button>
+          <button id="dismiss-self-heal-btn" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:10px;font-weight:600;padding:4px 8px;text-decoration:underline;margin:0;min-height:unset;width:auto;">Dismiss</button>
+        </div>
+      </div>
       <div id="toast">Settings saved</div>
       
       <div id="content-body" style="width:100%; flex:1; display:flex; flex-direction:column; overflow:hidden; min-height:0;">
@@ -1337,7 +1357,6 @@ export function mountPanel(): PanelHandle {
             <div id="location-banners-container" style="flex-shrink:0;"></div>
             <div id="view-tracker-scrollable">
               <div id="results"></div>
-              <div id="debug-container"></div>
             </div>
           </div>
 
@@ -1412,8 +1431,21 @@ export function mountPanel(): PanelHandle {
                 </label>
               </div>
               
-              <label>Analyze Lookback Actions</label>
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">Action Lookback Window</label>
+                <button id="info-action-lookback" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About Action Lookback Window">
+                  <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                  </svg>
+                </button>
+              </div>
               <input id="win" type="number" min="1" placeholder="20" style="margin:4px 0 4px 0;" />
+              
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">Character Card Character Limit</label>
+              </div>
+              <input id="char-card-limit" type="number" min="100" max="2000" placeholder="600" style="margin:4px 0 8px 0;" />
+
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:4px 0 10px 0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;">
                 <input id="enable-manual-mode" type="checkbox" style="width:auto;margin:0;" />
                 Enable Manual Mode - No Automatic Updates
@@ -1466,6 +1498,24 @@ export function mountPanel(): PanelHandle {
               <input id="memoraid-win" type="number" min="1" placeholder="8" style="margin:4px 0 8px 0;" />
 
               <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">MemorAID Thought Lookback (previous thoughts)</label>
+                <button id="info-memoraid-thought" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About MemorAID Thought Lookback">
+                  <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                  </svg>
+                </button>
+              </div>
+              <input id="memoraid-thought-win" type="number" min="1" placeholder="1" style="margin:4px 0 2px 0;" />
+              <div style="font-size:11px;color:var(--text-secondary);margin-bottom:8px;">
+                <i>* Braced rolling window format is used when setting is greater than 1.</i>
+              </div>
+
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">Thought Card Character Limit</label>
+              </div>
+              <input id="thought-card-limit" type="number" min="100" max="4000" placeholder="2000" style="margin:4px 0 8px 0;" />
+
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
                 <label style="margin:0;flex:1;">MemorAID Scene Presence Lookback</label>
                 <button id="info-memoraid-presence" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About MemorAID Scene Presence Lookback">
                   <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
@@ -1483,7 +1533,7 @@ export function mountPanel(): PanelHandle {
                   </svg>
                 </button>
               </div>
-              <input id="intercept-timeout" type="number" min="1" placeholder="4" style="margin:4px 0 4px 0;" />
+              <input id="intercept-timeout" type="number" min="1" placeholder="10" style="margin:4px 0 4px 0;" />
               <div id="intercept-timing-stats" style="margin:0 0 10px 0;font-size:10px;color:var(--text-secondary);line-height:1.5;letter-spacing:normal;text-transform:none;">
                 <span>Last MemorAID run: <strong id="intercept-timing-last" style="color:var(--text-primary);">–</strong></span>
                 <span style="opacity:0.5;"> &middot; </span>
@@ -1502,7 +1552,7 @@ export function mountPanel(): PanelHandle {
               </select>
               
               <label id="key-lbl">Claude API key</label>
-              <input id="key" type="password" placeholder="sk-ant-..." style="margin:4px 0 8px 0;" />
+              <input id="key" type="text" autocomplete="off" placeholder="sk-ant-..." style="-webkit-text-security: disc; margin:4px 0 8px 0;" />
               
               <label>Model</label>
               <div id="model-combo" style="position:relative;margin:4px 0 8px 0;">
@@ -1546,8 +1596,8 @@ export function mountPanel(): PanelHandle {
               <textarea id="prompt-s4" rows="5" style="margin:4px 0 8px 0;"></textarea>
 
               <div style="margin-top:12px;border-top:1px solid var(--border-color);padding-top:8px;">
-                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Per-Type Card Command Templates (AID generator)</h4>
-                <div class="note" style="margin-bottom:6px;">Replayed through AI Dungeon's native Story Card Command — its model, full story context, no extra API cost. Use <code>{{title}}</code> (required; AID resolves it) and <code>{protagonist}</code>. Custom covers any user-named type (e.g. "Song").</div>
+                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Per-Type Card Command Templates (AI Provider)</h4>
+                <div class="note" style="margin-bottom:6px;">Executed through your configured AI Provider — uses the model and settings from the AI Provider tab. Use <code>{{title}}</code> (required; replaced by card title) and <code>{protagonist}</code>. Custom covers any user-named type (e.g. "Song").</div>
 
                 <label style="margin-top:6px;">Entry Formatting</label>
                 <select id="fmt-mode" style="margin:4px 0 8px 0;">
@@ -1595,9 +1645,14 @@ export function mountPanel(): PanelHandle {
               <h4 style="margin:14px 0 4px;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Diagnostics</h4>
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:4px 0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;">
                 <input id="show-dbg" type="checkbox" style="width:auto;margin:0;" />
-                Show Raw Update Plot Essentials Log
+                Verbose debug logging (Console)
               </label>
-              <div class="note">When enabled, the raw AI request/response from the last Update Plot Essentials is shown in the main panel view (under the Card Manager).</div>
+              <div class="note">Logs detailed internal extension activity to the browser Console (developer diagnostic — noisy).</div>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:8px 0 4px;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;">
+                <input id="log-pe-console" type="checkbox" style="width:auto;margin:0;" />
+                Log Raw Update Plot Essentials to Console
+              </label>
+              <div class="note">When enabled, logs ONLY the raw AI request/response from the last Update Plot Essentials run to the browser Console (open DevTools → Console). Independent of verbose logging above.</div>
               
               <div style="margin-top:14px;">
                 <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Learned Operations</h4>
@@ -1612,6 +1667,15 @@ export function mountPanel(): PanelHandle {
                 <div class="note" style="margin-bottom:6px;">Review or delete proper nouns processed by auto-detection.</div>
                 <div id="pn-logs-list" style="max-height:150px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;background:rgba(0,0,0,0.2);border:1px solid var(--border-color);border-radius:6px;padding:6px;box-sizing:border-box;">
                   <!-- Proper noun log items -->
+                </div>
+              </div>
+              
+              <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
+                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Full Database Backup & Restore</h4>
+                <div class="note" style="margin-bottom:8px;">Back up the entire local database (settings, cards, versions, operations, histories) to a single file.</div>
+                <div style="display:flex;gap:6px;width:100%;">
+                  <button class="db-backup-trigger" style="flex:1;justify-content:center;background:rgba(16,185,129,0.08);color:#34d399;border:1px solid rgba(16,185,129,0.25);padding:6px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;">Back Up Database</button>
+                  <button class="db-restore-trigger" style="flex:1;justify-content:center;background:rgba(245,158,11,0.08);color:#fbbf24;border:1px solid rgba(245,158,11,0.25);padding:6px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;">Restore from Backup</button>
                 </div>
               </div>
             </div>
@@ -1716,6 +1780,15 @@ export function mountPanel(): PanelHandle {
                   </div>
                 </div>
               </div>
+              
+              <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
+                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Full Database Backup & Restore</h4>
+                <div class="note" style="margin-bottom:8px;">Back up the entire local database (settings, cards, versions, operations, histories) to a single file.</div>
+                <div style="display:flex;gap:6px;width:100%;">
+                  <button class="db-backup-trigger" style="flex:1;justify-content:center;background:rgba(16,185,129,0.08);color:#34d399;border:1px solid rgba(16,185,129,0.25);padding:6px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;">Back Up Database</button>
+                  <button class="db-restore-trigger" style="flex:1;justify-content:center;background:rgba(245,158,11,0.08);color:#fbbf24;border:1px solid rgba(245,158,11,0.25);padding:6px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;">Restore from Backup</button>
+                </div>
+              </div>
             </div>
           </div>
           
@@ -1756,6 +1829,17 @@ export function mountPanel(): PanelHandle {
           </div>
         </div>
 
+        <!-- OVERLAY: ACTION LOOKBACK HELP -->
+        <div id="overlay-action-lookback" class="overlay">
+          <div class="overlay-header">
+            <div class="overlay-title">Action Lookback Window</div>
+            <button class="overlay-close" type="button" data-close="overlay-action-lookback">×</button>
+          </div>
+          <div class="overlay-content">
+            <p>This setting controls the number of recent gameplay actions and the resulting text from AI Dungeon sent to your third-party provider for story card updates.</p>
+          </div>
+        </div>
+
         <!-- OVERLAY: MEMORAID LOOKBACK HELP -->
         <div id="overlay-memoraid-lookback" class="overlay">
           <div class="overlay-header">
@@ -1765,6 +1849,18 @@ export function mountPanel(): PanelHandle {
           <div class="overlay-content">
             <p>This setting controls how many actions (turns) of recent gameplay context the extension retrieves to use as additional context for the NPC's Thought Card generation.</p>
             <p><strong>How it works:</strong><br/>When generating a MemorAID thought card (sensory Intake → internal Thought → next Action), the extension looks back at this number of turns of active history to build the narrative generation context. Adjusting this allows for more detailed context reflection but consumes more text from the history budget.</p>
+          </div>
+        </div>
+
+        <!-- OVERLAY: MEMORAID THOUGHT HELP -->
+        <div id="overlay-memoraid-thought" class="overlay">
+          <div class="overlay-header">
+            <div class="overlay-title">MemorAID Thought Lookback</div>
+            <button class="overlay-close" type="button" data-close="overlay-memoraid-thought">×</button>
+          </div>
+          <div class="overlay-content">
+            <p>This setting controls how many prior thoughts generated by MemorAID are kept in the card value and fed back to the AI provider as rolling context.</p>
+            <p>This controls the rolling thought window size. Up to N of the most recent thoughts will be kept in the memory card value and fed back as context (default = 1, keeping only the newest thought).</p>
           </div>
         </div>
 
@@ -1896,8 +1992,10 @@ export function mountPanel(): PanelHandle {
   const $ = (id: string) => root.getElementById(id) as HTMLElement;
   const st = $("st"), results = $("results");
   const keyEl = $("key") as HTMLInputElement, protEl = $("prot") as HTMLInputElement, modelEl = $("model") as HTMLSelectElement, winEl = $("win") as HTMLInputElement;
-  const memoraidWinEl = $("memoraid-win") as HTMLInputElement, memoraidPresenceWinEl = $("memoraid-presence-win") as HTMLInputElement;
+  const memoraidWinEl = $("memoraid-win") as HTMLInputElement, memoraidThoughtWinEl = $("memoraid-thought-win") as HTMLInputElement, memoraidPresenceWinEl = $("memoraid-presence-win") as HTMLInputElement;
   const interceptTimeoutEl = $("intercept-timeout") as HTMLInputElement;
+  const charCardLimitEl = $("char-card-limit") as HTMLInputElement;
+  const thoughtCardLimitEl = $("thought-card-limit") as HTMLInputElement;
   const provEl = $("prov") as HTMLSelectElement, keyLblEl = $("key-lbl") as HTMLLabelElement;
   const themeEl = $("theme") as HTMLSelectElement;
 
@@ -3274,6 +3372,10 @@ export function mountPanel(): PanelHandle {
     }
   });
   
+  $("info-action-lookback").addEventListener("click", (e) => {
+    e.stopPropagation();
+    $("overlay-action-lookback").style.display = "flex";
+  });
   $("info-memories").addEventListener("click", (e) => {
     e.stopPropagation();
     $("overlay-memories").style.display = "flex";
@@ -3281,6 +3383,10 @@ export function mountPanel(): PanelHandle {
   $("info-memoraid-lookback").addEventListener("click", (e) => {
     e.stopPropagation();
     $("overlay-memoraid-lookback").style.display = "flex";
+  });
+  $("info-memoraid-thought").addEventListener("click", (e) => {
+    e.stopPropagation();
+    $("overlay-memoraid-thought").style.display = "flex";
   });
   $("info-memoraid-presence").addEventListener("click", (e) => {
     e.stopPropagation();
@@ -3293,6 +3399,62 @@ export function mountPanel(): PanelHandle {
   $("info-help").addEventListener("click", (e) => {
     e.stopPropagation();
     $("overlay-help").style.display = "flex";
+  });
+
+  root.addEventListener("click", async (e) => {
+    const target = e.target as HTMLElement;
+    if (target.classList.contains("db-backup-trigger")) {
+      e.stopPropagation();
+      if (!backupAllCb) return;
+      try {
+        const res = await backupAllCb();
+        if (res && res.ok && res.data) {
+          const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `aid-story-helper-backup-${new Date().toISOString().slice(0, 10)}.json`;
+          a.click();
+          URL.revokeObjectURL(url);
+          showToast("Database backup downloaded successfully!");
+        } else {
+          showToast(res?.error || "Failed to generate backup", true);
+        }
+      } catch (err: any) {
+        showToast(err?.message || String(err), true);
+      }
+    }
+    
+    if (target.closest(".db-restore-trigger")) {
+      e.stopPropagation();
+      if (!restoreAllCb) return;
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".json";
+      input.addEventListener("change", async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = async () => {
+          try {
+            const data = JSON.parse(reader.result as string);
+            const res = await restoreAllCb?.(data);
+            if (res && res.ok) {
+              showToast("Database restored successfully!");
+              const selfHeal = root.getElementById("self-heal-banner");
+              if (selfHeal) selfHeal.style.display = "none";
+              triggerRefresh();
+            } else {
+              showToast(res?.error || "Failed to restore backup", true);
+            }
+          } catch (err: any) {
+            showToast("Invalid backup file: " + (err?.message || String(err)), true);
+          }
+        };
+        reader.readAsText(file);
+      });
+      input.click();
+    }
   });
   let syncKeys = true;
   const acTitleInput = root.getElementById("ac-title") as HTMLInputElement;
@@ -3532,7 +3694,6 @@ export function mountPanel(): PanelHandle {
   let dismissMemoraidBannerCb: (() => void) | null = null;
   let createStoryCardCb: ((card: { type: string; title: string; keys: string; value: string; description?: string }) => Promise<{ ok?: boolean; error?: string }>) | null = null;
   let saveCardKeysCb: ((cardId: string, keys: string) => Promise<{ ok?: boolean; error?: string }>) | null = null;
-  let lastDebug: any = null;
   results.addEventListener("click", (e) => {
     const target = e.target as HTMLElement;
     const createConfig = target.closest("#create-memoraid-config-btn");
@@ -3546,6 +3707,13 @@ export function mountPanel(): PanelHandle {
     if (dismissBanner && dismissMemoraidBannerCb) {
       (dismissBanner as HTMLButtonElement).disabled = true;
       dismissMemoraidBannerCb();
+      return;
+    }
+    const dismissSelfHeal = target.closest("#dismiss-self-heal-btn");
+    if (dismissSelfHeal) {
+      selfHealDismissed = true;
+      const banner = root.getElementById("self-heal-banner");
+      if (banner) banner.style.display = "none";
       return;
     }
     const an = target.closest("#an");
@@ -3586,6 +3754,32 @@ export function mountPanel(): PanelHandle {
             showToast(res.error, true);
           } else {
             showToast("Triggers updated successfully!");
+          }
+        }).catch((err: any) => {
+          showToast(err?.message || String(err), true);
+        }).finally(() => {
+          btn.disabled = false;
+          btn.textContent = "✓";
+        });
+      }
+      return;
+    }
+    const entrySubmit = target.closest(".entry-submit-btn");
+    if (entrySubmit && saveCardValueCb) {
+      const cardId = entrySubmit.getAttribute("data-card-id");
+      if (cardId) {
+        const inputEl = results.querySelector(`.entry-input[data-card-id="${cardId}"]`) as HTMLTextAreaElement | null;
+        const newValue = inputEl?.value.trim() || "";
+
+        const btn = entrySubmit as HTMLButtonElement;
+        btn.disabled = true;
+        btn.textContent = "⏳";
+
+        saveCardValueCb(cardId, newValue).then((res) => {
+          if (res?.error) {
+            showToast(res.error, true);
+          } else {
+            showToast("Entry updated successfully!");
           }
         }).catch((err: any) => {
           showToast(err?.message || String(err), true);
@@ -3861,6 +4055,7 @@ export function mountPanel(): PanelHandle {
     onSaveSettings: (cb) => ($("save")).addEventListener("click", () => {
       const n = parseInt(winEl.value, 10);
       const showDbg = (root.getElementById("show-dbg") as HTMLInputElement).checked;
+      const logPE = (root.getElementById("log-pe-console") as HTMLInputElement).checked;
       const useMems = (root.getElementById("use-memories") as HTMLInputElement).checked;
       const autoRegenMems = (root.getElementById("auto-regen-memories") as HTMLInputElement).checked;
       const cardCommands: Record<string, string> = {};
@@ -3871,14 +4066,20 @@ export function mountPanel(): PanelHandle {
       }
       const fmtMode = (root.getElementById("fmt-mode") as HTMLSelectElement | null)?.value || DEFAULT_FORMATTING_MODE;
       const ml = parseInt(memoraidWinEl.value, 10);
+      const mtl = parseInt(memoraidThoughtWinEl.value, 10);
       const mpl = parseInt(memoraidPresenceWinEl.value, 10);
       const to = parseInt(interceptTimeoutEl.value, 10);
       const memoraidLookback = Number.isFinite(ml) && ml > 0 ? ml : 8;
+      const memoraidThoughtLookback = Number.isFinite(mtl) && mtl >= 1 ? mtl : 1;
       const memoraidPresenceLookback = Number.isFinite(mpl) && mpl > 0 ? mpl : 5;
-      const interceptTimeout = Number.isFinite(to) && to > 0 ? to : 4;
+      const interceptTimeout = Number.isFinite(to) && to > 0 ? to : 10;
       const locMode = (root.getElementById("location-mode") as HTMLSelectElement).value;
       const properNounDetect = (root.getElementById("enable-proper-noun-detection") as HTMLInputElement).checked;
       const manualMode = (root.getElementById("enable-manual-mode") as HTMLInputElement).checked;
+      const ccl = parseInt(charCardLimitEl.value, 10);
+      const tcl = parseInt(thoughtCardLimitEl.value, 10);
+      const characterCardLimit = Number.isFinite(ccl) && ccl >= 100 ? ccl : 600;
+      const thoughtCardLimit = Number.isFinite(tcl) && tcl >= 100 ? tcl : 2000;
       cb(
         provEl.value,
         keyEl.value.trim(),
@@ -3895,13 +4096,17 @@ export function mountPanel(): PanelHandle {
         useMems,
         fmtMode,
         memoraidLookback,
+        memoraidThoughtLookback,
         memoraidPresenceLookback,
         autoRegenMems,
         interceptTimeout,
         lastState?.settings?.useSinglePassGeneration ?? false,
         locMode as any,
         properNounDetect,
-        manualMode
+        manualMode,
+        logPE,
+        characterCardLimit,
+        thoughtCardLimit
       );
       showTrackerView();
     }),
@@ -3929,6 +4134,9 @@ export function mountPanel(): PanelHandle {
     onRefresh: (cb) => { refreshCb = cb; },
     onProviderChange: (cb) => { providerChangeCb = cb; },
     onDismissMemoraidBanner: (cb) => { dismissMemoraidBannerCb = cb; },
+    onBackupAll: (cb) => { backupAllCb = cb; },
+    onRestoreAll: (cb) => { restoreAllCb = cb; },
+    onSaveCardValue: (cb) => { saveCardValueCb = cb; },
     updateActionCount: (count, lastAnalysisAction) => {
       // Keep lastState coherent so later full renders / handlers see the fresh counts.
       if (lastState) {
@@ -3964,20 +4172,22 @@ export function mountPanel(): PanelHandle {
         modelSearchEl.value = modelEl.value;
         modelSearchEl.placeholder = opts.length ? "Search models…" : "(enter API key, then reopen settings)";
       }
+      if (modelListEl && modelListEl.style.display === "block" && modelSearchEl) {
+        renderModelList(modelSearchEl.value);
+      }
     },
     showDebug: (d) => {
-      lastDebug = d;
-      const dbgContainer = root.getElementById("debug-container");
-      if (dbgContainer) {
-        if (d) {
-          setSafeHTML(dbgContainer, `<details open style="margin-top:8px;border-top:1px solid #333;padding-top:4px;"><summary style="cursor:pointer;color:#8a8;">🔍 Analyze debug</summary>` +
-            `<div class="note">characters: ${esc((d.characters || []).join(", "))}</div>` +
-            `<div class="note">narrative chars: ${esc(String(d.narrativeChars))}</div>` +
-            `<div class="note">narrative tail:</div><div>${esc(d.narrativeTail || "")}</div>` +
-            `<div class="note">raw response (truncated):</div><div>${esc(d.rawSnippet || "")}</div></details>`);
-        } else {
-          dbgContainer.textContent = "";
-        }
+      // Diagnostics: when "Log Raw Update Plot Essentials to Console" is enabled, emit the last
+      // Update Plot Essentials raw AI request/response to the browser Console (F12). This is its
+      // OWN setting — independent of showDebug verbose logging — so it logs only this, not everything.
+      if (d && lastState?.settings?.logPlotEssentials) {
+        console.log("[AID] Update Plot Essentials — raw analyze debug:", {
+          characters: d.characters,
+          narrativeChars: d.narrativeChars,
+          narrativeTail: d.narrativeTail,
+          rawResponse: d.rawSnippet,
+          windowN: d.windowN,
+        });
       }
     },
     render: (state) => {
@@ -4067,11 +4277,21 @@ export function mountPanel(): PanelHandle {
       if (state.settings && !memoraidWinEl.value) {
         memoraidWinEl.value = String(state.settings.memoraidLookback ?? 8);
       }
+      if (state.settings && !memoraidThoughtWinEl.value) {
+        const val = state.settings.memoraidThoughtLookback ?? 1;
+        memoraidThoughtWinEl.value = String(val >= 1 ? val : 1);
+      }
       if (state.settings && !memoraidPresenceWinEl.value) {
         memoraidPresenceWinEl.value = String(state.settings.memoraidPresenceLookback ?? 5);
       }
       if (state.settings && !interceptTimeoutEl.value) {
-        interceptTimeoutEl.value = String(state.settings.interceptTimeout ?? 4);
+        interceptTimeoutEl.value = String(state.settings.interceptTimeout ?? 10);
+      }
+      if (state.settings && !charCardLimitEl.value) {
+        charCardLimitEl.value = String(state.settings.characterCardLimit ?? 600);
+      }
+      if (state.settings && !thoughtCardLimitEl.value) {
+        thoughtCardLimitEl.value = String(state.settings.thoughtCardLimit ?? 2000);
       }
       applyMemoraidTiming(state.memoraidTiming);
       const locModeEl = root.getElementById("location-mode") as HTMLSelectElement;
@@ -4105,6 +4325,10 @@ export function mountPanel(): PanelHandle {
       if (showDbgEl && state.settings) {
         showDbgEl.checked = !!state.settings.showDebug;
       }
+      const logPeEl = root.getElementById("log-pe-console") as HTMLInputElement;
+      if (logPeEl && state.settings) {
+        logPeEl.checked = !!state.settings.logPlotEssentials;
+      }
       const useMemsEl = root.getElementById("use-memories") as HTMLInputElement;
       if (useMemsEl && state.settings) {
         useMemsEl.checked = !!state.settings.useMemories;
@@ -4134,6 +4358,15 @@ export function mountPanel(): PanelHandle {
       const statLastAuto = root.getElementById("stat-last-auto");
 
       const curAction = state.actionCount ?? state.actionsCount ?? 0;
+
+      // Self-heal banner is purely state-driven: show ONLY when the local DB is genuinely empty
+      // (and not dismissed). This corrects the false positive where the initial empty-DB probe
+      // raced auto-backfill — once the adventure repopulates, isLocalDbEmpty(state) is false and
+      // the banner hides itself on the next render.
+      const selfHealBanner = root.getElementById("self-heal-banner");
+      if (selfHealBanner) {
+        selfHealBanner.style.display = isLocalDbEmpty(state) && !selfHealDismissed ? "block" : "none";
+      }
 
       if (statTurn) statTurn.textContent = String(curAction);
       if (statLastAuto) {
@@ -4420,6 +4653,16 @@ export function mountPanel(): PanelHandle {
                 `<div style="display:flex;gap:6px;align-items:center;">` +
                   `<input class="triggers-input" data-card-id="${esc(genCardId)}" type="text" value="${esc(currentTriggers)}" style="margin:0;flex:1;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:5px 8px;border-radius:6px;font-size:11px;font-family:inherit;box-sizing:border-box;" />` +
                   `<button class="triggers-submit-btn" data-card-id="${esc(genCardId)}" style="margin:0;padding:5px 8px;background:rgba(16, 185, 129, 0.15);color:#10b981;border-color:rgba(16, 185, 129, 0.3);border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;width:24px;height:24px;" title="Save Triggers">✓</button>` +
+                `</div>` +
+              `</div>`;
+
+              // Manual entry editor — pushes via the extension's own GraphQL replay (bypasses
+              // page interception), so it never depends on AID's GUI card-editor DOM.
+              out += `<div class="entry-section" style="margin-top:10px;margin-bottom:10px;padding:8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:8px;">` +
+                `<label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;display:block;margin-bottom:4px;">Entry</label>` +
+                `<div style="display:flex;gap:6px;align-items:flex-start;">` +
+                  `<textarea class="entry-input" data-card-id="${esc(genCardId)}" rows="5" style="margin:0;flex:1;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:5px 8px;border-radius:6px;font-size:11px;font-family:SFMono-Regular,Consolas,monospace;box-sizing:border-box;resize:vertical;">${esc(card?.value || "")}</textarea>` +
+                  `<button class="entry-submit-btn" data-card-id="${esc(genCardId)}" style="margin:0;padding:5px 8px;background:rgba(16, 185, 129, 0.15);color:#10b981;border-color:rgba(16, 185, 129, 0.3);border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;width:24px;height:24px;" title="Save Entry">✓</button>` +
                 `</div>` +
               `</div>`;
             }
@@ -4758,20 +5001,6 @@ export function mountPanel(): PanelHandle {
             clearProperNounLogsCb();
           }
         });
-      }
-
-      const dbgContainer = root.getElementById("debug-container");
-      if (dbgContainer) {
-        dbgContainer.style.display = state.settings?.showDebug ? "block" : "none";
-        if (state.settings?.showDebug && lastDebug) {
-          setSafeHTML(dbgContainer, `<details open style="margin-top:8px;border-top:1px solid #333;padding-top:4px;"><summary style="cursor:pointer;color:#8a8;">🔍 Analyze debug</summary>` +
-            `<div class="note">characters: ${esc((lastDebug.characters || []).join(", "))}</div>` +
-            `<div class="note">narrative chars: ${esc(String(lastDebug.narrativeChars))}</div>` +
-            `<div class="note">narrative tail:</div><div>${esc(lastDebug.narrativeTail || "")}</div>` +
-            `<div class="note">raw response (truncated):</div><div>${esc(lastDebug.rawSnippet || "")}</div></details>`);
-        } else if (!state.settings?.showDebug) {
-          dbgContainer.textContent = "";
-        }
       }
 
       // Render AID memories timeline + unread badge (extracted; shared with updateMemories())

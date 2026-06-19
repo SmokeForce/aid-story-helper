@@ -74,7 +74,8 @@ export class OllamaProvider implements Provider {
       format: "json",
       stream: false,
       options: {
-        temperature: 0.1
+        temperature: 0.1,
+        num_predict: 2048
       }
     };
 
@@ -119,7 +120,8 @@ export class OllamaProvider implements Provider {
       ],
       stream: false,
       options: {
-        temperature: 0.1
+        temperature: 0.1,
+        num_predict: 2048
       }
     };
 

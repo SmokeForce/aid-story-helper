@@ -46,6 +46,10 @@ export type BgMessage =
   | { kind: "saveGlobalAsset"; asset: GlobalAsset }
   | { kind: "deleteGlobalAsset"; id: string }
   | { kind: "importGlobalAsset"; shortId: string; assetId: string }
+  | { kind: "saveCardValue"; shortId: string; cardId: string; value: string }
+  | { kind: "exportAll" }
+  | { kind: "importAll"; data: any }
+  | { kind: "isDbEmpty" }
   | { kind: "hideAdventure"; shortId: string }
   | { kind: "deleteAdventure"; shortId: string }
   | { kind: "unhideAdventure"; shortId: string }

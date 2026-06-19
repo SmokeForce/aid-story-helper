@@ -4663,14 +4663,14 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
   var activeShortId = null;
   var autoBackfillsInFlight = /* @__PURE__ */ new Set();
   function checkIsPlayUrl() {
-    return location.pathname === "/play" || location.pathname.endsWith("/play") || location.pathname.startsWith("/play/") || location.pathname.startsWith("/adventure/") || location.pathname.startsWith("/scenario/");
+    return location.pathname === "/play" || location.pathname.endsWith("/play") || location.pathname.startsWith("/play/") || location.pathname.startsWith("/adventure/");
   }
   function currentShortId() {
     const isPlayUrl = checkIsPlayUrl();
-    const m = location.pathname.match(/\/play\/([^/]+)/) || location.pathname.match(/\/adventure\/([^/]+)/) || location.pathname.match(/\/scenario\/([^/]+)/);
+    const m = location.pathname.match(/\/play\/([^/]+)/) || location.pathname.match(/\/adventure\/([^/]+)/);
     if (m) return m[1];
     const params = new URLSearchParams(location.search);
-    const qId = params.get("adventureId") || params.get("adventure") || params.get("scenarioId") || params.get("scenario") || params.get("id");
+    const qId = params.get("adventureId") || params.get("adventure") || params.get("id");
     if (qId) return qId;
     if (isPlayUrl) {
       return activeShortId;
@@ -4884,7 +4884,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
         }
         const hasAdventure = state && Array.isArray(state.adventures) && state.adventures.some((a) => a.shortId === shortId);
         const isSkeleton = hasAdventure && (!state.actionCount || state.actionCount === 0);
-        if ((!hasAdventure || isSkeleton) && !autoBackfillsInFlight.has(shortId)) {
+        if ((!hasAdventure || isSkeleton) && !autoBackfillsInFlight.has(shortId) && checkIsPlayUrl()) {
           autoBackfillsInFlight.add(shortId);
           console.log(`[AID content] Auto-triggering backfill for new/skeleton adventure: ${shortId}`);
           browser.runtime.sendMessage({ kind: "backfillRequest", shortId }).then((res) => {

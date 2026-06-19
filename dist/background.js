@@ -20071,6 +20071,7 @@ HARD RULES (weaker models break these \u2014 do not):
   }
 
   // src/storage/repo.ts
+  var BACKUP_STORES = ["adventures", "actions", "operations", "cards", "versions", "settings", "globalAssets"];
   function byCreatedAt(a2, b) {
     const ta = a2.createdAt ?? "", tb = b.createdAt ?? "";
     if (ta !== tb) return ta < tb ? -1 : 1;
@@ -20346,6 +20347,53 @@ Notable Items: specific permanent contents. You must preserve the literal names 
       const db = await openAidDb();
       await db.put("settings", { ...s3, _k: "singleton" });
     }
+    /** True when there are no adventures (a freshly-installed / origin-swapped empty DB). */
+    async isDbEmpty() {
+      const db = await openAidDb();
+      return await db.count("adventures").catch(() => 0) === 0;
+    }
+    /** Full backup of every store — survives the moz-extension UUID change that wipes IndexedDB
+     *  when the signed XPI is swapped for a test build. API keys are deliberately STRIPPED from the
+     *  settings singleton so the backup file is safe to store/share; the user keeps their existing
+     *  keys (see importAll) or re-enters them. All other settings are preserved. */
+    async exportAll() {
+      const db = await openAidDb();
+      const stores = {};
+      for (const s3 of BACKUP_STORES) {
+        const rows = await db.getAll(s3).catch(() => []);
+        stores[s3] = s3 === "settings" ? rows.map(({ apiKeys, ...rest }) => rest) : rows;
+      }
+      return { __aidBackup: true, dbVersion: 4, exportedAt: (/* @__PURE__ */ new Date()).toISOString(), stores };
+    }
+    /** Restore a backup produced by exportAll. Upserts by key (merges into, never wipes, existing data).
+     *  The settings singleton is merged so the device's existing API keys are NEVER clobbered: keys
+     *  already on this device win; otherwise any keys present in the backup (legacy backups) are kept. */
+    async importAll(data) {
+      if (!data || data.__aidBackup !== true || !data.stores || typeof data.stores !== "object") {
+        return { error: "Not a valid AID Story Helper backup file." };
+      }
+      const db = await openAidDb();
+      const counts = {};
+      const hasKeys = (o2) => o2?.apiKeys && Object.keys(o2.apiKeys).length > 0;
+      for (const s3 of BACKUP_STORES) {
+        const rows = data.stores[s3];
+        if (!Array.isArray(rows) || rows.length === 0) continue;
+        const existingSettings = s3 === "settings" ? await db.get("settings", "singleton").catch(() => null) : null;
+        const tx = db.transaction(s3, "readwrite");
+        let n3 = 0;
+        for (const row of rows) {
+          const toPut = s3 === "settings" ? { ...row, apiKeys: hasKeys(existingSettings) ? existingSettings.apiKeys : row.apiKeys ?? {} } : row;
+          try {
+            await tx.store.put(toPut);
+            n3++;
+          } catch {
+          }
+        }
+        await tx.done;
+        counts[s3] = n3;
+      }
+      return { ok: true, counts };
+    }
     async getGlobalAssets() {
       const db = await openAidDb();
       return db.getAll("globalAssets");
@@ -20505,22 +20553,40 @@ Notable Items: specific permanent contents. You must preserve the literal names 
     return actions.slice(-n3);
   }
   function isCharacterTriggered(text, title, keys) {
-    const cleanTitle = stripPossessive(title.trim().toLowerCase());
-    const keysList = keys.split(/[,;]+/).map((k2) => stripPossessive(k2.trim().toLowerCase())).filter(Boolean);
     const escapeRegex = (s3) => s3.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
-    if (cleanTitle) {
-      const pattern = new RegExp(`\\b${escapeRegex(cleanTitle)}\\b`, "i");
-      if (pattern.test(text)) return true;
+    const rawCandidates = [title, ...keys.split(/[,;]+/)].map((s3) => stripPossessive(s3.trim())).filter(Boolean);
+    const candidates = [];
+    for (const c2 of rawCandidates) {
+      candidates.push(c2);
+      if (c2.includes(" and ") || c2.includes(" & ")) {
+        const parts = c2.split(/\s+(?:and|&)\s+/i);
+        for (const p5 of parts) {
+          const trimmed = p5.trim();
+          if (trimmed) candidates.push(trimmed);
+        }
+      }
     }
-    for (const key of keysList) {
-      const pattern = new RegExp(`\\b${escapeRegex(key)}\\b`, "i");
-      if (pattern.test(text)) return true;
+    const textLower = text.toLowerCase();
+    for (const cand of candidates) {
+      const r2 = new RegExp(`\\b${escapeRegex(cand.toLowerCase())}\\b`);
+      if (r2.test(textLower)) return true;
     }
     return false;
   }
   function matchedTriggers(text, title, keys) {
     const escapeRegex = (s3) => s3.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
-    const candidates = [title, ...keys.split(/[,;]+/)].map((s3) => stripPossessive(s3.trim())).filter(Boolean);
+    const rawCandidates = [title, ...keys.split(/[,;]+/)].map((s3) => stripPossessive(s3.trim())).filter(Boolean);
+    const candidates = [];
+    for (const c2 of rawCandidates) {
+      candidates.push(c2);
+      if (c2.includes(" and ") || c2.includes(" & ")) {
+        const parts = c2.split(/\s+(?:and|&)\s+/i);
+        for (const p5 of parts) {
+          const trimmed = p5.trim();
+          if (trimmed) candidates.push(trimmed);
+        }
+      }
+    }
     const out2 = [];
     const seen = /* @__PURE__ */ new Set();
     for (const cand of candidates) {
@@ -20540,7 +20606,9 @@ Notable Items: specific permanent contents. You must preserve the literal names 
     const oldActions = allActions.slice(0, -newActionsCount);
     const previousActions = sliceLastActions(oldActions, lookbackSize);
     const previousText = previousActions.map((a2) => a2.text || "").join(" ").toLowerCase();
-    const activeCharacters = cards.filter((c2) => !c2.deletedAt && c2.type.toLowerCase() === "character");
+    const activeCharacters = cards.filter(
+      (c2) => !c2.deletedAt && ((c2.type || "").toLowerCase() === "character" || (c2.type || "").toLowerCase() === "custom") && !(c2.title || "").toLowerCase().endsWith(" (memory)")
+    );
     const fellOut = [];
     for (const card of activeCharacters) {
       const name = card.title || "";
@@ -21079,7 +21147,8 @@ ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText
         format: "json",
         stream: false,
         options: {
-          temperature: 0.1
+          temperature: 0.1,
+          num_predict: 2048
         }
       };
       let res;
@@ -21115,7 +21184,8 @@ ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText
         ],
         stream: false,
         options: {
-          temperature: 0.1
+          temperature: 0.1,
+          num_predict: 2048
         }
       };
       let res;
@@ -21562,9 +21632,41 @@ ${e2.text}` : e2.text;
     }
     return parts.join("\n\n");
   }
+  function extractThoughtInner(text) {
+    let inner = (text || "").trim();
+    inner = inner.replace(/^\[?\s*[^\n\]]*\bThoughts:\s*/i, "");
+    inner = inner.replace(/^[\s[]+/, "").replace(/[\s\]]+$/, "").trim();
+    return inner;
+  }
+  function renderThoughtBlock(log3, n3, label, order, maxChars) {
+    if (!Array.isArray(log3) || n3 <= 0) return "";
+    let selected = log3.slice(0, n3);
+    while (selected.length > 0) {
+      const inners = selected.map((e2) => extractThoughtInner(e2.text)).filter((s3) => s3.length > 0);
+      if (inners.length === 0) return "";
+      const ordered = order === "oldest-first" ? [...inners].reverse() : inners;
+      const body = ordered.join("\n");
+      const full = `[${label}
+{${body}}
+]`;
+      if (full.length <= maxChars) return full;
+      selected = selected.slice(0, -1);
+    }
+    return "";
+  }
+  function buildThoughtContext(log3, n3, name, maxChars) {
+    return renderThoughtBlock(log3, n3, `${name}'s recent thoughts (oldest to newest):`, "oldest-first", maxChars);
+  }
+  function renderThoughtWindow(log3, n3, name, maxChars) {
+    return renderThoughtBlock(log3, n3, `${name}'s Thoughts (newest to oldest):`, "newest-first", maxChars);
+  }
 
   // src/background/background.ts
   var repo = new Repo();
+  try {
+    browser.storage.local?.remove?.(["aidToken", "aidEndpoint"]);
+  } catch {
+  }
   var sessionToken = null;
   var gqlEndpoint = null;
   var cachedImportantCharacters = /* @__PURE__ */ new Map();
@@ -22281,7 +22383,7 @@ ${e2.text}` : e2.text;
       gqlEndpoint = opts2.endpoint;
       patch.aidEndpoint = opts2.endpoint;
     }
-    if (sessionStore && Object.keys(patch).length) {
+    if (sessionStore && Object.keys(patch).length > 0) {
       try {
         await sessionStore.set(patch);
       } catch {
@@ -22951,6 +23053,7 @@ ${trimmed}
     if (!card) return { error: "Story Card not found locally \u2014 try Backfill." };
     const name = card.title || card.keys;
     const settings = await repo.getSettings();
+    const characterCardLimit = settings?.characterCardLimit ?? 600;
     const providerOrError = await getActiveProvider();
     if ("error" in providerOrError) return { error: providerOrError.error };
     const provider = providerOrError;
@@ -23072,7 +23175,8 @@ Do NOT repeat or output the existing Name, Appearance, Personality, Psychology, 
         const existingStr = reconstructFields(currentFields, protagonist);
         const passTemplate = pass.template.replace("{existing}", existingStr || "No existing profile.");
         const resolvedPassCommand = resolveTitleToken(resolveCommand(passTemplate, protagonist), name);
-        const system = `You are a creative writing assistant updating a character card profile for the target character "${name}". CRITICAL: Do NOT confuse the target character "${name}" with the protagonist ("${protagonist}") or other characters present in the narrative context. All fields (Appearance, Personality, Psychology, Worldview, Quirks, Voice, Goals) must describe "${name}" and only "${name}". The "Dynamic (${protagonist})" field must describe "${name}"'s relationship and attitude towards the protagonist "${protagonist}". Do not mix them up. Follow the format and instructions exactly. CRITICAL LENGTH CONSTRAINT: Keep descriptions highly concise, dense, and condensed. Limit each field value strictly to 1-2 short, focused sentences (maximum 30 words per field). Avoid verbose, flowery, or redundant phrasing.`;
+        const system = `You are a creative writing assistant updating a character card profile for the target character "${name}". CRITICAL: Do NOT confuse the target character "${name}" with the protagonist ("${protagonist}") or other characters present in the narrative context. All fields (Appearance, Personality, Psychology, Worldview, Quirks, Voice, Goals) must describe "${name}" and only "${name}". The "Dynamic (${protagonist})" field must describe "${name}"'s relationship and attitude towards the protagonist "${protagonist}". Do not mix them up. Follow the format and instructions exactly. CRITICAL LENGTH CONSTRAINT: Keep descriptions highly concise, dense, and condensed. Limit each field value strictly to 1-2 short, focused sentences (maximum 30 words per field). Avoid verbose, flowery, or redundant phrasing.
+CRITICAL: The entire generated card entry must be strictly under ${characterCardLimit} characters in length.`;
         const cachePrefix = `Narrative Context:
 ${opts2.storyInformation || "No narrative context."}
 
@@ -23120,7 +23224,8 @@ When generating or updating the "Dynamic ({protagonist}):" field, you must enfor
         finalCommand = finalCommand.replace("{existing}", card.value || "No existing profile.");
       }
       finalCommand = resolveTitleToken(finalCommand, name);
-      const system = `You are a creative writing assistant updating a card for ${name}. Follow the format and instructions exactly. CRITICAL LENGTH CONSTRAINT: Keep descriptions highly concise, dense, and condensed. Limit each field value strictly to 1-2 short, focused sentences (maximum 30 words per field). Avoid verbose, flowery, or redundant phrasing.`;
+      const system = `You are a creative writing assistant updating a card for ${name}. Follow the format and instructions exactly. CRITICAL LENGTH CONSTRAINT: Keep descriptions highly concise, dense, and condensed. Limit each field value strictly to 1-2 short, focused sentences (maximum 30 words per field). Avoid verbose, flowery, or redundant phrasing.
+CRITICAL: The entire generated card entry must be strictly under ${characterCardLimit} characters in length.`;
       const user = `Narrative Context:
 ${opts2.storyInformation || "No narrative context."}
 
@@ -23140,6 +23245,13 @@ ${val}
     }
     if (!isMemoraid) {
       entry = applyFormattingMode(entry, formattingMode);
+    }
+    if (!isMemoraid && entry.length > characterCardLimit) {
+      if (entry.startsWith("[") && entry.endsWith("]")) {
+        entry = entry.slice(0, characterCardLimit - 2).trimEnd() + "\n]";
+      } else {
+        entry = entry.slice(0, characterCardLimit);
+      }
     }
     const totalActionsCount = await repo.getActionCount(shortId);
     const id = crypto.randomUUID();
@@ -23301,18 +23413,34 @@ ${val}
     if (isPlaceholderOrGarbageResponse(text)) {
       return null;
     }
-    const found = {};
+    const loops = [];
+    let currentLoop = {};
     const re = /^[ \t]*[*\-]?[ \t]*(Intake|Thought|Action)[ \t]*:[ \t]*(.+?)[ \t]*$/gim;
     let m3;
     while ((m3 = re.exec(text)) !== null) {
       const key = m3[1][0].toUpperCase() + m3[1].slice(1).toLowerCase();
-      if (!found[key]) found[key] = m3[2].trim().replace(/^\*+\s*/, "");
+      const val = m3[2].trim().replace(/^\*+\s*/, "");
+      if (currentLoop[key] !== void 0) {
+        loops.push(currentLoop);
+        currentLoop = {};
+      }
+      currentLoop[key] = val;
+    }
+    if (Object.keys(currentLoop).length > 0) {
+      loops.push(currentLoop);
     }
     const order = ["Intake", "Thought", "Action"];
-    const parts = order.filter((k2) => found[k2]).map((k2) => `- ${k2}: ${found[k2]}`);
-    return parts.length >= 2 ? parts.join("\n") : null;
+    const formattedLoops = [];
+    for (const loop of loops) {
+      const parts = order.filter((k2) => loop[k2]).map((k2) => `- ${k2}: ${loop[k2]}`);
+      if (parts.length >= 2) {
+        formattedLoops.push(parts.join("\n"));
+      }
+    }
+    return formattedLoops.length > 0 ? formattedLoops.join("\n") : null;
   }
   async function checkMemorAIDUpdates(shortId, pendingActionText, pendingActionType, recordTiming = false) {
+    await ensureAuth();
     const updatedNames = [];
     const timingStart = Date.now();
     let didGenerate = false;
@@ -23323,6 +23451,7 @@ ${val}
       formattingMode: DEFAULT_FORMATTING_MODE,
       cardCommands: DEFAULT_CARD_COMMANDS
     };
+    const thoughtCardLimit = settings?.thoughtCardLimit ?? 2e3;
     dlog(`[MemorAID] Settings loaded:`, await repo.getSettings() ? "yes" : "no (using defaults)");
     const configCard = cards.find(
       (c2) => !c2.deletedAt && (c2.title || "").toLowerCase() === "configure memoraid"
@@ -23382,7 +23511,18 @@ ${val}
         if ((c2.title || "").toLowerCase().endsWith(" (memory)")) return false;
         const titleLower = (c2.title || "").toLowerCase();
         const keysList = (c2.keys || "").split(/[,;]+/).map((k2) => k2.trim().toLowerCase()).filter(Boolean);
-        return titleLower === impName || keysList.includes(impName);
+        if (titleLower === impName || keysList.includes(impName)) return true;
+        if (titleLower.includes(" and ") || titleLower.includes(" & ")) {
+          const parts = titleLower.split(/\s+(?:and|&)\s+/);
+          if (parts.includes(impName)) return true;
+        }
+        for (const k2 of keysList) {
+          if (k2.includes(" and ") || k2.includes(" & ")) {
+            const parts = k2.split(/\s+(?:and|&)\s+/);
+            if (parts.includes(impName)) return true;
+          }
+        }
+        return false;
       });
       const title = baseCard ? baseCard.title || "" : capitalizeWords(impName);
       const keys = baseCard ? baseCard.keys || "" : impName;
@@ -23398,14 +23538,22 @@ ${val}
         });
       }
     }
-    if (triggered.length === 0) {
+    const seenIds = /* @__PURE__ */ new Set();
+    const dedupledTriggered = [];
+    for (const item of triggered) {
+      if (!seenIds.has(item.id)) {
+        seenIds.add(item.id);
+        dedupledTriggered.push(item);
+      }
+    }
+    if (dedupledTriggered.length === 0) {
       dlog("[MemorAID] No important characters were triggered in the active scene lookback window.");
       return updatedNames;
     }
     const adv = await repo.getAdventure(shortId);
     const creationsToRun = [];
     const characterToMemCardMap = /* @__PURE__ */ new Map();
-    for (const c2 of triggered) {
+    for (const c2 of dedupledTriggered) {
       const titleVal = c2.title || "";
       const memCardTitle = `${titleVal} (Memory)`;
       const memCardKeys = c2.keys || titleVal;
@@ -23481,13 +23629,13 @@ ${val}
       turnNow += 1;
     }
     const generationResults = [];
-    if (triggered.length > 0) {
+    if (dedupledTriggered.length > 0) {
       const providerOrError = await getActiveProvider();
       if ("error" in providerOrError) {
         console.warn(`[MemorAID] Cannot generate memories: ${providerOrError.error}`);
       } else {
         const provider = providerOrError;
-        await Promise.all(triggered.map(async (c2) => {
+        await Promise.all(dedupledTriggered.map(async (c2) => {
           const targetMemCard = characterToMemCardMap.get(c2.id);
           if (!targetMemCard) return;
           let needsPruneSave = false;
@@ -23550,16 +23698,30 @@ ${val}
           const protagonist = adv?.protagonistName && adv.protagonistName.trim() || parseProtagonistName(adv?.memory) || "the player character";
           const title = c2.title || "Character";
           const titleWithKeys = c2.keys ? `${title} (also referred to as: ${c2.keys})` : title;
-          const resolvedCommand = resolveTitleToken(resolveCommand(template, protagonist), titleWithKeys);
-          const charProfile = c2.baseCard?.value ? `Character Profile for ${title}:
+          let resolvedCommand = resolveTitleToken(resolveCommand(template, protagonist), titleWithKeys);
+          if (title.toLowerCase().includes(" and ") || title.toLowerCase().includes(" & ")) {
+            const names = title.split(/\s+(?:and|&)\s+/i).map((n3) => n3.trim());
+            resolvedCommand += `
+
+[JOINT CHARACTER CARD DIRECTIVE]: Since ${title} is a joint character card representing multiple characters, you MUST generate separate, consecutive Intake-Thought-Action loops for each character individually, in this exact order: first a loop for ${names[0]}, and then a loop for ${names[1]}.
+- You must explicitly start each character's Intake line by referencing that character by name as the subject (for example: "- Intake: ${names[0]} perceives..." and "- Intake: ${names[1]} perceives...").
+- Output both loops sequentially within the single outer brackets, with each line starting with a bullet point. Do not combine their thoughts into a single loop.`;
+          }
+          const thoughtLookbackVal = settings?.memoraidThoughtLookback ?? 0;
+          const thoughtContext = thoughtLookbackVal > 0 ? buildThoughtContext(prevNotes.thoughtLog, thoughtLookbackVal, title, 3e3) : "";
+          let charProfile = c2.baseCard?.value ? `Character Profile for ${title}:
 ${stripOuterBrackets(c2.baseCard.value)}
 
 ` : "";
-          const system = `You are a creative writing assistant. Your task is to generate first-person subjective thoughts for a character based on their profile and the narrative context. Follow the instructions and formatting rules exactly.`;
+          if (thoughtContext) {
+            charProfile = thoughtContext + "\n\n" + charProfile;
+          }
+          const system = `You are a creative writing assistant. Your task is to generate first-person subjective thoughts for a character based on their profile and the narrative context. Follow the instructions and formatting rules exactly.
+CRITICAL: The generated thoughts must be strictly under ${thoughtCardLimit} characters in length.`;
           const { cachePrefix, user } = buildMemoraidPrompt({ charProfile, priorActionsText, latestActionText, presentEntities, instructions: resolvedCommand });
           try {
             didGenerate = true;
-            const rawResponse = triggered.length >= 2 ? await provider.complete(system, user, cachePrefix) : await provider.complete(system, cachePrefix + user);
+            const rawResponse = dedupledTriggered.length >= 2 ? await provider.complete(system, user, cachePrefix) : await provider.complete(system, cachePrefix + user);
             dlog(`[MemorAID] Raw provider response for ${c2.title}: ${JSON.stringify(rawResponse).slice(0, 600)}`);
             let inner = cleanLlmResponse(rawResponse);
             const lowerRaw = rawResponse.trim().toLowerCase();
@@ -23589,17 +23751,24 @@ ${stripOuterBrackets(c2.baseCard.value)}
               inner = cleanedInner;
             }
             const thoughtsHeader = `${title.trim()}'s Thoughts:`;
-            let trimmedMemory = `[${thoughtsHeader}
+            const newThoughtBlock = `[${thoughtsHeader}
 ${inner}
 ]`;
-            const ENTRY_CAP = 600;
+            const newLog = pushThought(prevNotes.thoughtLog, { turn: turnNow, text: newThoughtBlock });
+            const newDesc = buildMemoNotes({ thoughtLog: newLog });
+            const thoughtLookbackVal2 = settings?.memoraidThoughtLookback ?? 1;
+            let trimmedMemory = "";
+            if (thoughtLookbackVal2 > 1) {
+              trimmedMemory = renderThoughtWindow(newLog, thoughtLookbackVal2, title, thoughtCardLimit);
+            }
+            if (!trimmedMemory) {
+              trimmedMemory = newThoughtBlock;
+            }
+            const ENTRY_CAP = thoughtCardLimit;
             if (trimmedMemory.length > ENTRY_CAP) {
               trimmedMemory = trimmedMemory.slice(0, ENTRY_CAP - 1).trimEnd() + "]";
             }
             dlog(`[MemorAID] Successfully generated 3rd-party memories for ${c2.title}: "${trimmedMemory}"`);
-            const newDesc = buildMemoNotes({
-              thoughtLog: pushThought(prevNotes.thoughtLog, { turn: turnNow, text: trimmedMemory })
-            });
             generationResults.push({ character: c2, targetMemCard, trimmedMemory, newDesc });
           } catch (err) {
             console.error(`[MemorAID] 3rd party generation failed for ${c2.title}:`, err);
@@ -23703,6 +23872,7 @@ ${inner}
     return t3.trim();
   }
   async function regenerateMemoryBlock(shortId, index3) {
+    await ensureAuth();
     if (!sessionToken || !gqlEndpoint) {
       return { ok: false, error: "No session token yet \u2014 interact with the page once, then retry." };
     }
@@ -23851,19 +24021,33 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
               const combinedText = (sliced.map((a2) => a2.text || "").join("\n") + "\n" + (msg.text || "")).toLowerCase();
               const cards = await repo.getCards(msg.shortId) || [];
               const charactersToCheck = [];
+              const seenTitles = /* @__PURE__ */ new Set();
               for (const impName of importantNames) {
                 const baseCard = cards.find((c2) => {
                   if (c2.type.toLowerCase() !== "character") return false;
                   if (c2.deletedAt) return false;
                   if ((c2.title || "").toLowerCase().endsWith(" (memory)")) return false;
-                  const titleLower = (c2.title || "").toLowerCase();
+                  const titleLower2 = (c2.title || "").toLowerCase();
                   const keysList = (c2.keys || "").split(/[,;]+/).map((k2) => k2.trim().toLowerCase()).filter(Boolean);
-                  return titleLower === impName || keysList.includes(impName);
+                  if (titleLower2 === impName || keysList.includes(impName)) return true;
+                  if (titleLower2.includes(" and ") || titleLower2.includes(" & ")) {
+                    const parts = titleLower2.split(/\s+(?:and|&)\s+/);
+                    if (parts.includes(impName)) return true;
+                  }
+                  for (const k2 of keysList) {
+                    if (k2.includes(" and ") || k2.includes(" & ")) {
+                      const parts = k2.split(/\s+(?:and|&)\s+/);
+                      if (parts.includes(impName)) return true;
+                    }
+                  }
+                  return false;
                 });
-                if (baseCard) {
-                  charactersToCheck.push({ title: baseCard.title || "", keys: baseCard.keys || "" });
-                } else {
-                  charactersToCheck.push({ title: capitalizeWords(impName), keys: impName });
+                const title = baseCard ? baseCard.title || "" : capitalizeWords(impName);
+                const keys = baseCard ? baseCard.keys || "" : impName;
+                const titleLower = title.toLowerCase();
+                if (!seenTitles.has(titleLower)) {
+                  seenTitles.add(titleLower);
+                  charactersToCheck.push({ title, keys });
                 }
               }
               const triggered = charactersToCheck.filter(
@@ -24298,6 +24482,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
           return;
         }
         case "updateAidMemories": {
+          await ensureAuth();
           const normalized = msg.memories.map((m3) => typeof m3 === "string" ? { actionIds: [], text: m3 } : m3);
           const adv = await repo.getAdventure(msg.shortId);
           const oldMemories = adv?.aidMemories || [];
@@ -24713,18 +24898,22 @@ ${toAppend}` : toAppend;
           return runApplyToAid(msg.id);
         case "listModels": {
           const s3 = await repo.getSettings();
-          if (!s3) return { models: [] };
-          const providerName = msg.provider || s3.provider || "claude";
-          const key = msg.apiKey !== void 0 ? msg.apiKey : s3.apiKeys?.[providerName];
+          const providerName = msg.provider || s3?.provider || "claude";
+          const key = msg.apiKey !== void 0 ? msg.apiKey : s3?.apiKeys?.[providerName];
           if (!key && providerName !== "ollama") return { models: [] };
-          if (providerName === "openai") {
-            return { models: await listOpenAIModels(key || "") };
-          } else if (providerName === "gemini") {
-            return { models: await listGeminiModels(key || "") };
-          } else if (providerName === "ollama") {
-            return { models: await listOllamaModels(key || "http://localhost:11434") };
-          } else {
-            return { models: await listModels(key || "") };
+          try {
+            if (providerName === "openai") {
+              return { models: await listOpenAIModels(key || "") };
+            } else if (providerName === "gemini") {
+              return { models: await listGeminiModels(key || "") };
+            } else if (providerName === "ollama") {
+              return { models: await listOllamaModels(key || "http://localhost:11434") };
+            } else {
+              return { models: await listModels(key || "") };
+            }
+          } catch (e2) {
+            console.error(`[AID bg] listModels failed for ${providerName}:`, e2);
+            return { models: [] };
           }
         }
         case "getState": {
@@ -24863,14 +25052,17 @@ ${toAppend}` : toAppend;
               formattingMode: settings.formattingMode || DEFAULT_FORMATTING_MODE,
               useMemories: settings.useMemories,
               memoraidLookback: settings.memoraidLookback,
+              memoraidThoughtLookback: settings.memoraidThoughtLookback ?? 1,
               memoraidPresenceLookback: settings.memoraidPresenceLookback,
               autoRegenerateNativeMemories: !!settings.autoRegenerateNativeMemories,
-              interceptTimeout: settings.interceptTimeout ?? 4,
+              interceptTimeout: settings.interceptTimeout ?? 10,
               locationMode: settings.locationMode || "optionA",
               enableProperNounDetection: settings.enableProperNounDetection !== false,
               // opt-out: checked unless explicitly disabled
               manualMode: !!settings.manualMode,
-              memoraidBannerDismissed: !!settings.memoraidBannerDismissed
+              memoraidBannerDismissed: !!settings.memoraidBannerDismissed,
+              characterCardLimit: settings.characterCardLimit ?? 600,
+              thoughtCardLimit: settings.thoughtCardLimit ?? 2e3
             } : null,
             protagonist: adv?.protagonistName ?? null,
             scenario: adv?.title ?? null,
@@ -25130,6 +25322,66 @@ ${blockText}` : blockText;
                 return { ok: true, message: `Successfully applied to ${asset.type === "an" ? "Author's Note" : "Plot Essentials"}.` };
               }
             }
+          } catch (err) {
+            return { error: err?.message || String(err) };
+          }
+        }
+        case "saveCardValue": {
+          await ensureAuth();
+          if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) {
+            return { error: "No session token yet \u2014 interact with the page once, then retry." };
+          }
+          const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+          const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
+          try {
+            const cards = await repo.getCards(msg.shortId);
+            const card = cards.find((c2) => c2.id === msg.cardId);
+            if (!card) {
+              return { error: "Card not found in local database." };
+            }
+            const updatedCard = { ...card, value: msg.value };
+            const req = buildCardSave(gqlEndpoint, updateQuery, sessionToken, updatedCard, msg.value);
+            const res = await fetch2(req.url, { method: "POST", headers: req.headers, body: req.body });
+            if (!res.ok) {
+              return { error: `Save failed with HTTP ${res.status}` };
+            }
+            const json = await res.json();
+            const returnedCard = json?.[0]?.data?.updateStoryCard?.storyCard || json?.[0]?.data?.updateStoryCard;
+            const isSuccess = json?.[0]?.data?.updateStoryCard?.success || returnedCard;
+            if (!isSuccess) {
+              const msgStr = json?.[0]?.data?.updateStoryCard?.message || json?.[0]?.errors?.[0]?.message || "Mutation failed";
+              return { error: `AI Dungeon rejected save: ${msgStr}` };
+            }
+            await repo.putCards(msg.shortId, [updatedCard]);
+            broadcastToTabs({
+              kind: "approvedCardSync",
+              payload: { ok: true, source: "card", cardId: msg.cardId, value: msg.value, description: updatedCard.description || "" }
+            });
+            return { ok: true };
+          } catch (err) {
+            return { error: err?.message || String(err) };
+          }
+        }
+        case "exportAll": {
+          try {
+            const data = await repo.exportAll();
+            return { ok: true, data };
+          } catch (err) {
+            return { error: err?.message || String(err) };
+          }
+        }
+        case "importAll": {
+          try {
+            const res = await repo.importAll(msg.data);
+            return res;
+          } catch (err) {
+            return { error: err?.message || String(err) };
+          }
+        }
+        case "isDbEmpty": {
+          try {
+            const empty = await repo.isDbEmpty();
+            return { ok: true, empty };
           } catch (err) {
             return { error: err?.message || String(err) };
           }

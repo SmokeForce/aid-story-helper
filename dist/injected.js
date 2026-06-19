@@ -66,6 +66,16 @@
     })).filter((o) => o.operationName !== "GenerateStoryCard");
   }
 
+  // src/interceptor/gui-edit.ts
+  function isTextField(el) {
+    return !!el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT");
+  }
+  function pickActiveField(activeEl, lastActiveEl, lastActiveTime, now, recentMs = 15e3) {
+    if (isTextField(activeEl)) return activeEl;
+    if (isTextField(lastActiveEl) && now - lastActiveTime < recentMs) return lastActiveEl;
+    return null;
+  }
+
   // src/interceptor/injected.ts
   (() => {
     const isGql = (u) => typeof u === "string" && /graphql/i.test(u);
@@ -144,12 +154,8 @@
       if (cardInput && (cardInput.title || "").toLowerCase() === "configure memoraid") {
         return true;
       }
-      const active = document.activeElement || lastActiveElement;
-      const isRecent = Date.now() - lastActiveTime < 15e3;
-      const el = active && isRecent ? active : null;
+      const el = pickActiveField(document.activeElement, lastActiveElement, lastActiveTime, Date.now());
       if (!el) return false;
-      const tagName = el.tagName.toLowerCase();
-      if (tagName !== "textarea" && tagName !== "input") return false;
       if (cardInput) {
         const activeVal = (el.value || "").trim().replace(/\r\n/g, "\n");
         const val = (cardInput.value || "").trim().replace(/\r\n/g, "\n");
@@ -256,16 +262,53 @@
     const adventureIdMap = /* @__PURE__ */ new Map();
     function getShortIdFromAdventureId(advId) {
       if (!advId) return "";
-      if (advId.length < 15 && !advId.includes("-") && !/^\d+$/.test(advId)) {
-        return advId;
+      const cleanAdvId = String(advId).replace(/^Adventure:/, "");
+      if (cleanAdvId.length < 15 && !cleanAdvId.includes("-") && !/^\d+$/.test(cleanAdvId)) {
+        return cleanAdvId;
       }
       for (const [sid, id] of adventureIdMap.entries()) {
-        if (id === advId) return sid;
+        const cleanId = String(id).replace(/^Adventure:/, "");
+        if (cleanId === cleanAdvId) return sid;
+      }
+      try {
+        const client = getApolloClient();
+        const data = client?.cache?.extract();
+        if (data) {
+          const exactKey = `Adventure:${cleanAdvId}`;
+          if (data[exactKey]?.shortId) {
+            const sid = data[exactKey].shortId;
+            if (sid && !/^\d+$/.test(sid)) {
+              adventureIdMap.set(sid, cleanAdvId);
+              return sid;
+            }
+          }
+          for (const key of Object.keys(data)) {
+            if (key.startsWith("Adventure:") && key.includes(cleanAdvId)) {
+              const sid = data[key]?.shortId;
+              if (sid && !/^\d+$/.test(sid)) {
+                adventureIdMap.set(sid, cleanAdvId);
+                return sid;
+              }
+            }
+          }
+        }
+      } catch {
+      }
+      const segments = window.location.pathname.split("/");
+      for (const segment of segments) {
+        if (segment && segment.length >= 8 && segment.length <= 22 && !/^\d+$/.test(segment)) {
+          if (!["adventure", "scenario", "play", "settings", "profile", "explore", "featured", "main"].includes(segment.toLowerCase())) {
+            return segment;
+          }
+        }
       }
       const m = window.location.pathname.match(/\/(?:play|adventure|scenario)\/([^\/]+)/);
-      return m ? m[1] : advId;
+      if (m && !/^\d+$/.test(m[1]) && m[1].length < 15) {
+        return m[1];
+      }
+      return cleanAdvId;
     }
-    let interceptTimeoutMs = 4e3;
+    let interceptTimeoutMs = 1e4;
     let warnedNoApollo = false;
     let showDebug = false;
     let lastActiveRefetch = 0;
@@ -920,6 +963,74 @@
         }
       }
     }
+    async function maybeInterceptAction(batch) {
+      const actionReq = batch.find((item) => item.operationName === "ActionRequest");
+      if (!actionReq) return [];
+      const actionInput = actionReq.variables?.input;
+      const actionText = actionInput?.text;
+      const actionType = actionInput?.type;
+      const adventureId = actionInput?.adventureId;
+      let shortId = adventureId ? getShortIdFromAdventureId(adventureId) : null;
+      if (!shortId || /^\d+$/.test(String(shortId))) {
+        for (const sib of batch) {
+          const sid = sib?.variables?.shortId || sib?.variables?.input?.shortId || sib?.variables?.adventureId || sib?.variables?.input?.adventureId;
+          if (sid) {
+            const resolved = getShortIdFromAdventureId(String(sid));
+            if (resolved && !/^\d+$/.test(resolved)) {
+              shortId = resolved;
+              break;
+            }
+          }
+        }
+      }
+      const isInterceptionTarget = !!(shortId && (actionText && (actionType === "do" || actionType === "say" || actionType === "story") || (actionType === "retry" || actionType === "continue")));
+      var startTime = Date.now();
+      dlog("[AID injected] maybeInterceptAction check:", {
+        adventureId,
+        resolvedShortId: shortId,
+        actionType,
+        hasText: !!actionText,
+        isTarget: isInterceptionTarget
+      });
+      if (isInterceptionTarget) {
+        dlog("[AID injected] Intercepted ActionRequest for MemorAID pre-run:", actionText || `(${actionType})`);
+        setPlaceholderText("[MemorAID] Character is reflecting...");
+        var requestId = Math.random().toString(36).substring(7);
+        var promise = new Promise((resolve) => {
+          pendingActionResolvers.set(requestId, resolve);
+        });
+        post({
+          transport: "interceptedAction",
+          requestId,
+          shortId,
+          text: actionText,
+          type: actionType
+        });
+        var timedOut = false;
+        const timeoutId = setTimeout(() => {
+          const resolve = pendingActionResolvers.get(requestId);
+          if (resolve) {
+            console.warn(`[AID injected] Interception timed out after ${Date.now() - startTime}ms. Releasing ActionRequest.`);
+            pendingActionResolvers.delete(requestId);
+            timedOut = true;
+            restorePlaceholder();
+            resolve([]);
+          }
+        }, interceptTimeoutMs);
+        const updatedNames = await promise;
+        if (!timedOut) {
+          clearTimeout(timeoutId);
+          dlog(`[AID injected] Interception approved after ${Date.now() - startTime}ms. updatedNames:`, updatedNames);
+          if (updatedNames && updatedNames.length > 0) {
+            flashPlaceholder(`[MemorAID] Thoughts synchronized: ${updatedNames.join(", ")}!`);
+          } else {
+            restorePlaceholder();
+          }
+        }
+        return updatedNames;
+      }
+      return [];
+    }
     const _fetch = window.fetch;
     window.fetch = async function(input, init) {
       if (init && init.__aidRelay) {
@@ -934,56 +1045,7 @@
           const batch = Array.isArray(bodyObj) ? bodyObj : [bodyObj];
           const actionReq = batch.find((item) => item.operationName === "ActionRequest");
           if (actionReq) {
-            const actionInput = actionReq.variables?.input;
-            const actionText = actionInput?.text;
-            const actionType = actionInput?.type;
-            const adventureId = actionInput?.adventureId;
-            let shortId = adventureId ? getShortIdFromAdventureId(adventureId) : null;
-            if (!shortId || /^\d+$/.test(String(shortId))) {
-              for (const sib of batch) {
-                const sid = sib?.variables?.shortId || sib?.variables?.input?.shortId;
-                if (sid && !/^\d+$/.test(String(sid)) && !String(sid).includes("-")) {
-                  shortId = String(sid);
-                  break;
-                }
-              }
-            }
-            const isInterceptionTarget = !!(shortId && (actionText && (actionType === "do" || actionType === "say" || actionType === "story") || (actionType === "retry" || actionType === "continue")));
-            if (isInterceptionTarget) {
-              dlog("[AID injected] Intercepted ActionRequest for MemorAID pre-run:", actionText || `(${actionType})`);
-              setPlaceholderText("[MemorAID] Character is reflecting...");
-              const requestId = Math.random().toString(36).substring(7);
-              const promise = new Promise((resolve) => {
-                pendingActionResolvers.set(requestId, resolve);
-              });
-              post({
-                transport: "interceptedAction",
-                requestId,
-                shortId,
-                text: actionText,
-                type: actionType
-              });
-              let timedOut = false;
-              const timeoutId = setTimeout(() => {
-                const resolve = pendingActionResolvers.get(requestId);
-                if (resolve) {
-                  console.warn("[AID injected] Interception timed out. Releasing ActionRequest.");
-                  pendingActionResolvers.delete(requestId);
-                  timedOut = true;
-                  restorePlaceholder();
-                  resolve([]);
-                }
-              }, interceptTimeoutMs);
-              const updatedNames = await promise;
-              if (!timedOut) {
-                clearTimeout(timeoutId);
-                if (updatedNames && updatedNames.length > 0) {
-                  flashPlaceholder(`[MemorAID] Thoughts synchronized: ${updatedNames.join(", ")}!`);
-                } else {
-                  restorePlaceholder();
-                }
-              }
-            }
+            await maybeInterceptAction(batch);
           }
           if (lastSentWrites.size > 200) {
             const threshold = Date.now() - WRITE_DEBOUNCE_MS * 2;
@@ -1242,6 +1304,48 @@
       }
       return res;
     };
+    const _xhrOpen = XMLHttpRequest.prototype.open;
+    const _xhrSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      this.__aidUrl = url;
+      return _xhrOpen.apply(this, [method, url, ...rest]);
+    };
+    XMLHttpRequest.prototype.send = function(body) {
+      const self = this;
+      const args = arguments;
+      self.addEventListener("load", function() {
+        try {
+          if (isGql(self.__aidUrl) && self.responseText) {
+            const resJson = JSON.parse(self.responseText);
+            postAdventureLoaded(resJson, body);
+          }
+        } catch {
+        }
+      });
+      try {
+        if (isGql(self.__aidUrl) && typeof body === "string") {
+          const parsed = JSON.parse(body);
+          const batch = Array.isArray(parsed) ? parsed : [parsed];
+          const actionReq = batch.find((item) => item.operationName === "ActionRequest");
+          if (actionReq) {
+            dlog("[AID injected] Intercepted ActionRequest over XHR for MemorAID pre-run!");
+            (async () => {
+              try {
+                await maybeInterceptAction(batch);
+              } catch (err) {
+                console.error("[AID injected] Error during XHR ActionRequest interception:", err);
+              } finally {
+                _xhrSend.apply(self, args);
+              }
+            })();
+            return;
+          }
+        }
+      } catch (err) {
+        dlog("[AID injected] Error checking XHR body for ActionRequest:", err);
+      }
+      return _xhrSend.apply(self, args);
+    };
     const tracker = new WsTracker();
     const _WS = window.WebSocket;
     function WSProxy(url, protocols) {
@@ -1252,6 +1356,25 @@
         ws.send = function(data) {
           if (typeof data === "string") {
             tracker.handle(data);
+            try {
+              const p = JSON.parse(data);
+              const op = p?.payload?.operationName || p?.operationName;
+              if (op === "ActionRequest") {
+                dlog("[AID injected] Intercepted ActionRequest over WebSocket for MemorAID pre-run!");
+                const batch = [p?.payload || p];
+                (async () => {
+                  try {
+                    await maybeInterceptAction(batch);
+                  } catch (err) {
+                    console.error("[AID injected] Error during WebSocket ActionRequest interception:", err);
+                  } finally {
+                    _send(data);
+                  }
+                })();
+                return;
+              }
+            } catch {
+            }
           }
           return _send(data);
         };

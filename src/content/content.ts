@@ -11,23 +11,27 @@ let activeShortId: string | null = null;
 const autoBackfillsInFlight = new Set<string>();
 
 function checkIsPlayUrl(): boolean {
+  // NOTE: `/scenario/...` is a published-scenario PREVIEW (Discover), NOT an active adventure —
+  // playing a scenario creates a NEW adventure at `/play?adventureId=...`. Treating `/scenario/`
+  // as a play page rendered the play tracker on preview pages and registered the scenario id as an
+  // empty "Untitled Adventure". Excluded here so preview pages render manager-only and create nothing.
   return location.pathname === "/play" || 
          location.pathname.endsWith("/play") || 
          location.pathname.startsWith("/play/") || 
-         location.pathname.startsWith("/adventure/") ||
-         location.pathname.startsWith("/scenario/");
+         location.pathname.startsWith("/adventure/");
 }
 
-// shortId from /adventure/{shortId}/... or /play/{shortId} or /scenario/{shortId}/...
+// shortId from /adventure/{shortId}/... or /play/{shortId} (NOT /scenario/ — that's a preview id).
 function currentShortId(): string | null {
   const isPlayUrl = checkIsPlayUrl();
   const m = location.pathname.match(/\/play\/([^/]+)/) || 
-            location.pathname.match(/\/adventure\/([^/]+)/) ||
-            location.pathname.match(/\/scenario\/([^/]+)/);
+            location.pathname.match(/\/adventure\/([^/]+)/);
   if (m) return m[1]!;
 
   const params = new URLSearchParams(location.search);
-  const qId = params.get("adventureId") || params.get("adventure") || params.get("scenarioId") || params.get("scenario") || params.get("id");
+  // Only an actual adventure id — NOT scenarioId/scenario (those identify the source scenario,
+  // not the played adventure).
+  const qId = params.get("adventureId") || params.get("adventure") || params.get("id");
   if (qId) return qId;
 
   if (isPlayUrl) {
@@ -272,7 +276,9 @@ window.addEventListener("message", (ev) => {
 
       const hasAdventure = state && Array.isArray(state.adventures) && state.adventures.some((a: any) => a.shortId === shortId);
       const isSkeleton = hasAdventure && (!state.actionCount || state.actionCount === 0);
-      if ((!hasAdventure || isSkeleton) && !autoBackfillsInFlight.has(shortId)) {
+      // Only register/backfill when actually PLAYING — a scenario preview page must not create an
+      // empty "Untitled Adventure" just because the page loaded scenario data.
+      if ((!hasAdventure || isSkeleton) && !autoBackfillsInFlight.has(shortId) && checkIsPlayUrl()) {
         autoBackfillsInFlight.add(shortId);
         console.log(`[AID content] Auto-triggering backfill for new/skeleton adventure: ${shortId}`);
         browser.runtime.sendMessage({ kind: "backfillRequest", shortId }).then((res) => {

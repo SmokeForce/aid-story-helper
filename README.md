@@ -96,9 +96,9 @@ Once loaded in the page, the extension overlays a sidebar on AI Dungeon, with th
 - **Proper Noun Banners:** Review newly detected proper nouns and click to immediately create matching story cards.
 
 ### ⚡ Memory Bank
-- Displays discrete chronological memory blocks.
+- Displays AI Dungeon's discrete chronological timeline memory blocks.
 - Click **Regenerate memory block** (⚡) next to any block to run a refined summary of the corresponding actions using your outside AI provider.
-- Shows current thought logs for active NPCs.
+- *Note:* NPC thought logs are **not** here — MemorAID writes them to their own Thought-typed `(Memory)` Story Cards, which appear in the **Card Manager**.
 
 ### ⚙️ Settings
 - **General Tab:**

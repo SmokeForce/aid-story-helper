@@ -42,7 +42,7 @@ This extension is built for Firefox and Chromium-based browsers (Manifest V3). F
 - **What it is:** Plot Essentials is AI Dungeon's always-in-context memory — the bracketed `[Name is …]` character bios and key facts the AI sees every turn. The extension reads and maintains these blocks for you.
 - **On-demand updates:** Click **Update Plot Essentials** to have your configured AI provider (Claude, OpenAI GPT, Gemini, or Ollama) analyze recent actions and propose revised bios for your tracked characters. Proposals appear as highlighted pending changes you can review, edit, accept, or reject — nothing reaches AI Dungeon until you approve it.
 - **Reliable apply:** Approving a change pushes it to AI Dungeon's Plot Essentials and keeps the on-page editor in sync, guarding against AI Dungeon's autosave silently reverting your edit — so updates stick without a page reload.
-- **Plot Essentials "Memories" log (optional):** A `[Memories (newest to oldest): …]` block kept *inside* Plot Essentials — a curated, always-in-context running history, separate from AI Dungeon's native Memory Bank. Enable **Use Memories in Plot Essentials** (Settings → General) and seed the block once in this exact format:
+- **Plot Essentials "Memories" log (optional):** A `[Memories (newest to oldest): …]` block kept *inside* Plot Essentials — a curated, always-in-context running history, separate from AI Dungeon's native Memory Bank. Enable **Use Memories in Plot Essentials** (Settings → MemorAID) and seed the block once in this exact format:
   ```
   [Memories (newest to oldest):
   - latest memory here
@@ -101,28 +101,17 @@ Once loaded in the page, the extension overlays a sidebar on AI Dungeon, with th
 - *Note:* NPC thought logs are **not** here — MemorAID writes them to their own Thought-typed `(Memory)` Story Cards, which appear in the **Card Manager**.
 
 ### ⚙️ Settings
-- **General Tab:**
-  - **AI Provider:** Choose your model provider (Claude, OpenAI, Gemini, or local Ollama) and input your API Key.
-  - **Protagonist Name:** Set your main character's name (resolves the `{protagonist}` placeholder in instructions).
-  - **Auto-Regen Memory Bank:** Toggle auto-refinement of the latest Memory Bank entry.
-  - **Enable Manual Mode:** Toggle auto-updates off to manually trigger all card updates.
-  - **Character Card Limit:** Cap the character length of generated character/story-card entries (default 600).
-- **MemorAID Tab:**
-  - Configure the lookback windows (default 8 turns for scene context, 5 turns for presence tracking).
-  - **MemorAID Thought Lookback:** How many recent thoughts to keep as a rolling window in each NPC's `(Memory)` card — and feed back as context so new thoughts stay continuous.
-  - **Thought Card Limit:** Cap the character length of NPC thought-card entries (default 2000).
-  - **Action Intercept Timeout:** Control how long the game waits for NPC thoughts to generate before advancing the turn — raise it for slow local providers (e.g. Ollama).
-- **Prompts Tab:**
-  - Customize character instructions templates (Appearance, Quirks, Dynamic relationship pacing, etc.) or Plot Essentials prompt sections.
-- **OffMeta's AIN Tab:**
-  - Browse and one-click apply community AI Instruction rule-sets from OffMetaGamer's repository.
-- **Adventures Manager Tab:**
-  - Browse the local adventure database, maintain a Global Bucket of reusable assets (AI Instructions, Author's Notes, PE bios, Story Cards), and import them into the active adventure.
-
-### 🛠️ Debug
-- **Learned Operations:** Lists the captured AI Dungeon GraphQL mutation templates (enabling offline fetch relays).
-- **Proper Noun Logs:** Database editor to classify, delete, or link aliases directly to existing cards.
-- **Full Database Backup & Restore:** Save your whole local database to a JSON file (API keys excluded) and restore it on any device.
-- **Mobile Settings Sync (QR Code):** Generate a QR code to transfer your settings to a phone by scanning.
-- **Diagnostics:** Toggle verbose console logging, or log *only* the raw Update Plot Essentials AI request/response to the browser Console.
-- **Database Tools:** Backfill history, Export campaign to JSON, or Clear Local DB.
+Settings is split into seven tabs:
+- **General Tab:** Theme; **Protagonist Name** (resolves the `{protagonist}` placeholder in instructions); **Auto-Regen Memory Bank** (auto-refine the latest Memory Bank entry); **Action Lookback Window** (how many recent actions analysis considers, default 20); **Character Card Limit** (cap generated character/story-card entry length, default 600); **Enable Manual Mode** (turn auto-updates off and trigger them manually); **Active Location Sync Mode**; and **Enable Proper Noun Detection**.
+- **AI Provider Tab:** Choose your model provider (Anthropic Claude, OpenAI, Google Gemini, or local Ollama), enter the matching API key, and pick a model from the searchable list.
+- **MemorAID Tab:** **Use Memories in Plot Essentials** toggle; the lookback windows (default 8 turns for scene context, 5 for presence tracking); **MemorAID Thought Lookback** (how many recent thoughts to keep as a rolling window in each NPC's `(Memory)` card and feed back as context for continuity); **Thought Card Limit** (cap thought-card entry length, default 2000); and **Action Intercept Timeout** (how long the game waits for NPC thoughts before advancing the turn — raise it for slow local providers like Ollama).
+- **Prompts Tab:** Customize the character generation templates (Appearance, Quirks, Dynamic relationship pacing, etc.), the per-card-type Story Card commands, and the Plot Essentials prompt sections.
+- **OffMeta's AIN Tab:** Browse and one-click apply community AI Instruction rule-sets from OffMetaGamer's repository.
+- **Adventures Manager Tab:** Browse the local adventure database, maintain a Global Bucket of reusable assets (AI Instructions, Author's Notes, PE bios, Story Cards), and import them into the active adventure.
+- **Debug Tab:**
+  - **Learned Operations:** the captured AI Dungeon GraphQL mutation templates (enabling offline fetch relays).
+  - **Proper Noun Logs:** editor to classify, delete, or link aliases directly to existing cards.
+  - **Full Database Backup & Restore:** save your whole local database to a JSON file (API keys excluded) and restore it on any device.
+  - **Mobile Settings Sync (QR Code):** generate a QR code to transfer your settings to a phone by scanning.
+  - **Diagnostics:** toggle verbose console logging, or log *only* the raw Update Plot Essentials AI request/response to the browser Console.
+  - **Database Tools:** Backfill history, Export campaign to JSON, or Clear Local DB.

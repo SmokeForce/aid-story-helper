@@ -207,6 +207,12 @@ export class Repo {
     const db = await openAidDb(); const rec = await db.get("settings", "singleton"); if (!rec) return undefined;
     const { _k, ...s } = rec as any;
     const settings = s as Settings;
+    if (settings.enableProperNounDetection === undefined && (s as any).enableLocationDetection !== undefined) {
+      settings.enableProperNounDetection = (s as any).enableLocationDetection;
+      delete (settings as any).enableLocationDetection;
+      console.log("[AID repo] Migrating enableLocationDetection ->", settings.enableProperNounDetection, "(enableProperNounDetection).");
+      await this.setSettings(settings);
+    }
     if (settings.cardCommands?.memoraid) {
       const HISTORICAL_MEMORAID_DEFAULTS = [
         'Generate thoughts for {{title}} in the first-person perspective, capturing their subjective reactions and internal feelings about recent events, especially in relation to {protagonist}. Format the output strictly as a bulleted list inside square brackets, e.g. [\n- thought\n- thought\n]. Write exactly how {{title}} would think in this moment, using their profile and voice. Keep it under 300 characters total.',

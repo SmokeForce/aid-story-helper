@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseMemoNotes, buildMemoNotes, pushThought, thoughtsSince } from "../src/inference/memoraid-notes";
+import { parseMemoNotes, buildMemoNotes, pushThought, thoughtsSince, renderThoughtWindow } from "../src/inference/memoraid-notes";
 
 describe("memoraid notes round-trip", () => {
   it("builds and parses turn-tagged thought log with trigger actions", () => {
@@ -62,5 +62,21 @@ describe("thoughtsSince", () => {
   it("respects the char budget", () => {
     // 'act-c\nnewest' = 12 chars, +2 = 14; the next pair would exceed.
     expect(thoughtsSince(log, 0, 15)).toBe("act-c\nnewest");
+  });
+});
+
+describe("renderThoughtWindow", () => {
+  it("renders a rolling window of braced thoughts separated by single-newlines", () => {
+    const log = [
+      { turn: 2, text: "[Anna's Thoughts:\nIntake: She smiles.\nThought: Nice.\nAction: Wait.]" },
+      { turn: 1, text: "[Anna's Thoughts:\nIntake: She is outside.\nThought: Fresh air.\nAction: Walk.]" }
+    ];
+    const out = renderThoughtWindow(log, 2, "Anna", 1000);
+    expect(out).toBe(
+      "[Anna's Thoughts (newest to oldest):\n" +
+      "{Intake: She smiles.\nThought: Nice.\nAction: Wait.\n" +
+      "Intake: She is outside.\nThought: Fresh air.\nAction: Walk.}\n" +
+      "]"
+    );
   });
 });

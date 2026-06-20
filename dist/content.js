@@ -1,5 +1,625 @@
 "use strict";
 (() => {
+  // node_modules/qr-creator/dist/qr-creator.es6.min.js
+  var G = null;
+  var H = class {
+  };
+  H.render = function(w, B) {
+    G(w, B);
+  };
+  self.QrCreator = H;
+  (function(w) {
+    function B(t, c, a, e) {
+      var b = {}, h = w(a, c);
+      h.u(t);
+      h.J();
+      e = e || 0;
+      var r = h.h(), d = h.h() + 2 * e;
+      b.text = t;
+      b.level = c;
+      b.version = a;
+      b.O = d;
+      b.a = function(b2, a2) {
+        b2 -= e;
+        a2 -= e;
+        return 0 > b2 || b2 >= r || 0 > a2 || a2 >= r ? false : h.a(b2, a2);
+      };
+      return b;
+    }
+    function C(t, c, a, e, b, h, r, d, g2, x) {
+      function u(b2, a2, f, c2, d2, r2, g3) {
+        b2 ? (t.lineTo(a2 + r2, f + g3), t.arcTo(a2, f, c2, d2, h)) : t.lineTo(a2, f);
+      }
+      r ? t.moveTo(c + h, a) : t.moveTo(c, a);
+      u(d, e, a, e, b, -h, 0);
+      u(g2, e, b, c, b, 0, -h);
+      u(x, c, b, c, a, h, 0);
+      u(r, c, a, e, a, 0, h);
+    }
+    function z(t, c, a, e, b, h, r, d, g2, x) {
+      function u(b2, a2, c2, d2) {
+        t.moveTo(b2 + c2, a2);
+        t.lineTo(
+          b2,
+          a2
+        );
+        t.lineTo(b2, a2 + d2);
+        t.arcTo(b2, a2, b2 + c2, a2, h);
+      }
+      r && u(c, a, h, h);
+      d && u(e, a, -h, h);
+      g2 && u(e, b, -h, -h);
+      x && u(c, b, h, -h);
+    }
+    function A(t, c) {
+      var a = c.fill;
+      if ("string" === typeof a) t.fillStyle = a;
+      else {
+        var e = a.type, b = a.colorStops;
+        a = a.position.map((b2) => Math.round(b2 * c.size));
+        if ("linear-gradient" === e) var h = t.createLinearGradient.apply(t, a);
+        else if ("radial-gradient" === e) h = t.createRadialGradient.apply(t, a);
+        else throw Error("Unsupported fill");
+        b.forEach(([b2, a2]) => {
+          h.addColorStop(b2, a2);
+        });
+        t.fillStyle = h;
+      }
+    }
+    function y(t, c) {
+      a: {
+        var a = c.text, e = c.v, b = c.N, h = c.K, r = c.P;
+        b = Math.max(1, b || 1);
+        for (h = Math.min(40, h || 40); b <= h; b += 1) try {
+          var d = B(a, e, b, r);
+          break a;
+        } catch (J) {
+        }
+        d = void 0;
+      }
+      if (!d) return null;
+      a = t.getContext("2d");
+      c.background && (a.fillStyle = c.background, a.fillRect(c.left, c.top, c.size, c.size));
+      e = d.O;
+      h = c.size / e;
+      a.beginPath();
+      for (r = 0; r < e; r += 1) for (b = 0; b < e; b += 1) {
+        var g2 = a, x = c.left + b * h, u = c.top + r * h, p = r, q = b, f = d.a, k = x + h, m = u + h, D = p - 1, E = p + 1, n = q - 1, l = q + 1, y2 = Math.floor(Math.min(0.5, Math.max(0, c.R)) * h), v2 = f(p, q), I = f(D, n), w2 = f(D, q);
+        D = f(D, l);
+        var F = f(p, l);
+        l = f(E, l);
+        q = f(
+          E,
+          q
+        );
+        E = f(E, n);
+        p = f(p, n);
+        x = Math.round(x);
+        u = Math.round(u);
+        k = Math.round(k);
+        m = Math.round(m);
+        v2 ? C(g2, x, u, k, m, y2, !w2 && !p, !w2 && !F, !q && !F, !q && !p) : z(g2, x, u, k, m, y2, w2 && p && I, w2 && F && D, q && F && l, q && p && E);
+      }
+      A(a, c);
+      a.fill();
+      return t;
+    }
+    var v = { minVersion: 1, maxVersion: 40, ecLevel: "L", left: 0, top: 0, size: 200, fill: "#000", background: null, text: "no text", radius: 0.5, quiet: 0 };
+    G = function(t, c) {
+      var a = {};
+      Object.assign(a, v, t);
+      a.N = a.minVersion;
+      a.K = a.maxVersion;
+      a.v = a.ecLevel;
+      a.left = a.left;
+      a.top = a.top;
+      a.size = a.size;
+      a.fill = a.fill;
+      a.background = a.background;
+      a.text = a.text;
+      a.R = a.radius;
+      a.P = a.quiet;
+      if (c instanceof HTMLCanvasElement) {
+        if (c.width !== a.size || c.height !== a.size) c.width = a.size, c.height = a.size;
+        c.getContext("2d").clearRect(0, 0, c.width, c.height);
+        y(c, a);
+      } else t = document.createElement("canvas"), t.width = a.size, t.height = a.size, a = y(t, a), c.appendChild(a);
+    };
+  })(function() {
+    function w(c) {
+      var a = C.s(c);
+      return { S: function() {
+        return 4;
+      }, b: function() {
+        return a.length;
+      }, write: function(c2) {
+        for (var b = 0; b < a.length; b += 1) c2.put(a[b], 8);
+      } };
+    }
+    function B() {
+      var c = [], a = 0, e = {
+        B: function() {
+          return c;
+        },
+        c: function(b) {
+          return 1 == (c[Math.floor(b / 8)] >>> 7 - b % 8 & 1);
+        },
+        put: function(b, h) {
+          for (var a2 = 0; a2 < h; a2 += 1) e.m(1 == (b >>> h - a2 - 1 & 1));
+        },
+        f: function() {
+          return a;
+        },
+        m: function(b) {
+          var h = Math.floor(a / 8);
+          c.length <= h && c.push(0);
+          b && (c[h] |= 128 >>> a % 8);
+          a += 1;
+        }
+      };
+      return e;
+    }
+    function C(c, a) {
+      function e(b2, h2) {
+        for (var a2 = -1; 7 >= a2; a2 += 1) if (!(-1 >= b2 + a2 || d <= b2 + a2)) for (var c2 = -1; 7 >= c2; c2 += 1) -1 >= h2 + c2 || d <= h2 + c2 || (r[b2 + a2][h2 + c2] = 0 <= a2 && 6 >= a2 && (0 == c2 || 6 == c2) || 0 <= c2 && 6 >= c2 && (0 == a2 || 6 == a2) || 2 <= a2 && 4 >= a2 && 2 <= c2 && 4 >= c2 ? true : false);
+      }
+      function b(b2, a2) {
+        for (var f = d = 4 * c + 17, k = Array(f), m = 0; m < f; m += 1) {
+          k[m] = Array(f);
+          for (var p = 0; p < f; p += 1) k[m][p] = null;
+        }
+        r = k;
+        e(0, 0);
+        e(d - 7, 0);
+        e(0, d - 7);
+        f = y.G(c);
+        for (k = 0; k < f.length; k += 1) for (m = 0; m < f.length; m += 1) {
+          p = f[k];
+          var q = f[m];
+          if (null == r[p][q]) for (var n = -2; 2 >= n; n += 1) for (var l = -2; 2 >= l; l += 1) r[p + n][q + l] = -2 == n || 2 == n || -2 == l || 2 == l || 0 == n && 0 == l;
+        }
+        for (f = 8; f < d - 8; f += 1) null == r[f][6] && (r[f][6] = 0 == f % 2);
+        for (f = 8; f < d - 8; f += 1) null == r[6][f] && (r[6][f] = 0 == f % 2);
+        f = y.w(h << 3 | a2);
+        for (k = 0; 15 > k; k += 1) m = !b2 && 1 == (f >> k & 1), r[6 > k ? k : 8 > k ? k + 1 : d - 15 + k][8] = m, r[8][8 > k ? d - k - 1 : 9 > k ? 15 - k : 14 - k] = m;
+        r[d - 8][8] = !b2;
+        if (7 <= c) {
+          f = y.A(c);
+          for (k = 0; 18 > k; k += 1) m = !b2 && 1 == (f >> k & 1), r[Math.floor(k / 3)][k % 3 + d - 8 - 3] = m;
+          for (k = 0; 18 > k; k += 1) m = !b2 && 1 == (f >> k & 1), r[k % 3 + d - 8 - 3][Math.floor(k / 3)] = m;
+        }
+        if (null == g2) {
+          b2 = t.I(c, h);
+          f = B();
+          for (k = 0; k < x.length; k += 1) m = x[k], f.put(4, 4), f.put(m.b(), y.f(4, c)), m.write(f);
+          for (k = m = 0; k < b2.length; k += 1) m += b2[k].j;
+          if (f.f() > 8 * m) throw Error("code length overflow. (" + f.f() + ">" + 8 * m + ")");
+          for (f.f() + 4 <= 8 * m && f.put(0, 4); 0 != f.f() % 8; ) f.m(false);
+          for (; !(f.f() >= 8 * m); ) {
+            f.put(236, 8);
+            if (f.f() >= 8 * m) break;
+            f.put(17, 8);
+          }
+          var u2 = 0;
+          m = k = 0;
+          p = Array(b2.length);
+          q = Array(b2.length);
+          for (n = 0; n < b2.length; n += 1) {
+            var v2 = b2[n].j, w2 = b2[n].o - v2;
+            k = Math.max(k, v2);
+            m = Math.max(m, w2);
+            p[n] = Array(v2);
+            for (l = 0; l < p[n].length; l += 1) p[n][l] = 255 & f.B()[l + u2];
+            u2 += v2;
+            l = y.C(w2);
+            v2 = z(p[n], l.b() - 1).l(l);
+            q[n] = Array(l.b() - 1);
+            for (l = 0; l < q[n].length; l += 1) w2 = l + v2.b() - q[n].length, q[n][l] = 0 <= w2 ? v2.c(w2) : 0;
+          }
+          for (l = f = 0; l < b2.length; l += 1) f += b2[l].o;
+          f = Array(f);
+          for (l = u2 = 0; l < k; l += 1) for (n = 0; n < b2.length; n += 1) l < p[n].length && (f[u2] = p[n][l], u2 += 1);
+          for (l = 0; l < m; l += 1) for (n = 0; n < b2.length; n += 1) l < q[n].length && (f[u2] = q[n][l], u2 += 1);
+          g2 = f;
+        }
+        b2 = g2;
+        f = -1;
+        k = d - 1;
+        m = 7;
+        p = 0;
+        a2 = y.F(a2);
+        for (q = d - 1; 0 < q; q -= 2) for (6 == q && --q; ; ) {
+          for (n = 0; 2 > n; n += 1) null == r[k][q - n] && (l = false, p < b2.length && (l = 1 == (b2[p] >>> m & 1)), a2(k, q - n) && (l = !l), r[k][q - n] = l, --m, -1 == m && (p += 1, m = 7));
+          k += f;
+          if (0 > k || d <= k) {
+            k -= f;
+            f = -f;
+            break;
+          }
+        }
+      }
+      var h = A[a], r = null, d = 0, g2 = null, x = [], u = { u: function(b2) {
+        b2 = w(b2);
+        x.push(b2);
+        g2 = null;
+      }, a: function(b2, a2) {
+        if (0 > b2 || d <= b2 || 0 > a2 || d <= a2) throw Error(b2 + "," + a2);
+        return r[b2][a2];
+      }, h: function() {
+        return d;
+      }, J: function() {
+        for (var a2 = 0, h2 = 0, c2 = 0; 8 > c2; c2 += 1) {
+          b(true, c2);
+          var d2 = y.D(u);
+          if (0 == c2 || a2 > d2) a2 = d2, h2 = c2;
+        }
+        b(false, h2);
+      } };
+      return u;
+    }
+    function z(c, a) {
+      if ("undefined" == typeof c.length) throw Error(c.length + "/" + a);
+      var e = function() {
+        for (var b2 = 0; b2 < c.length && 0 == c[b2]; ) b2 += 1;
+        for (var r = Array(c.length - b2 + a), d = 0; d < c.length - b2; d += 1) r[d] = c[d + b2];
+        return r;
+      }(), b = { c: function(b2) {
+        return e[b2];
+      }, b: function() {
+        return e.length;
+      }, multiply: function(a2) {
+        for (var h = Array(b.b() + a2.b() - 1), c2 = 0; c2 < b.b(); c2 += 1) for (var g2 = 0; g2 < a2.b(); g2 += 1) h[c2 + g2] ^= v.i(v.g(b.c(c2)) + v.g(a2.c(g2)));
+        return z(h, 0);
+      }, l: function(a2) {
+        if (0 > b.b() - a2.b()) return b;
+        for (var c2 = v.g(b.c(0)) - v.g(a2.c(0)), h = Array(b.b()), g2 = 0; g2 < b.b(); g2 += 1) h[g2] = b.c(g2);
+        for (g2 = 0; g2 < a2.b(); g2 += 1) h[g2] ^= v.i(v.g(a2.c(g2)) + c2);
+        return z(h, 0).l(a2);
+      } };
+      return b;
+    }
+    C.s = function(c) {
+      for (var a = [], e = 0; e < c.length; e++) {
+        var b = c.charCodeAt(e);
+        128 > b ? a.push(b) : 2048 > b ? a.push(192 | b >> 6, 128 | b & 63) : 55296 > b || 57344 <= b ? a.push(224 | b >> 12, 128 | b >> 6 & 63, 128 | b & 63) : (e++, b = 65536 + ((b & 1023) << 10 | c.charCodeAt(e) & 1023), a.push(240 | b >> 18, 128 | b >> 12 & 63, 128 | b >> 6 & 63, 128 | b & 63));
+      }
+      return a;
+    };
+    var A = { L: 1, M: 0, Q: 3, H: 2 }, y = /* @__PURE__ */ function() {
+      function c(b) {
+        for (var a2 = 0; 0 != b; ) a2 += 1, b >>>= 1;
+        return a2;
+      }
+      var a = [
+        [],
+        [6, 18],
+        [6, 22],
+        [6, 26],
+        [6, 30],
+        [6, 34],
+        [6, 22, 38],
+        [6, 24, 42],
+        [6, 26, 46],
+        [6, 28, 50],
+        [6, 30, 54],
+        [6, 32, 58],
+        [6, 34, 62],
+        [6, 26, 46, 66],
+        [6, 26, 48, 70],
+        [6, 26, 50, 74],
+        [6, 30, 54, 78],
+        [6, 30, 56, 82],
+        [6, 30, 58, 86],
+        [6, 34, 62, 90],
+        [6, 28, 50, 72, 94],
+        [6, 26, 50, 74, 98],
+        [6, 30, 54, 78, 102],
+        [6, 28, 54, 80, 106],
+        [6, 32, 58, 84, 110],
+        [6, 30, 58, 86, 114],
+        [6, 34, 62, 90, 118],
+        [6, 26, 50, 74, 98, 122],
+        [6, 30, 54, 78, 102, 126],
+        [6, 26, 52, 78, 104, 130],
+        [6, 30, 56, 82, 108, 134],
+        [6, 34, 60, 86, 112, 138],
+        [6, 30, 58, 86, 114, 142],
+        [6, 34, 62, 90, 118, 146],
+        [6, 30, 54, 78, 102, 126, 150],
+        [6, 24, 50, 76, 102, 128, 154],
+        [6, 28, 54, 80, 106, 132, 158],
+        [6, 32, 58, 84, 110, 136, 162],
+        [6, 26, 54, 82, 110, 138, 166],
+        [6, 30, 58, 86, 114, 142, 170]
+      ], e = { w: function(b) {
+        for (var a2 = b << 10; 0 <= c(a2) - c(1335); ) a2 ^= 1335 << c(a2) - c(1335);
+        return (b << 10 | a2) ^ 21522;
+      }, A: function(b) {
+        for (var a2 = b << 12; 0 <= c(a2) - c(7973); ) a2 ^= 7973 << c(a2) - c(7973);
+        return b << 12 | a2;
+      }, G: function(b) {
+        return a[b - 1];
+      }, F: function(b) {
+        switch (b) {
+          case 0:
+            return function(b2, a2) {
+              return 0 == (b2 + a2) % 2;
+            };
+          case 1:
+            return function(b2) {
+              return 0 == b2 % 2;
+            };
+          case 2:
+            return function(b2, a2) {
+              return 0 == a2 % 3;
+            };
+          case 3:
+            return function(b2, a2) {
+              return 0 == (b2 + a2) % 3;
+            };
+          case 4:
+            return function(b2, a2) {
+              return 0 == (Math.floor(b2 / 2) + Math.floor(a2 / 3)) % 2;
+            };
+          case 5:
+            return function(b2, a2) {
+              return 0 == b2 * a2 % 2 + b2 * a2 % 3;
+            };
+          case 6:
+            return function(b2, a2) {
+              return 0 == (b2 * a2 % 2 + b2 * a2 % 3) % 2;
+            };
+          case 7:
+            return function(b2, a2) {
+              return 0 == (b2 * a2 % 3 + (b2 + a2) % 2) % 2;
+            };
+          default:
+            throw Error("bad maskPattern:" + b);
+        }
+      }, C: function(b) {
+        for (var a2 = z([1], 0), c2 = 0; c2 < b; c2 += 1) a2 = a2.multiply(z([1, v.i(c2)], 0));
+        return a2;
+      }, f: function(b, a2) {
+        if (4 != b || 1 > a2 || 40 < a2) throw Error("mode: " + b + "; type: " + a2);
+        return 10 > a2 ? 8 : 16;
+      }, D: function(b) {
+        for (var a2 = b.h(), c2 = 0, d = 0; d < a2; d += 1) for (var g2 = 0; g2 < a2; g2 += 1) {
+          for (var e2 = 0, t2 = b.a(d, g2), p = -1; 1 >= p; p += 1) if (!(0 > d + p || a2 <= d + p)) for (var q = -1; 1 >= q; q += 1) 0 > g2 + q || a2 <= g2 + q || (0 != p || 0 != q) && t2 == b.a(d + p, g2 + q) && (e2 += 1);
+          5 < e2 && (c2 += 3 + e2 - 5);
+        }
+        for (d = 0; d < a2 - 1; d += 1) for (g2 = 0; g2 < a2 - 1; g2 += 1) if (e2 = 0, b.a(d, g2) && (e2 += 1), b.a(d + 1, g2) && (e2 += 1), b.a(d, g2 + 1) && (e2 += 1), b.a(d + 1, g2 + 1) && (e2 += 1), 0 == e2 || 4 == e2) c2 += 3;
+        for (d = 0; d < a2; d += 1) for (g2 = 0; g2 < a2 - 6; g2 += 1) b.a(d, g2) && !b.a(d, g2 + 1) && b.a(d, g2 + 2) && b.a(d, g2 + 3) && b.a(d, g2 + 4) && !b.a(d, g2 + 5) && b.a(d, g2 + 6) && (c2 += 40);
+        for (g2 = 0; g2 < a2; g2 += 1) for (d = 0; d < a2 - 6; d += 1) b.a(d, g2) && !b.a(d + 1, g2) && b.a(d + 2, g2) && b.a(d + 3, g2) && b.a(d + 4, g2) && !b.a(d + 5, g2) && b.a(d + 6, g2) && (c2 += 40);
+        for (g2 = e2 = 0; g2 < a2; g2 += 1) for (d = 0; d < a2; d += 1) b.a(d, g2) && (e2 += 1);
+        return c2 += Math.abs(100 * e2 / a2 / a2 - 50) / 5 * 10;
+      } };
+      return e;
+    }(), v = function() {
+      for (var c = Array(256), a = Array(256), e = 0; 8 > e; e += 1) c[e] = 1 << e;
+      for (e = 8; 256 > e; e += 1) c[e] = c[e - 4] ^ c[e - 5] ^ c[e - 6] ^ c[e - 8];
+      for (e = 0; 255 > e; e += 1) a[c[e]] = e;
+      return { g: function(b) {
+        if (1 > b) throw Error("glog(" + b + ")");
+        return a[b];
+      }, i: function(b) {
+        for (; 0 > b; ) b += 255;
+        for (; 256 <= b; ) b -= 255;
+        return c[b];
+      } };
+    }(), t = /* @__PURE__ */ function() {
+      function c(b, c2) {
+        switch (c2) {
+          case A.L:
+            return a[4 * (b - 1)];
+          case A.M:
+            return a[4 * (b - 1) + 1];
+          case A.Q:
+            return a[4 * (b - 1) + 2];
+          case A.H:
+            return a[4 * (b - 1) + 3];
+        }
+      }
+      var a = [
+        [1, 26, 19],
+        [1, 26, 16],
+        [1, 26, 13],
+        [1, 26, 9],
+        [1, 44, 34],
+        [1, 44, 28],
+        [1, 44, 22],
+        [1, 44, 16],
+        [1, 70, 55],
+        [1, 70, 44],
+        [2, 35, 17],
+        [2, 35, 13],
+        [1, 100, 80],
+        [2, 50, 32],
+        [2, 50, 24],
+        [4, 25, 9],
+        [1, 134, 108],
+        [2, 67, 43],
+        [2, 33, 15, 2, 34, 16],
+        [2, 33, 11, 2, 34, 12],
+        [2, 86, 68],
+        [4, 43, 27],
+        [4, 43, 19],
+        [4, 43, 15],
+        [2, 98, 78],
+        [4, 49, 31],
+        [2, 32, 14, 4, 33, 15],
+        [4, 39, 13, 1, 40, 14],
+        [2, 121, 97],
+        [2, 60, 38, 2, 61, 39],
+        [4, 40, 18, 2, 41, 19],
+        [4, 40, 14, 2, 41, 15],
+        [2, 146, 116],
+        [
+          3,
+          58,
+          36,
+          2,
+          59,
+          37
+        ],
+        [4, 36, 16, 4, 37, 17],
+        [4, 36, 12, 4, 37, 13],
+        [2, 86, 68, 2, 87, 69],
+        [4, 69, 43, 1, 70, 44],
+        [6, 43, 19, 2, 44, 20],
+        [6, 43, 15, 2, 44, 16],
+        [4, 101, 81],
+        [1, 80, 50, 4, 81, 51],
+        [4, 50, 22, 4, 51, 23],
+        [3, 36, 12, 8, 37, 13],
+        [2, 116, 92, 2, 117, 93],
+        [6, 58, 36, 2, 59, 37],
+        [4, 46, 20, 6, 47, 21],
+        [7, 42, 14, 4, 43, 15],
+        [4, 133, 107],
+        [8, 59, 37, 1, 60, 38],
+        [8, 44, 20, 4, 45, 21],
+        [12, 33, 11, 4, 34, 12],
+        [3, 145, 115, 1, 146, 116],
+        [4, 64, 40, 5, 65, 41],
+        [11, 36, 16, 5, 37, 17],
+        [11, 36, 12, 5, 37, 13],
+        [5, 109, 87, 1, 110, 88],
+        [5, 65, 41, 5, 66, 42],
+        [5, 54, 24, 7, 55, 25],
+        [11, 36, 12, 7, 37, 13],
+        [5, 122, 98, 1, 123, 99],
+        [
+          7,
+          73,
+          45,
+          3,
+          74,
+          46
+        ],
+        [15, 43, 19, 2, 44, 20],
+        [3, 45, 15, 13, 46, 16],
+        [1, 135, 107, 5, 136, 108],
+        [10, 74, 46, 1, 75, 47],
+        [1, 50, 22, 15, 51, 23],
+        [2, 42, 14, 17, 43, 15],
+        [5, 150, 120, 1, 151, 121],
+        [9, 69, 43, 4, 70, 44],
+        [17, 50, 22, 1, 51, 23],
+        [2, 42, 14, 19, 43, 15],
+        [3, 141, 113, 4, 142, 114],
+        [3, 70, 44, 11, 71, 45],
+        [17, 47, 21, 4, 48, 22],
+        [9, 39, 13, 16, 40, 14],
+        [3, 135, 107, 5, 136, 108],
+        [3, 67, 41, 13, 68, 42],
+        [15, 54, 24, 5, 55, 25],
+        [15, 43, 15, 10, 44, 16],
+        [4, 144, 116, 4, 145, 117],
+        [17, 68, 42],
+        [17, 50, 22, 6, 51, 23],
+        [19, 46, 16, 6, 47, 17],
+        [2, 139, 111, 7, 140, 112],
+        [17, 74, 46],
+        [7, 54, 24, 16, 55, 25],
+        [34, 37, 13],
+        [
+          4,
+          151,
+          121,
+          5,
+          152,
+          122
+        ],
+        [4, 75, 47, 14, 76, 48],
+        [11, 54, 24, 14, 55, 25],
+        [16, 45, 15, 14, 46, 16],
+        [6, 147, 117, 4, 148, 118],
+        [6, 73, 45, 14, 74, 46],
+        [11, 54, 24, 16, 55, 25],
+        [30, 46, 16, 2, 47, 17],
+        [8, 132, 106, 4, 133, 107],
+        [8, 75, 47, 13, 76, 48],
+        [7, 54, 24, 22, 55, 25],
+        [22, 45, 15, 13, 46, 16],
+        [10, 142, 114, 2, 143, 115],
+        [19, 74, 46, 4, 75, 47],
+        [28, 50, 22, 6, 51, 23],
+        [33, 46, 16, 4, 47, 17],
+        [8, 152, 122, 4, 153, 123],
+        [22, 73, 45, 3, 74, 46],
+        [8, 53, 23, 26, 54, 24],
+        [12, 45, 15, 28, 46, 16],
+        [3, 147, 117, 10, 148, 118],
+        [3, 73, 45, 23, 74, 46],
+        [4, 54, 24, 31, 55, 25],
+        [11, 45, 15, 31, 46, 16],
+        [7, 146, 116, 7, 147, 117],
+        [21, 73, 45, 7, 74, 46],
+        [1, 53, 23, 37, 54, 24],
+        [19, 45, 15, 26, 46, 16],
+        [5, 145, 115, 10, 146, 116],
+        [19, 75, 47, 10, 76, 48],
+        [15, 54, 24, 25, 55, 25],
+        [23, 45, 15, 25, 46, 16],
+        [13, 145, 115, 3, 146, 116],
+        [2, 74, 46, 29, 75, 47],
+        [42, 54, 24, 1, 55, 25],
+        [23, 45, 15, 28, 46, 16],
+        [17, 145, 115],
+        [10, 74, 46, 23, 75, 47],
+        [10, 54, 24, 35, 55, 25],
+        [19, 45, 15, 35, 46, 16],
+        [17, 145, 115, 1, 146, 116],
+        [14, 74, 46, 21, 75, 47],
+        [29, 54, 24, 19, 55, 25],
+        [11, 45, 15, 46, 46, 16],
+        [13, 145, 115, 6, 146, 116],
+        [14, 74, 46, 23, 75, 47],
+        [44, 54, 24, 7, 55, 25],
+        [59, 46, 16, 1, 47, 17],
+        [12, 151, 121, 7, 152, 122],
+        [12, 75, 47, 26, 76, 48],
+        [39, 54, 24, 14, 55, 25],
+        [22, 45, 15, 41, 46, 16],
+        [6, 151, 121, 14, 152, 122],
+        [6, 75, 47, 34, 76, 48],
+        [46, 54, 24, 10, 55, 25],
+        [2, 45, 15, 64, 46, 16],
+        [17, 152, 122, 4, 153, 123],
+        [29, 74, 46, 14, 75, 47],
+        [49, 54, 24, 10, 55, 25],
+        [24, 45, 15, 46, 46, 16],
+        [4, 152, 122, 18, 153, 123],
+        [13, 74, 46, 32, 75, 47],
+        [48, 54, 24, 14, 55, 25],
+        [42, 45, 15, 32, 46, 16],
+        [20, 147, 117, 4, 148, 118],
+        [40, 75, 47, 7, 76, 48],
+        [43, 54, 24, 22, 55, 25],
+        [10, 45, 15, 67, 46, 16],
+        [19, 148, 118, 6, 149, 119],
+        [18, 75, 47, 31, 76, 48],
+        [34, 54, 24, 34, 55, 25],
+        [20, 45, 15, 61, 46, 16]
+      ], e = { I: function(b, a2) {
+        var e2 = c(b, a2);
+        if ("undefined" == typeof e2) throw Error("bad rs block @ typeNumber:" + b + "/errorCorrectLevel:" + a2);
+        b = e2.length / 3;
+        a2 = [];
+        for (var d = 0; d < b; d += 1) for (var g2 = e2[3 * d], h = e2[3 * d + 1], t2 = e2[3 * d + 2], p = 0; p < g2; p += 1) {
+          var q = t2, f = {};
+          f.o = h;
+          f.j = q;
+          a2.push(f);
+        }
+        return a2;
+      } };
+      return e;
+    }();
+    return C;
+  }());
+  var qr_creator_es6_min_default = QrCreator;
+
   // src/inference/plot.ts
   var LORE_HINTS = /inner circle|plot secret|^secret\b|^-?\s*plot\b/i;
   function blockName(inner) {
@@ -201,6 +821,8 @@ HARD RULES (weaker models break these \u2014 do not):
     let restoreAllCb = null;
     let saveCardValueCb = null;
     let selfHealDismissed = false;
+    let managerShowSettings = false;
+    let api;
     const host = document.createElement("div");
     const savedLeft = localStorage.getItem("aid-tracker-pos-left");
     const savedTop = localStorage.getItem("aid-tracker-pos-top");
@@ -225,28 +847,32 @@ HARD RULES (weaker models break these \u2014 do not):
         --bg-card: rgba(255, 255, 255, 0.02);
         --btn-bg: rgba(255, 255, 255, 0.04);
         --btn-hover: rgba(255, 255, 255, 0.1);
+        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+      }
+      :host(.dragging), :host(.dragging) .box {
+        transition: none !important;
       }
       
-      .box.theme-emerald {
+      .theme-emerald, .box.theme-emerald {
         --accent-color: #10b981;
         --accent-glow: rgba(16, 185, 129, 0.2);
         --accent-border: #059669;
         --theme-text-color: #34d399;
       }
-      .box.theme-synthwave {
+      .theme-synthwave, .box.theme-synthwave {
         --accent-color: #d946ef;
         --accent-glow: rgba(217, 70, 239, 0.2);
         --accent-border: #c026d3;
         --theme-text-color: #f472b6;
         --bg-glass: rgba(20, 16, 32, 0.88);
       }
-      .box.theme-amber {
+      .theme-amber, .box.theme-amber {
         --accent-color: #f59e0b;
         --accent-glow: rgba(245, 158, 11, 0.2);
         --accent-border: #d97706;
         --theme-text-color: #fbbf24;
       }
-      .box.theme-sapphire {
+      .theme-sapphire, .box.theme-sapphire {
         --accent-color: #06b6d4;
         --accent-glow: rgba(6, 182, 212, 0.2);
         --accent-border: #0891b2;
@@ -281,20 +907,115 @@ HARD RULES (weaker models break these \u2014 do not):
         box-sizing: border-box;
         box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
       }
-      .box.minimized {
-        width: 130px;
-        height: 32px;
-        border-radius: 16px;
-        overflow: hidden;
-        resize: none;
-        padding: 0 12px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
-        background: rgba(18, 18, 22, 0.95);
-        border-color: var(--accent-color);
-        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+      /* Desktop minimized state: Text pill */
+      @media (min-width: 601px) {
+        .box.minimized {
+          width: 130px;
+          height: 32px;
+          min-width: 130px;
+          min-height: 32px;
+          border-radius: 16px;
+          overflow: hidden;
+          resize: none;
+          padding: 0 12px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+          background: rgba(18, 18, 22, 0.95);
+          border-color: var(--accent-color);
+          transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+          cursor: pointer;
+        }
+        .box.minimized #drag-handle {
+          padding-bottom: 0;
+          border-bottom: none;
+          margin-bottom: 0;
+          justify-content: space-between;
+          align-items: center;
+          height: 100%;
+          width: 100%;
+        }
+        .box.minimized #min-toggle {
+          background: none;
+          border: none;
+          color: var(--accent-color);
+          cursor: pointer;
+          font-size: 13px;
+          padding: 0 4px;
+          margin: 0;
+          width: auto;
+          height: auto;
+          display: inline-block;
+          border-radius: 0;
+        }
+        .box.minimized #min-toggle:hover {
+          color: var(--theme-text-color);
+          background: none;
+        }
+      }
+
+      /* Mobile minimized state: Circle icon */
+      @media (max-width: 600px) {
+        .box.minimized {
+          width: 45px;
+          height: 45px;
+          min-width: 45px;
+          min-height: 45px;
+          border-radius: 50%;
+          overflow: hidden;
+          resize: none;
+          padding: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+          background: var(--bg-glass);
+          border-color: var(--accent-color);
+          transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+          cursor: pointer;
+        }
+        .box.minimized #drag-handle {
+          padding-bottom: 0;
+          border-bottom: none;
+          margin-bottom: 0;
+          justify-content: center;
+          align-items: center;
+          height: 100%;
+          width: 100%;
+        }
+        .box.minimized #min-toggle {
+          width: 100%;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0;
+          border-radius: 50%;
+        }
+        .box.minimized #min-toggle:hover {
+          color: var(--theme-text-color);
+          background: rgba(255, 255, 255, 0.05);
+        }
+        .box.minimized .badge-dot {
+          position: absolute;
+          top: 6px;
+          right: 6px;
+          margin: 0;
+          width: 8px;
+          height: 8px;
+          z-index: 10;
+        }
+        .box:not(.minimized) {
+          width: 100% !important;
+          height: 100% !important;
+          min-width: 0 !important;
+          min-height: 0 !important;
+          max-width: none !important;
+          max-height: none !important;
+          resize: none !important;
+          border-radius: 14px !important;
+        }
       }
       
       /* Rounded translucent scrollbars */
@@ -445,10 +1166,10 @@ HARD RULES (weaker models break these \u2014 do not):
         background: rgba(0, 0, 0, 0.4);
       }
       
-      #open-settings svg {
+      #open-settings svg, #open-settings-manager svg {
         transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s;
       }
-      #open-settings:hover svg {
+      #open-settings:hover svg, #open-settings-manager:hover svg {
         transform: rotate(45deg);
         color: var(--accent-color);
       }
@@ -1700,6 +2421,12 @@ HARD RULES (weaker models break these \u2014 do not):
               </div>
               
               <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
+                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Mobile Settings Sync (QR Code)</h4>
+                <div class="note" style="margin-bottom:8px;">Generate a QR code to sync settings (excluding API keys) directly to your mobile device.</div>
+                <button id="gen-qr-btn" type="button" class="btn" style="justify-content:center;background:rgba(168,85,247,0.08);color:#c084fc;border:1px solid rgba(168,85,247,0.25);padding:6px 12px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;width:100%;box-sizing:border-box;">Generate Sync QR Code</button>
+              </div>
+              
+              <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
                 <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Full Database Backup & Restore</h4>
                 <div class="note" style="margin-bottom:8px;">Back up the entire local database (settings, cards, versions, operations, histories) to a single file.</div>
                 <div style="display:flex;gap:6px;width:100%;">
@@ -1740,7 +2467,14 @@ HARD RULES (weaker models break these \u2014 do not):
             
             <!-- Pane: Adventures Manager -->
             <div id="tab-manager" class="tab-pane" style="display:none; flex-direction:column; gap:8px; overflow:hidden;">
-              <h4 style="margin:4px 0;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Adventures Manager</h4>
+              <div style="display:flex; justify-content:space-between; align-items:center; margin:4px 0;">
+                <h4 style="margin:0;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Adventures Manager</h4>
+                <button id="open-settings-manager" style="background:none;border:none;padding:4px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;" title="Settings">
+                  <svg style="width:16px;height:16px;fill:currentColor;" viewBox="0 0 24 24">
+                    <path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.13,5.91,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87 C2.62,9.08,2.67,9.34,2.85,9.48l2.03,1.58C4.83,11.36,4.81,11.69,4.81,12c0,0.31,0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.43-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/>
+                  </svg>
+                </button>
+              </div>
               <div class="note" style="margin-bottom:4px; font-size:11px;">Manage your Global Asset library and explore locally stored adventure data.</div>
               
               <!-- Sub Tab Navigation -->
@@ -2192,37 +2926,80 @@ HARD RULES (weaker models break these \u2014 do not):
     });
     const toggle = root.getElementById("min-toggle");
     const contentBody = root.getElementById("content-body");
+    let dragOccurred = false;
     let isMinimized = localStorage.getItem("aid-tracker-minimized") === "true";
-    function ensureHostInsideViewport() {
-      let width = 320;
-      let height = 400;
+    function applyPosition() {
       if (isMinimized) {
-        width = 130;
-        height = 32;
+        host.style.bottom = "auto";
+        host.style.right = "auto";
+        const savedLeft2 = localStorage.getItem("aid-tracker-pos-left");
+        const savedTop2 = localStorage.getItem("aid-tracker-pos-top");
+        let leftVal = savedLeft2 ? parseFloat(savedLeft2) : 12;
+        let topVal = savedTop2 ? parseFloat(savedTop2) : window.innerHeight - 60;
+        const maxLeft = Math.max(0, window.innerWidth - 45);
+        const maxTop = Math.max(0, window.innerHeight - 45);
+        leftVal = Math.max(0, Math.min(leftVal, maxLeft));
+        topVal = Math.max(0, Math.min(topVal, maxTop));
+        host.style.left = leftVal + "px";
+        host.style.top = topVal + "px";
+        host.style.width = "";
+        host.style.height = "";
       } else {
-        const sw = localStorage.getItem("aid-tracker-size-width");
-        const sh = localStorage.getItem("aid-tracker-size-height");
-        if (sw) width = parseInt(sw, 10) || 320;
-        if (sh) height = parseInt(sh, 10) || 400;
+        if (window.innerWidth <= 600) {
+          host.style.left = "10px";
+          host.style.right = "10px";
+          host.style.top = "60px";
+          host.style.bottom = "80px";
+          host.style.width = "calc(100% - 20px)";
+          host.style.height = "calc(100% - 140px)";
+          box.style.width = "100%";
+          box.style.height = "100%";
+          box.style.maxWidth = "none";
+          box.style.maxHeight = "none";
+        } else {
+          host.style.bottom = "auto";
+          host.style.right = "auto";
+          const savedLeft2 = localStorage.getItem("aid-tracker-pos-left");
+          const savedTop2 = localStorage.getItem("aid-tracker-pos-top");
+          let leftVal = savedLeft2 ? parseFloat(savedLeft2) : 12;
+          let topVal = savedTop2 ? parseFloat(savedTop2) : window.innerHeight - 500;
+          const maxLeft = Math.max(0, window.innerWidth - 320);
+          const maxTop = Math.max(0, window.innerHeight - 300);
+          leftVal = Math.max(0, Math.min(leftVal, maxLeft));
+          topVal = Math.max(0, Math.min(topVal, maxTop));
+          host.style.left = leftVal + "px";
+          host.style.top = topVal + "px";
+          host.style.width = "";
+          host.style.height = "";
+          const sw = localStorage.getItem("aid-tracker-size-width");
+          const sh = localStorage.getItem("aid-tracker-size-height");
+          box.style.width = sw || "320px";
+          box.style.height = sh || "auto";
+          box.style.maxWidth = "90vw";
+          box.style.maxHeight = "85vh";
+        }
       }
-      const currentLeft = host.offsetLeft;
-      const currentTop = host.offsetTop;
-      const clampedLeft = Math.min(Math.max(0, currentLeft), window.innerWidth - width);
-      const clampedTop = Math.min(Math.max(0, currentTop), window.innerHeight - height);
-      host.style.bottom = "auto";
-      host.style.left = clampedLeft + "px";
-      host.style.top = clampedTop + "px";
-      localStorage.setItem("aid-tracker-pos-left", host.style.left);
-      localStorage.setItem("aid-tracker-pos-top", host.style.top);
     }
     function updateMinState() {
       const pendingCount = lastState?.versions.filter((v) => v.status === "pending").length ?? 0;
       if (isMinimized) {
         box.classList.add("minimized");
-        if (pendingCount > 0) {
-          setSafeHTML(toggle, `\uFF0B Story Helper <span class="badge-dot"></span>`);
+        if (window.innerWidth <= 600) {
+          let btnContent = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events: none; display: block;">
+  <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+  <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+  <path d="M14 3l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z" fill="currentColor" stroke="none" />
+</svg>`;
+          if (pendingCount > 0) {
+            btnContent += `<span class="badge-dot"></span>`;
+          }
+          setSafeHTML(toggle, btnContent);
         } else {
-          toggle.textContent = "\uFF0B Story Helper";
+          if (pendingCount > 0) {
+            setSafeHTML(toggle, `\uFF0B Story Helper <span class="badge-dot"></span>`);
+          } else {
+            toggle.textContent = "\uFF0B Story Helper";
+          }
         }
         st.style.display = "none";
         contentBody.style.display = "none";
@@ -2233,70 +3010,119 @@ HARD RULES (weaker models break these \u2014 do not):
         toggle.textContent = "\u2014";
         st.style.display = "block";
         contentBody.style.display = "flex";
-        const sw = localStorage.getItem("aid-tracker-size-width");
-        const sh = localStorage.getItem("aid-tracker-size-height");
-        if (sw) box.style.width = sw;
-        if (sh) box.style.height = sh;
       }
-      ensureHostInsideViewport();
+      applyPosition();
     }
-    toggle.addEventListener("click", () => {
-      isMinimized = !isMinimized;
-      localStorage.setItem("aid-tracker-minimized", String(isMinimized));
+    box.addEventListener("click", (e) => {
+      const target = e.target;
+      if (dragOccurred) {
+        return;
+      }
+      if (isMinimized) {
+        isMinimized = false;
+        localStorage.setItem("aid-tracker-minimized", String(isMinimized));
+        updateMinState();
+      } else if (target.closest("#min-toggle")) {
+        isMinimized = true;
+        localStorage.setItem("aid-tracker-minimized", String(isMinimized));
+        updateMinState();
+      }
+    });
+    window.addEventListener("resize", () => {
       updateMinState();
     });
     updateMinState();
-    window.addEventListener("resize", ensureHostInsideViewport);
     box.addEventListener("mouseup", () => {
-      if (!isMinimized) {
+      if (!isMinimized && window.innerWidth > 600) {
         localStorage.setItem("aid-tracker-size-width", box.style.width);
         localStorage.setItem("aid-tracker-size-height", box.style.height);
       }
     });
-    function makeDraggable(el, handle) {
+    function makeDraggable(el) {
       let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
-      handle.onmousedown = dragMouseDown;
-      function dragMouseDown(e) {
-        if (e.target.closest("button")) return;
-        e.preventDefault();
-        pos3 = e.clientX;
-        pos4 = e.clientY;
-        document.onmouseup = closeDragElement;
-        document.onmousemove = elementDrag;
-      }
-      function elementDrag(e) {
-        e.preventDefault();
-        pos1 = pos3 - e.clientX;
-        pos2 = pos4 - e.clientY;
-        pos3 = e.clientX;
-        pos4 = e.clientY;
-        let width = 320;
-        let height = 400;
-        if (isMinimized) {
-          width = 130;
-          height = 32;
-        } else {
-          const sw = localStorage.getItem("aid-tracker-size-width");
-          const sh = localStorage.getItem("aid-tracker-size-height");
-          if (sw) width = parseInt(sw, 10) || 320;
-          if (sh) height = parseInt(sh, 10) || 400;
+      let startX = 0, startY = 0;
+      box.addEventListener("mousedown", (e) => {
+        dragOccurred = false;
+        onStart(e);
+      });
+      box.addEventListener("touchstart", (e) => {
+        dragOccurred = false;
+        onStart(e);
+      }, { passive: false });
+      function onStart(e) {
+        const target = e.target;
+        if (!isMinimized && window.innerWidth <= 600) {
+          return;
         }
+        if (!isMinimized && !target.closest("#drag-handle")) {
+          return;
+        }
+        if (!isMinimized && target.closest("button")) {
+          return;
+        }
+        if (e instanceof MouseEvent) {
+          e.preventDefault();
+        }
+        host.classList.add("dragging");
+        dragOccurred = false;
+        const clientX = e instanceof MouseEvent ? e.clientX : e.touches[0]?.clientX ?? 0;
+        const clientY = e instanceof MouseEvent ? e.clientY : e.touches[0]?.clientY ?? 0;
+        pos3 = clientX;
+        pos4 = clientY;
+        startX = clientX;
+        startY = clientY;
+        if (e instanceof MouseEvent) {
+          document.addEventListener("mousemove", onMove);
+          document.addEventListener("mouseup", onEnd);
+        } else {
+          document.addEventListener("touchmove", onMove, { passive: false });
+          document.addEventListener("touchend", onEnd);
+        }
+      }
+      function onMove(e) {
+        const clientX = e instanceof MouseEvent ? e.clientX : e.touches[0]?.clientX ?? 0;
+        const clientY = e instanceof MouseEvent ? e.clientY : e.touches[0]?.clientY ?? 0;
+        if (Math.abs(clientX - startX) > 15 || Math.abs(clientY - startY) > 15) {
+          dragOccurred = true;
+        }
+        if (dragOccurred || e instanceof MouseEvent) {
+          if (e.cancelable) {
+            e.preventDefault();
+          }
+        }
+        if (!dragOccurred && !(e instanceof MouseEvent)) {
+          return;
+        }
+        pos1 = pos3 - clientX;
+        pos2 = pos4 - clientY;
+        pos3 = clientX;
+        pos4 = clientY;
         let newLeft = el.offsetLeft - pos1;
         let newTop = el.offsetTop - pos2;
-        newLeft = Math.min(Math.max(0, newLeft), window.innerWidth - width);
-        newTop = Math.min(Math.max(0, newTop), window.innerHeight - height);
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        const rect = el.getBoundingClientRect();
+        newLeft = Math.max(0, Math.min(newLeft, viewportWidth - rect.width));
+        newTop = Math.max(0, Math.min(newTop, viewportHeight - rect.height));
         el.style.bottom = "auto";
+        el.style.right = "auto";
         el.style.left = newLeft + "px";
         el.style.top = newTop + "px";
         localStorage.setItem("aid-tracker-pos-left", el.style.left);
         localStorage.setItem("aid-tracker-pos-top", el.style.top);
       }
-      function closeDragElement() {
-        document.onmouseup = null;
-        document.onmousemove = null;
+      function onEnd(e) {
+        host.classList.remove("dragging");
+        if (e instanceof MouseEvent) {
+          document.removeEventListener("mousemove", onMove);
+          document.removeEventListener("mouseup", onEnd);
+        } else {
+          document.removeEventListener("touchmove", onMove);
+          document.removeEventListener("touchend", onEnd);
+        }
       }
     }
-    makeDraggable(host, $("drag-handle"));
+    makeDraggable(host);
     const viewTracker = root.getElementById("view-tracker");
     const viewSettings = root.getElementById("view-settings");
     const viewAnalyze = root.getElementById("view-analyze");
@@ -2611,6 +3437,13 @@ HARD RULES (weaker models break these \u2014 do not):
       });
     }
     function switchTab(tabId) {
+      if (tabId === "tab-manager" && lastState?.isManagerOnly) {
+        managerShowSettings = false;
+        const tabNav = viewSettings.querySelector(".tab-nav");
+        if (tabNav) tabNav.style.display = "none";
+        const footer = root.getElementById("settings-footer");
+        if (footer) footer.style.display = "none";
+      }
       const panes = root.querySelectorAll(".tab-pane");
       const btns = root.querySelectorAll(".tab-btn");
       panes.forEach((p) => {
@@ -3237,7 +4070,7 @@ HARD RULES (weaker models break these \u2014 do not):
       if (statusEl) statusEl.style.display = "none";
       renderOffMetaRepository();
     });
-    $("open-settings").addEventListener("click", () => {
+    const openSettingsHandler = () => {
       root.getElementById("prompt-s1").value = lastState?.settings?.customPromptSection1 || DEFAULT_PROMPT_SECTION_1;
       root.getElementById("prompt-s2").value = lastState?.settings?.customPromptSection2 || DEFAULT_PROMPT_SECTION_2;
       root.getElementById("prompt-s3").value = lastState?.settings?.customPromptSection3 || DEFAULT_PROMPT_SECTION_3;
@@ -3248,9 +4081,26 @@ HARD RULES (weaker models break these \u2014 do not):
       }
       const fmtEl = root.getElementById("fmt-mode");
       if (fmtEl) fmtEl.value = lastState?.settings?.formattingMode || DEFAULT_FORMATTING_MODE;
+    };
+    $("open-settings").addEventListener("click", () => {
+      openSettingsHandler();
       showSettingsView();
     });
-    $("cancel-settings").addEventListener("click", showTrackerView);
+    $("open-settings-manager")?.addEventListener("click", () => {
+      managerShowSettings = true;
+      openSettingsHandler();
+      if (lastState) {
+        api.render(lastState);
+      }
+    });
+    $("cancel-settings").addEventListener("click", () => {
+      if (lastState?.isManagerOnly) {
+        managerShowSettings = false;
+        switchTab("tab-manager");
+      } else {
+        showTrackerView();
+      }
+    });
     $("view-settings").addEventListener("click", (e) => {
       const target = e.target;
       const createConfigTab = target.closest("#create-memoraid-config-btn-tab");
@@ -3258,6 +4108,20 @@ HARD RULES (weaker models break these \u2014 do not):
         createConfigTab.disabled = true;
         createConfigTab.textContent = "\u23F3 Creating Config Card...";
         createConfigCb();
+      }
+      const genQrBtn = target.closest("#gen-qr-btn");
+      if (genQrBtn && lastState?.settings) {
+        genQrBtn.disabled = true;
+        const originalText = genQrBtn.textContent;
+        genQrBtn.textContent = "\u23F3 Generating...";
+        compressSettings(lastState.settings).then((payload) => {
+          showQrModal(payload);
+        }).catch((err) => {
+          console.error("[AID panel] QR generation failed:", err);
+        }).finally(() => {
+          genQrBtn.disabled = false;
+          genQrBtn.textContent = originalText;
+        });
       }
     });
     $("info-action-lookback").addEventListener("click", (e) => {
@@ -3340,6 +4204,12 @@ HARD RULES (weaker models break these \u2014 do not):
           reader.readAsText(file);
         });
         input.click();
+      }
+      if (target.closest("#dismiss-self-heal-btn")) {
+        e.stopPropagation();
+        selfHealDismissed = true;
+        const banner = root.getElementById("self-heal-banner");
+        if (banner) banner.style.display = "none";
       }
     });
     let syncKeys = true;
@@ -3560,13 +4430,6 @@ HARD RULES (weaker models break these \u2014 do not):
       if (dismissBanner && dismissMemoraidBannerCb) {
         dismissBanner.disabled = true;
         dismissMemoraidBannerCb();
-        return;
-      }
-      const dismissSelfHeal = target.closest("#dismiss-self-heal-btn");
-      if (dismissSelfHeal) {
-        selfHealDismissed = true;
-        const banner = root.getElementById("self-heal-banner");
-        if (banner) banner.style.display = "none";
         return;
       }
       const an = target.closest("#an");
@@ -3838,7 +4701,121 @@ HARD RULES (weaker models break these \u2014 do not):
         }
       }
     }
-    return {
+    async function compressSettings(settings) {
+      const cleanSettings = { ...settings };
+      delete cleanSettings.apiKeys;
+      delete cleanSettings.keyStatus;
+      if (cleanSettings.cardCommands) {
+        const activeCommands = {};
+        for (const [key, val] of Object.entries(cleanSettings.cardCommands)) {
+          if (val && val !== DEFAULT_CARD_COMMANDS[key]) {
+            activeCommands[key] = val;
+          }
+        }
+        if (Object.keys(activeCommands).length > 0) {
+          cleanSettings.cardCommands = activeCommands;
+        } else {
+          delete cleanSettings.cardCommands;
+        }
+      }
+      if (cleanSettings.customPromptSection1 === DEFAULT_PROMPT_SECTION_1) delete cleanSettings.customPromptSection1;
+      if (cleanSettings.customPromptSection2 === DEFAULT_PROMPT_SECTION_2) delete cleanSettings.customPromptSection2;
+      if (cleanSettings.customPromptSection3 === DEFAULT_PROMPT_SECTION_3) delete cleanSettings.customPromptSection3;
+      if (cleanSettings.customPromptSection4 === DEFAULT_PROMPT_SECTION_4) delete cleanSettings.customPromptSection4;
+      if (cleanSettings.theme === "emerald") delete cleanSettings.theme;
+      if (cleanSettings.formattingMode === DEFAULT_FORMATTING_MODE) delete cleanSettings.formattingMode;
+      if (cleanSettings.analyzeWindow === 20) delete cleanSettings.analyzeWindow;
+      if (cleanSettings.memoraidThoughtLookback === 0) delete cleanSettings.memoraidThoughtLookback;
+      if (cleanSettings.memoraidPresenceLookback === 5) delete cleanSettings.memoraidPresenceLookback;
+      if (cleanSettings.interceptTimeout === 4) delete cleanSettings.interceptTimeout;
+      if (cleanSettings.locationMode === "optionA") delete cleanSettings.locationMode;
+      if (cleanSettings.enableProperNounDetection !== false) delete cleanSettings.enableProperNounDetection;
+      if (cleanSettings.manualMode === false) delete cleanSettings.manualMode;
+      if (cleanSettings.showDebug === false) delete cleanSettings.showDebug;
+      if (cleanSettings.useMemories === false) delete cleanSettings.useMemories;
+      if (cleanSettings.autoRegenerateNativeMemories === false) delete cleanSettings.autoRegenerateNativeMemories;
+      if (cleanSettings.useSinglePassGeneration === false) delete cleanSettings.useSinglePassGeneration;
+      if (cleanSettings.memoraidLookback === 8) delete cleanSettings.memoraidLookback;
+      if (cleanSettings.logPlotEssentials === false) delete cleanSettings.logPlotEssentials;
+      if (cleanSettings.characterCardLimit === 600) delete cleanSettings.characterCardLimit;
+      if (cleanSettings.thoughtCardLimit === 2e3) delete cleanSettings.thoughtCardLimit;
+      if (cleanSettings.memoraidBannerDismissed === false) delete cleanSettings.memoraidBannerDismissed;
+      const jsonStr = JSON.stringify(cleanSettings);
+      try {
+        if (typeof CompressionStream !== "undefined") {
+          const stream = new Blob([jsonStr]).stream().pipeThrough(new CompressionStream("gzip"));
+          const response = new Response(stream);
+          const buffer = await response.arrayBuffer();
+          let binary = "";
+          const bytes = new Uint8Array(buffer);
+          const len = bytes.byteLength;
+          for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          return "gz:" + btoa(binary);
+        }
+      } catch (err) {
+        console.warn("[AID panel] Gzip compression failed, falling back to raw base64:", err);
+      }
+      return "raw:" + btoa(unescape(encodeURIComponent(jsonStr)));
+    }
+    function showQrModal(payload) {
+      root.getElementById("qr-modal")?.remove();
+      const modal = document.createElement("div");
+      modal.id = "qr-modal";
+      const activeTheme = lastState?.settings?.theme || "emerald";
+      modal.className = `theme-${activeTheme}`;
+      modal.style.cssText = "display:flex;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.65);align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);box-sizing:border-box;";
+      const container = document.createElement("div");
+      container.style.cssText = "background:#121215;border:1px solid var(--border-color);border-radius:12px;padding:20px;width:280px;display:flex;flex-direction:column;align-items:center;gap:12px;box-shadow:0 20px 40px rgba(0,0,0,0.65);text-align:center;color:var(--text-primary);box-sizing:border-box;";
+      const title = document.createElement("div");
+      title.style.cssText = "font-weight:700;color:var(--theme-text-color);font-size:14px;letter-spacing:0.02em;";
+      title.textContent = "Sync Settings to Mobile";
+      const note = document.createElement("div");
+      note.className = "note";
+      note.style.cssText = "margin:0;font-size:11px;line-height:1.4;color:var(--text-secondary);";
+      note.textContent = "Scan this code with your mobile device's camera to import settings (excluding API keys).";
+      const canvasContainer = document.createElement("div");
+      canvasContainer.id = "qr-canvas-container";
+      canvasContainer.style.cssText = "background:#fff;padding:8px;border-radius:8px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:180px;height:180px;";
+      const closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.className = "btn";
+      closeBtn.style.cssText = "background:var(--accent-color);color:#fff;font-weight:600;font-size:11px;padding:6px 16px;border-radius:6px;border:none;cursor:pointer;margin-top:4px;width:100%;text-align:center;";
+      closeBtn.textContent = "Close";
+      container.appendChild(title);
+      container.appendChild(note);
+      container.appendChild(canvasContainer);
+      container.appendChild(closeBtn);
+      modal.appendChild(container);
+      root.appendChild(modal);
+      const closeModal = () => modal.remove();
+      closeBtn.addEventListener("click", closeModal);
+      modal.addEventListener("click", (e) => {
+        if (e.target === modal) closeModal();
+      });
+      const qrUrl = window.location.origin + "/?importSettings=" + encodeURIComponent(payload);
+      const accentColor = getComputedStyle(modal).getPropertyValue("--accent-color").trim() || "#000000";
+      try {
+        qr_creator_es6_min_default.render({
+          text: qrUrl,
+          radius: 0.2,
+          ecLevel: "M",
+          fill: accentColor,
+          background: "#ffffff",
+          size: 164
+        }, canvasContainer);
+      } catch (err) {
+        console.error("[AID panel] QrCreator failed to render:", err);
+        canvasContainer.style.background = "#fee2e2";
+        canvasContainer.style.color = "#991b1b";
+        canvasContainer.style.flexDirection = "column";
+        canvasContainer.style.fontSize = "10px";
+        canvasContainer.style.padding = "12px";
+        canvasContainer.textContent = "QR Code generation failed. The settings payload may be too large. Try resetting some templates to default.";
+      }
+    }
+    api = {
       setStatus: (t) => {
         st.textContent = t;
       },
@@ -3925,7 +4902,12 @@ HARD RULES (weaker models break these \u2014 do not):
           characterCardLimit,
           thoughtCardLimit
         );
-        showTrackerView();
+        if (lastState?.isManagerOnly) {
+          managerShowSettings = false;
+          switchTab("tab-manager");
+        } else {
+          showTrackerView();
+        }
       }),
       onThemeChange: (cb) => {
         themeChangeCb = cb;
@@ -4060,18 +5042,45 @@ HARD RULES (weaker models break these \u2014 do not):
           viewSettings.style.display = "flex";
           viewAnalyze.style.display = "none";
           const tabNav = viewSettings.querySelector(".tab-nav");
-          if (tabNav) tabNav.style.display = "none";
           const footer = root.getElementById("settings-footer");
-          if (footer) footer.style.display = "none";
-          viewSettings.querySelectorAll(".tab-pane").forEach((pane) => {
-            if (pane.id !== "tab-manager") {
-              pane.style.display = "none";
+          if (managerShowSettings) {
+            if (tabNav) {
+              tabNav.style.display = "flex";
+              tabNav.querySelectorAll(".tab-btn").forEach((btn) => {
+                const tab = btn.getAttribute("data-tab");
+                if (tab === "tab-prov" || tab === "tab-debug") {
+                  btn.style.display = "";
+                } else {
+                  btn.style.display = "none";
+                }
+              });
             }
-          });
-          if (tabManagerPane) tabManagerPane.style.display = "flex";
+            if (footer) footer.style.display = "flex";
+            const activeBtn = viewSettings.querySelector(".tab-btn.active");
+            const currentActiveTab = activeBtn?.getAttribute("data-tab");
+            if (currentActiveTab !== "tab-prov" && currentActiveTab !== "tab-debug") {
+              switchTab("tab-prov");
+            } else {
+              switchTab(currentActiveTab || "tab-prov");
+            }
+          } else {
+            if (tabNav) tabNav.style.display = "none";
+            if (footer) footer.style.display = "none";
+            viewSettings.querySelectorAll(".tab-pane").forEach((pane) => {
+              if (pane.id !== "tab-manager") {
+                pane.style.display = "none";
+              }
+            });
+            if (tabManagerPane) tabManagerPane.style.display = "flex";
+          }
         } else {
           const tabNav = viewSettings.querySelector(".tab-nav");
-          if (tabNav) tabNav.style.display = "flex";
+          if (tabNav) {
+            tabNav.style.display = "flex";
+            tabNav.querySelectorAll(".tab-btn").forEach((btn) => {
+              btn.style.display = "";
+            });
+          }
           const footer = root.getElementById("settings-footer");
           if (footer) footer.style.display = "flex";
           const activeBtn = viewSettings.querySelector(".tab-btn.active");
@@ -4089,16 +5098,17 @@ HARD RULES (weaker models break these \u2014 do not):
         }
         const titleTail = [state.scenario, state.protagonist].filter(Boolean).join(" - ");
         st.textContent = titleTail ? `AID Story Helper: ${titleTail}` : "AID Story Helper";
+        const shouldForceUpdate = isShortIdChanged || !prevState;
         if (isShortIdChanged) {
           protEl.value = state.protagonist || "";
-        } else if (document.activeElement !== protEl) {
+        } else if (root.activeElement !== protEl) {
           protEl.value = state.protagonist || "";
         }
-        if (state.settings?.theme && themeEl.value !== state.settings.theme) {
+        if (state.settings?.theme && (shouldForceUpdate || root.activeElement !== themeEl) && themeEl.value !== state.settings.theme) {
           themeEl.value = state.settings.theme;
           updateThemeClass();
         }
-        if (state.settings?.provider && provEl.value !== state.settings.provider) {
+        if (state.settings?.provider && (shouldForceUpdate || root.activeElement !== provEl) && provEl.value !== state.settings.provider) {
           provEl.value = state.settings.provider;
           updateProviderLabels();
         }
@@ -4108,33 +5118,35 @@ HARD RULES (weaker models break these \u2014 do not):
         } else if (!keyEl.value) {
           updateProviderLabels();
         }
-        if (state.settings?.analyzeWindow && !winEl.value) winEl.value = String(state.settings.analyzeWindow);
-        if (state.settings && !memoraidWinEl.value) {
+        if (state.settings?.analyzeWindow && (shouldForceUpdate || root.activeElement !== winEl) && winEl.value !== String(state.settings.analyzeWindow)) {
+          winEl.value = String(state.settings.analyzeWindow);
+        }
+        if (state.settings && (shouldForceUpdate || root.activeElement !== memoraidWinEl) && memoraidWinEl.value !== String(state.settings.memoraidLookback ?? 8)) {
           memoraidWinEl.value = String(state.settings.memoraidLookback ?? 8);
         }
-        if (state.settings && !memoraidThoughtWinEl.value) {
+        if (state.settings && (shouldForceUpdate || root.activeElement !== memoraidThoughtWinEl) && memoraidThoughtWinEl.value !== String(state.settings.memoraidThoughtLookback ?? 1)) {
           const val = state.settings.memoraidThoughtLookback ?? 1;
           memoraidThoughtWinEl.value = String(val >= 1 ? val : 1);
         }
-        if (state.settings && !memoraidPresenceWinEl.value) {
+        if (state.settings && (shouldForceUpdate || root.activeElement !== memoraidPresenceWinEl) && memoraidPresenceWinEl.value !== String(state.settings.memoraidPresenceLookback ?? 5)) {
           memoraidPresenceWinEl.value = String(state.settings.memoraidPresenceLookback ?? 5);
         }
-        if (state.settings && !interceptTimeoutEl.value) {
+        if (state.settings && (shouldForceUpdate || root.activeElement !== interceptTimeoutEl) && interceptTimeoutEl.value !== String(state.settings.interceptTimeout ?? 10)) {
           interceptTimeoutEl.value = String(state.settings.interceptTimeout ?? 10);
         }
-        if (state.settings && !charCardLimitEl.value) {
+        if (state.settings && (shouldForceUpdate || root.activeElement !== charCardLimitEl) && charCardLimitEl.value !== String(state.settings.characterCardLimit ?? 600)) {
           charCardLimitEl.value = String(state.settings.characterCardLimit ?? 600);
         }
-        if (state.settings && !thoughtCardLimitEl.value) {
+        if (state.settings && (shouldForceUpdate || root.activeElement !== thoughtCardLimitEl) && thoughtCardLimitEl.value !== String(state.settings.thoughtCardLimit ?? 2e3)) {
           thoughtCardLimitEl.value = String(state.settings.thoughtCardLimit ?? 2e3);
         }
         applyMemoraidTiming(state.memoraidTiming);
         const locModeEl = root.getElementById("location-mode");
-        if (locModeEl && state.settings) {
+        if (locModeEl && state.settings && (shouldForceUpdate || root.activeElement !== locModeEl) && locModeEl.value !== (state.settings.locationMode || "optionA")) {
           locModeEl.value = state.settings.locationMode || "optionA";
         }
         const properNounDetectEl = root.getElementById("enable-proper-noun-detection");
-        if (properNounDetectEl && state.settings) {
+        if (properNounDetectEl && state.settings && (shouldForceUpdate || root.activeElement !== properNounDetectEl)) {
           properNounDetectEl.checked = state.settings.enableProperNounDetection !== false;
         }
         const hasConfigCard = (state.cards ?? []).some(
@@ -4149,23 +5161,23 @@ HARD RULES (weaker models break these \u2014 do not):
           }
         }
         const manualModeEl = root.getElementById("enable-manual-mode");
-        if (manualModeEl && state.settings) {
+        if (manualModeEl && state.settings && (shouldForceUpdate || root.activeElement !== manualModeEl)) {
           manualModeEl.checked = !!state.settings.manualMode;
         }
         const showDbgEl = root.getElementById("show-dbg");
-        if (showDbgEl && state.settings) {
+        if (showDbgEl && state.settings && (shouldForceUpdate || root.activeElement !== showDbgEl)) {
           showDbgEl.checked = !!state.settings.showDebug;
         }
         const logPeEl = root.getElementById("log-pe-console");
-        if (logPeEl && state.settings) {
+        if (logPeEl && state.settings && (shouldForceUpdate || root.activeElement !== logPeEl)) {
           logPeEl.checked = !!state.settings.logPlotEssentials;
         }
         const useMemsEl = root.getElementById("use-memories");
-        if (useMemsEl && state.settings) {
+        if (useMemsEl && state.settings && (shouldForceUpdate || root.activeElement !== useMemsEl)) {
           useMemsEl.checked = !!state.settings.useMemories;
         }
         const autoRegenMemsEl = root.getElementById("auto-regen-memories");
-        if (autoRegenMemsEl && state.settings) {
+        if (autoRegenMemsEl && state.settings && (shouldForceUpdate || root.activeElement !== autoRegenMemsEl)) {
           autoRegenMemsEl.checked = !!state.settings.autoRegenerateNativeMemories;
         }
         if (state.settings) {
@@ -4173,10 +5185,10 @@ HARD RULES (weaker models break these \u2014 do not):
           const s2 = root.getElementById("prompt-s2");
           const s3 = root.getElementById("prompt-s3");
           const s4 = root.getElementById("prompt-s4");
-          if (s1 && root.activeElement !== s1) s1.value = state.settings.customPromptSection1 || DEFAULT_PROMPT_SECTION_1;
-          if (s2 && root.activeElement !== s2) s2.value = state.settings.customPromptSection2 || DEFAULT_PROMPT_SECTION_2;
-          if (s3 && root.activeElement !== s3) s3.value = state.settings.customPromptSection3 || DEFAULT_PROMPT_SECTION_3;
-          if (s4 && root.activeElement !== s4) s4.value = state.settings.customPromptSection4 || DEFAULT_PROMPT_SECTION_4;
+          if (s1 && (shouldForceUpdate || root.activeElement !== s1)) s1.value = state.settings.customPromptSection1 || DEFAULT_PROMPT_SECTION_1;
+          if (s2 && (shouldForceUpdate || root.activeElement !== s2)) s2.value = state.settings.customPromptSection2 || DEFAULT_PROMPT_SECTION_2;
+          if (s3 && (shouldForceUpdate || root.activeElement !== s3)) s3.value = state.settings.customPromptSection3 || DEFAULT_PROMPT_SECTION_3;
+          if (s4 && (shouldForceUpdate || root.activeElement !== s4)) s4.value = state.settings.customPromptSection4 || DEFAULT_PROMPT_SECTION_4;
         }
         const opsEl = root.getElementById("learned-ops-list");
         if (opsEl && state.ops) {
@@ -4657,6 +5669,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
         updateMinState();
       }
     };
+    return api;
   }
 
   // src/content/content.ts
@@ -4678,6 +5691,60 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     return null;
   }
   var panel = mountPanel();
+  async function decompressSettings(payload) {
+    if (payload.startsWith("gz:")) {
+      const base64Data = payload.slice(3);
+      const binaryString = atob(base64Data);
+      const bytes = Uint8Array.from(binaryString, (c) => c.charCodeAt(0));
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+      const response = new Response(stream);
+      const text = await response.text();
+      return JSON.parse(text);
+    } else if (payload.startsWith("raw:")) {
+      const base64Data = payload.slice(4);
+      const jsonText = decodeURIComponent(escape(atob(base64Data)));
+      return JSON.parse(jsonText);
+    } else {
+      try {
+        const binaryString = atob(payload);
+        const bytes = Uint8Array.from(binaryString, (c) => c.charCodeAt(0));
+        if (bytes[0] === 31 && bytes[1] === 139) {
+          const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+          const response = new Response(stream);
+          const text = await response.text();
+          return JSON.parse(text);
+        }
+        const jsonText = new TextDecoder().decode(bytes);
+        return JSON.parse(jsonText);
+      } catch (e) {
+        return JSON.parse(payload);
+      }
+    }
+  }
+  async function checkAndImportQrSettings() {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const importPayload = urlParams.get("importSettings");
+      if (!importPayload) return;
+      panel.showToast("Importing settings...");
+      const settings = await decompressSettings(importPayload);
+      if (settings && typeof settings === "object") {
+        delete settings.apiKeys;
+        delete settings.keyStatus;
+        await browser.runtime.sendMessage({ kind: "setSettings", settings });
+        const cleanUrl = window.location.origin + window.location.pathname;
+        window.history.replaceState({}, document.title, cleanUrl);
+        panel.showToast("Settings imported successfully!");
+        refresh();
+      } else {
+        panel.showToast("Invalid settings payload.", true);
+      }
+    } catch (err) {
+      console.error("[AID content] Failed to import QR settings:", err);
+      panel.showToast("Import failed: " + (err?.message || String(err)), true);
+    }
+  }
+  checkAndImportQrSettings();
   panel.onRefresh(() => {
     dlog("[AID content] Direct refresh requested by panel callback");
     refresh();
@@ -5079,7 +6146,6 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
   });
   panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow, showDebug, theme, s1, s2, s3, s4, cardCommands, useMemories, formattingMode, memoraidLookback, memoraidThoughtLookback, memoraidPresenceLookback, autoRegenerateNativeMemories, interceptTimeout, useSinglePassGeneration, locationMode, enableProperNounDetection, manualMode, logPlotEssentials, characterCardLimit, thoughtCardLimit) => {
     const sid = currentShortId();
-    if (!sid) return;
     const settings = {
       provider,
       model: model || void 0,
@@ -5108,7 +6174,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     };
     if (apiKey) settings.apiKeys = { [provider]: apiKey };
     await browser.runtime.sendMessage({ kind: "setSettings", settings });
-    if (protagonist) await browser.runtime.sendMessage({ kind: "setProtagonist", shortId: sid, name: protagonist });
+    if (sid && protagonist) await browser.runtime.sendMessage({ kind: "setProtagonist", shortId: sid, name: protagonist });
     window.postMessage({
       source: "aid-extension-host",
       kind: "settingsUpdate",

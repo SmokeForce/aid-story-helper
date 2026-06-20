@@ -1,3 +1,4 @@
+import QrCreator from "qr-creator";
 import { parsePlotEssentials } from "../inference/plot";
 import {
   DEFAULT_SYSTEM_PROMPT,
@@ -44,6 +45,8 @@ export interface PanelState {
     memoraidBannerDismissed?: boolean;
     manualMode?: boolean;
     logPlotEssentials?: boolean;
+    characterCardLimit?: number;
+    thoughtCardLimit?: number;
   } | null;
   versions: PanelStateVersion[];
   cards?: CardRow[];
@@ -172,6 +175,9 @@ export function mountPanel(): PanelHandle {
   // Session-scoped: once the user dismisses the empty-DB self-heal banner, keep it hidden for the
   // life of this content script even if a later render still sees an empty DB.
   let selfHealDismissed = false;
+  // Session-scoped flag to show settings (AI Provider & Debug) when in Adventures Manager mode.
+  let managerShowSettings = false;
+  let api: PanelHandle;
   const host = document.createElement("div");
   const savedLeft = localStorage.getItem("aid-tracker-pos-left");
   const savedTop = localStorage.getItem("aid-tracker-pos-top");
@@ -196,28 +202,32 @@ export function mountPanel(): PanelHandle {
         --bg-card: rgba(255, 255, 255, 0.02);
         --btn-bg: rgba(255, 255, 255, 0.04);
         --btn-hover: rgba(255, 255, 255, 0.1);
+        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+      }
+      :host(.dragging), :host(.dragging) .box {
+        transition: none !important;
       }
       
-      .box.theme-emerald {
+      .theme-emerald, .box.theme-emerald {
         --accent-color: #10b981;
         --accent-glow: rgba(16, 185, 129, 0.2);
         --accent-border: #059669;
         --theme-text-color: #34d399;
       }
-      .box.theme-synthwave {
+      .theme-synthwave, .box.theme-synthwave {
         --accent-color: #d946ef;
         --accent-glow: rgba(217, 70, 239, 0.2);
         --accent-border: #c026d3;
         --theme-text-color: #f472b6;
         --bg-glass: rgba(20, 16, 32, 0.88);
       }
-      .box.theme-amber {
+      .theme-amber, .box.theme-amber {
         --accent-color: #f59e0b;
         --accent-glow: rgba(245, 158, 11, 0.2);
         --accent-border: #d97706;
         --theme-text-color: #fbbf24;
       }
-      .box.theme-sapphire {
+      .theme-sapphire, .box.theme-sapphire {
         --accent-color: #06b6d4;
         --accent-glow: rgba(6, 182, 212, 0.2);
         --accent-border: #0891b2;
@@ -252,20 +262,115 @@ export function mountPanel(): PanelHandle {
         box-sizing: border-box;
         box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
       }
-      .box.minimized {
-        width: 130px;
-        height: 32px;
-        border-radius: 16px;
-        overflow: hidden;
-        resize: none;
-        padding: 0 12px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
-        background: rgba(18, 18, 22, 0.95);
-        border-color: var(--accent-color);
-        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+      /* Desktop minimized state: Text pill */
+      @media (min-width: 601px) {
+        .box.minimized {
+          width: 130px;
+          height: 32px;
+          min-width: 130px;
+          min-height: 32px;
+          border-radius: 16px;
+          overflow: hidden;
+          resize: none;
+          padding: 0 12px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+          background: rgba(18, 18, 22, 0.95);
+          border-color: var(--accent-color);
+          transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+          cursor: pointer;
+        }
+        .box.minimized #drag-handle {
+          padding-bottom: 0;
+          border-bottom: none;
+          margin-bottom: 0;
+          justify-content: space-between;
+          align-items: center;
+          height: 100%;
+          width: 100%;
+        }
+        .box.minimized #min-toggle {
+          background: none;
+          border: none;
+          color: var(--accent-color);
+          cursor: pointer;
+          font-size: 13px;
+          padding: 0 4px;
+          margin: 0;
+          width: auto;
+          height: auto;
+          display: inline-block;
+          border-radius: 0;
+        }
+        .box.minimized #min-toggle:hover {
+          color: var(--theme-text-color);
+          background: none;
+        }
+      }
+
+      /* Mobile minimized state: Circle icon */
+      @media (max-width: 600px) {
+        .box.minimized {
+          width: 45px;
+          height: 45px;
+          min-width: 45px;
+          min-height: 45px;
+          border-radius: 50%;
+          overflow: hidden;
+          resize: none;
+          padding: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+          background: var(--bg-glass);
+          border-color: var(--accent-color);
+          transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+          cursor: pointer;
+        }
+        .box.minimized #drag-handle {
+          padding-bottom: 0;
+          border-bottom: none;
+          margin-bottom: 0;
+          justify-content: center;
+          align-items: center;
+          height: 100%;
+          width: 100%;
+        }
+        .box.minimized #min-toggle {
+          width: 100%;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0;
+          border-radius: 50%;
+        }
+        .box.minimized #min-toggle:hover {
+          color: var(--theme-text-color);
+          background: rgba(255, 255, 255, 0.05);
+        }
+        .box.minimized .badge-dot {
+          position: absolute;
+          top: 6px;
+          right: 6px;
+          margin: 0;
+          width: 8px;
+          height: 8px;
+          z-index: 10;
+        }
+        .box:not(.minimized) {
+          width: 100% !important;
+          height: 100% !important;
+          min-width: 0 !important;
+          min-height: 0 !important;
+          max-width: none !important;
+          max-height: none !important;
+          resize: none !important;
+          border-radius: 14px !important;
+        }
       }
       
       /* Rounded translucent scrollbars */
@@ -416,10 +521,10 @@ export function mountPanel(): PanelHandle {
         background: rgba(0, 0, 0, 0.4);
       }
       
-      #open-settings svg {
+      #open-settings svg, #open-settings-manager svg {
         transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s;
       }
-      #open-settings:hover svg {
+      #open-settings:hover svg, #open-settings-manager:hover svg {
         transform: rotate(45deg);
         color: var(--accent-color);
       }
@@ -1671,6 +1776,12 @@ export function mountPanel(): PanelHandle {
               </div>
               
               <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
+                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Mobile Settings Sync (QR Code)</h4>
+                <div class="note" style="margin-bottom:8px;">Generate a QR code to sync settings (excluding API keys) directly to your mobile device.</div>
+                <button id="gen-qr-btn" type="button" class="btn" style="justify-content:center;background:rgba(168,85,247,0.08);color:#c084fc;border:1px solid rgba(168,85,247,0.25);padding:6px 12px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;width:100%;box-sizing:border-box;">Generate Sync QR Code</button>
+              </div>
+              
+              <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
                 <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Full Database Backup & Restore</h4>
                 <div class="note" style="margin-bottom:8px;">Back up the entire local database (settings, cards, versions, operations, histories) to a single file.</div>
                 <div style="display:flex;gap:6px;width:100%;">
@@ -1711,7 +1822,14 @@ export function mountPanel(): PanelHandle {
             
             <!-- Pane: Adventures Manager -->
             <div id="tab-manager" class="tab-pane" style="display:none; flex-direction:column; gap:8px; overflow:hidden;">
-              <h4 style="margin:4px 0;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Adventures Manager</h4>
+              <div style="display:flex; justify-content:space-between; align-items:center; margin:4px 0;">
+                <h4 style="margin:0;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Adventures Manager</h4>
+                <button id="open-settings-manager" style="background:none;border:none;padding:4px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;" title="Settings">
+                  <svg style="width:16px;height:16px;fill:currentColor;" viewBox="0 0 24 24">
+                    <path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.13,5.91,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87 C2.62,9.08,2.67,9.34,2.85,9.48l2.03,1.58C4.83,11.36,4.81,11.69,4.81,12c0,0.31,0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.43-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/>
+                  </svg>
+                </button>
+              </div>
               <div class="note" style="margin-bottom:4px; font-size:11px;">Manage your Global Asset library and explore locally stored adventure data.</div>
               
               <!-- Sub Tab Navigation -->
@@ -2174,41 +2292,92 @@ export function mountPanel(): PanelHandle {
   const toggle = root.getElementById("min-toggle") as HTMLElement;
   const contentBody = root.getElementById("content-body") as HTMLElement;
 
+  let dragOccurred = false;
   let isMinimized = localStorage.getItem("aid-tracker-minimized") === "true";
-  function ensureHostInsideViewport() {
-    let width = 320;
-    let height = 400;
+
+  function applyPosition() {
     if (isMinimized) {
-      width = 130;
-      height = 32;
+      host.style.bottom = "auto";
+      host.style.right = "auto";
+      const savedLeft = localStorage.getItem("aid-tracker-pos-left");
+      const savedTop = localStorage.getItem("aid-tracker-pos-top");
+      let leftVal = savedLeft ? parseFloat(savedLeft) : 12;
+      let topVal = savedTop ? parseFloat(savedTop) : window.innerHeight - 60;
+
+      const maxLeft = Math.max(0, window.innerWidth - 45);
+      const maxTop = Math.max(0, window.innerHeight - 45);
+      leftVal = Math.max(0, Math.min(leftVal, maxLeft));
+      topVal = Math.max(0, Math.min(topVal, maxTop));
+
+      host.style.left = leftVal + "px";
+      host.style.top = topVal + "px";
+      host.style.width = "";
+      host.style.height = "";
     } else {
-      const sw = localStorage.getItem("aid-tracker-size-width");
-      const sh = localStorage.getItem("aid-tracker-size-height");
-      if (sw) width = parseInt(sw, 10) || 320;
-      if (sh) height = parseInt(sh, 10) || 400;
+      if (window.innerWidth <= 600) {
+        // Mobile docked position
+        host.style.left = "10px";
+        host.style.right = "10px";
+        host.style.top = "60px";
+        host.style.bottom = "80px";
+        host.style.width = "calc(100% - 20px)";
+        host.style.height = "calc(100% - 140px)";
+
+        box.style.width = "100%";
+        box.style.height = "100%";
+        box.style.maxWidth = "none";
+        box.style.maxHeight = "none";
+      } else {
+        // Desktop floating position
+        host.style.bottom = "auto";
+        host.style.right = "auto";
+        const savedLeft = localStorage.getItem("aid-tracker-pos-left");
+        const savedTop = localStorage.getItem("aid-tracker-pos-top");
+        let leftVal = savedLeft ? parseFloat(savedLeft) : 12;
+        let topVal = savedTop ? parseFloat(savedTop) : window.innerHeight - 500;
+
+        const maxLeft = Math.max(0, window.innerWidth - 320);
+        const maxTop = Math.max(0, window.innerHeight - 300);
+        leftVal = Math.max(0, Math.min(leftVal, maxLeft));
+        topVal = Math.max(0, Math.min(topVal, maxTop));
+
+        host.style.left = leftVal + "px";
+        host.style.top = topVal + "px";
+        host.style.width = "";
+        host.style.height = "";
+
+        const sw = localStorage.getItem("aid-tracker-size-width");
+        const sh = localStorage.getItem("aid-tracker-size-height");
+        box.style.width = sw || "320px";
+        box.style.height = sh || "auto";
+        box.style.maxWidth = "90vw";
+        box.style.maxHeight = "85vh";
+      }
     }
-
-    const currentLeft = host.offsetLeft;
-    const currentTop = host.offsetTop;
-
-    const clampedLeft = Math.min(Math.max(0, currentLeft), window.innerWidth - width);
-    const clampedTop = Math.min(Math.max(0, currentTop), window.innerHeight - height);
-
-    host.style.bottom = "auto";
-    host.style.left = clampedLeft + "px";
-    host.style.top = clampedTop + "px";
-    localStorage.setItem("aid-tracker-pos-left", host.style.left);
-    localStorage.setItem("aid-tracker-pos-top", host.style.top);
   }
 
   function updateMinState() {
     const pendingCount = lastState?.versions.filter((v) => v.status === "pending").length ?? 0;
     if (isMinimized) {
       box.classList.add("minimized");
-      if (pendingCount > 0) {
-        setSafeHTML(toggle, `＋ Story Helper <span class="badge-dot"></span>`);
+      if (window.innerWidth <= 600) {
+        // Mobile circle icon
+        let btnContent = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events: none; display: block;">
+  <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+  <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+  <path d="M14 3l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z" fill="currentColor" stroke="none" />
+</svg>`;
+        if (pendingCount > 0) {
+          btnContent += `<span class="badge-dot"></span>`;
+        }
+        setSafeHTML(toggle, btnContent);
       } else {
-        toggle.textContent = "＋ Story Helper";
+        // Desktop pill text
+        if (pendingCount > 0) {
+          setSafeHTML(toggle, `＋ Story Helper <span class="badge-dot"></span>`);
+        } else {
+          toggle.textContent = "＋ Story Helper";
+        }
       }
       st.style.display = "none";
       contentBody.style.display = "none";
@@ -2219,79 +2388,157 @@ export function mountPanel(): PanelHandle {
       toggle.textContent = "—";
       st.style.display = "block";
       contentBody.style.display = "flex";
-      const sw = localStorage.getItem("aid-tracker-size-width");
-      const sh = localStorage.getItem("aid-tracker-size-height");
-      if (sw) box.style.width = sw;
-      if (sh) box.style.height = sh;
     }
-    ensureHostInsideViewport();
+    applyPosition();
   }
-  toggle.addEventListener("click", () => {
-    isMinimized = !isMinimized;
-    localStorage.setItem("aid-tracker-minimized", String(isMinimized));
+
+  // Unified click handler on box for toggle behavior
+  box.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+
+    // Ignore clicks if they were part of a drag action
+    if (dragOccurred) {
+      return;
+    }
+
+    if (isMinimized) {
+      isMinimized = false;
+      localStorage.setItem("aid-tracker-minimized", String(isMinimized));
+      updateMinState();
+    } else if (target.closest("#min-toggle")) {
+      isMinimized = true;
+      localStorage.setItem("aid-tracker-minimized", String(isMinimized));
+      updateMinState();
+    }
+  });
+
+  window.addEventListener("resize", () => {
     updateMinState();
   });
+
   updateMinState();
-  window.addEventListener("resize", ensureHostInsideViewport);
 
   box.addEventListener("mouseup", () => {
-    if (!isMinimized) {
+    if (!isMinimized && window.innerWidth > 600) {
       localStorage.setItem("aid-tracker-size-width", box.style.width);
       localStorage.setItem("aid-tracker-size-height", box.style.height);
     }
   });
 
-  function makeDraggable(el: HTMLElement, handle: HTMLElement) {
+  function makeDraggable(el: HTMLElement) {
     let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
-    handle.onmousedown = dragMouseDown;
+    let startX = 0, startY = 0;
 
-    function dragMouseDown(e: MouseEvent) {
-      if ((e.target as HTMLElement).closest("button")) return;
-      e.preventDefault();
-      pos3 = e.clientX;
-      pos4 = e.clientY;
-      document.onmouseup = closeDragElement;
-      document.onmousemove = elementDrag;
+    box.addEventListener("mousedown", (e) => {
+      dragOccurred = false;
+      onStart(e);
+    });
+    box.addEventListener("touchstart", (e) => {
+      dragOccurred = false;
+      onStart(e);
+    }, { passive: false });
+
+    function onStart(e: MouseEvent | TouchEvent) {
+      const target = e.target as HTMLElement;
+
+      // Do not allow dragging the expanded box on mobile (since it's docked)
+      if (!isMinimized && window.innerWidth <= 600) {
+        return;
+      }
+
+      // If expanded and not clicking/touching on the drag handle, don't drag
+      if (!isMinimized && !target.closest("#drag-handle")) {
+        return;
+      }
+
+      // If expanded and clicking a button (like the minimize button), don't drag
+      if (!isMinimized && target.closest("button")) {
+        return;
+      }
+
+      // Do NOT preventDefault on touchstart! Otherwise emulated click events are canceled on mobile.
+      if (e instanceof MouseEvent) {
+        e.preventDefault();
+      }
+
+      host.classList.add("dragging");
+
+      dragOccurred = false;
+      const clientX = e instanceof MouseEvent ? e.clientX : (e.touches[0]?.clientX ?? 0);
+      const clientY = e instanceof MouseEvent ? e.clientY : (e.touches[0]?.clientY ?? 0);
+
+      pos3 = clientX;
+      pos4 = clientY;
+      startX = clientX;
+      startY = clientY;
+
+      if (e instanceof MouseEvent) {
+        document.addEventListener("mousemove", onMove);
+        document.addEventListener("mouseup", onEnd);
+      } else {
+        document.addEventListener("touchmove", onMove, { passive: false });
+        document.addEventListener("touchend", onEnd);
+      }
     }
 
-    function elementDrag(e: MouseEvent) {
-      e.preventDefault();
-      pos1 = pos3 - e.clientX;
-      pos2 = pos4 - e.clientY;
-      pos3 = e.clientX;
-      pos4 = e.clientY;
+    function onMove(e: MouseEvent | TouchEvent) {
+      const clientX = e instanceof MouseEvent ? e.clientX : (e.touches[0]?.clientX ?? 0);
+      const clientY = e instanceof MouseEvent ? e.clientY : (e.touches[0]?.clientY ?? 0);
 
-      let width = 320;
-      let height = 400;
-      if (isMinimized) {
-        width = 130;
-        height = 32;
-      } else {
-        const sw = localStorage.getItem("aid-tracker-size-width");
-        const sh = localStorage.getItem("aid-tracker-size-height");
-        if (sw) width = parseInt(sw, 10) || 320;
-        if (sh) height = parseInt(sh, 10) || 400;
+      // Higher threshold (15px) for touch tap buffer
+      if (Math.abs(clientX - startX) > 15 || Math.abs(clientY - startY) > 15) {
+        dragOccurred = true;
       }
+
+      // If we are dragging, prevent default touch actions (like scrolling the background page)
+      if (dragOccurred || e instanceof MouseEvent) {
+        if (e.cancelable) {
+          e.preventDefault();
+        }
+      }
+
+      // Only perform movement logic if we have actually started dragging
+      if (!dragOccurred && !(e instanceof MouseEvent)) {
+        return;
+      }
+
+      pos1 = pos3 - clientX;
+      pos2 = pos4 - clientY;
+      pos3 = clientX;
+      pos4 = clientY;
 
       let newLeft = el.offsetLeft - pos1;
       let newTop = el.offsetTop - pos2;
 
-      newLeft = Math.min(Math.max(0, newLeft), window.innerWidth - width);
-      newTop = Math.min(Math.max(0, newTop), window.innerHeight - height);
+      // Keep within viewport boundaries
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const rect = el.getBoundingClientRect();
+
+      newLeft = Math.max(0, Math.min(newLeft, viewportWidth - rect.width));
+      newTop = Math.max(0, Math.min(newTop, viewportHeight - rect.height));
 
       el.style.bottom = "auto";
+      el.style.right = "auto";
       el.style.left = newLeft + "px";
       el.style.top = newTop + "px";
+
       localStorage.setItem("aid-tracker-pos-left", el.style.left);
       localStorage.setItem("aid-tracker-pos-top", el.style.top);
     }
 
-    function closeDragElement() {
-      document.onmouseup = null;
-      document.onmousemove = null;
+    function onEnd(e: MouseEvent | TouchEvent) {
+      host.classList.remove("dragging");
+      if (e instanceof MouseEvent) {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onEnd);
+      } else {
+        document.removeEventListener("touchmove", onMove);
+        document.removeEventListener("touchend", onEnd);
+      }
     }
   }
-  makeDraggable(host, $("drag-handle"));
+  makeDraggable(host);
 
   const viewTracker = root.getElementById("view-tracker") as HTMLElement;
   const viewSettings = root.getElementById("view-settings") as HTMLElement;
@@ -2651,6 +2898,14 @@ export function mountPanel(): PanelHandle {
   }
 
   function switchTab(tabId: string) {
+    if (tabId === "tab-manager" && lastState?.isManagerOnly) {
+      managerShowSettings = false;
+      const tabNav = viewSettings.querySelector(".tab-nav") as HTMLElement | null;
+      if (tabNav) tabNav.style.display = "none";
+      const footer = root.getElementById("settings-footer");
+      if (footer) footer.style.display = "none";
+    }
+
     const panes = root.querySelectorAll(".tab-pane");
     const btns = root.querySelectorAll(".tab-btn");
     panes.forEach((p) => {
@@ -3346,7 +3601,7 @@ export function mountPanel(): PanelHandle {
     renderOffMetaRepository();
   });
 
-  $("open-settings").addEventListener("click", () => {
+  const openSettingsHandler = () => {
     (root.getElementById("prompt-s1") as HTMLTextAreaElement).value = lastState?.settings?.customPromptSection1 || DEFAULT_PROMPT_SECTION_1;
     (root.getElementById("prompt-s2") as HTMLTextAreaElement).value = lastState?.settings?.customPromptSection2 || DEFAULT_PROMPT_SECTION_2;
     (root.getElementById("prompt-s3") as HTMLTextAreaElement).value = lastState?.settings?.customPromptSection3 || DEFAULT_PROMPT_SECTION_3;
@@ -3357,10 +3612,29 @@ export function mountPanel(): PanelHandle {
     }
     const fmtEl = root.getElementById("fmt-mode") as HTMLSelectElement | null;
     if (fmtEl) fmtEl.value = lastState?.settings?.formattingMode || DEFAULT_FORMATTING_MODE;
+  };
+
+  $("open-settings").addEventListener("click", () => {
+    openSettingsHandler();
     showSettingsView();
   });
 
-  $("cancel-settings").addEventListener("click", showTrackerView);
+  $("open-settings-manager")?.addEventListener("click", () => {
+    managerShowSettings = true;
+    openSettingsHandler();
+    if (lastState) {
+      api.render(lastState);
+    }
+  });
+
+  $("cancel-settings").addEventListener("click", () => {
+    if (lastState?.isManagerOnly) {
+      managerShowSettings = false;
+      switchTab("tab-manager");
+    } else {
+      showTrackerView();
+    }
+  });
   
   $("view-settings").addEventListener("click", (e) => {
     const target = e.target as HTMLElement;
@@ -3369,6 +3643,21 @@ export function mountPanel(): PanelHandle {
       (createConfigTab as HTMLButtonElement).disabled = true;
       createConfigTab.textContent = "⏳ Creating Config Card...";
       createConfigCb();
+    }
+
+    const genQrBtn = target.closest("#gen-qr-btn");
+    if (genQrBtn && lastState?.settings) {
+      (genQrBtn as HTMLButtonElement).disabled = true;
+      const originalText = genQrBtn.textContent;
+      genQrBtn.textContent = "⏳ Generating...";
+      compressSettings(lastState.settings).then((payload) => {
+        showQrModal(payload);
+      }).catch((err) => {
+        console.error("[AID panel] QR generation failed:", err);
+      }).finally(() => {
+        (genQrBtn as HTMLButtonElement).disabled = false;
+        genQrBtn.textContent = originalText;
+      });
     }
   });
   
@@ -3454,6 +3743,13 @@ export function mountPanel(): PanelHandle {
         reader.readAsText(file);
       });
       input.click();
+    }
+
+    if (target.closest("#dismiss-self-heal-btn")) {
+      e.stopPropagation();
+      selfHealDismissed = true;
+      const banner = root.getElementById("self-heal-banner");
+      if (banner) banner.style.display = "none";
     }
   });
   let syncKeys = true;
@@ -3709,13 +4005,7 @@ export function mountPanel(): PanelHandle {
       dismissMemoraidBannerCb();
       return;
     }
-    const dismissSelfHeal = target.closest("#dismiss-self-heal-btn");
-    if (dismissSelfHeal) {
-      selfHealDismissed = true;
-      const banner = root.getElementById("self-heal-banner");
-      if (banner) banner.style.display = "none";
-      return;
-    }
+
     const an = target.closest("#an");
     if (an && analyzeCb) {
       showAnalyzeView();
@@ -4025,7 +4315,142 @@ export function mountPanel(): PanelHandle {
     }
   }
 
-  return {
+  async function compressSettings(settings: any): Promise<string> {
+    const cleanSettings = { ...settings };
+    delete cleanSettings.apiKeys;
+    delete cleanSettings.keyStatus;
+
+    // Remove card commands that match the defaults
+    if (cleanSettings.cardCommands) {
+      const activeCommands: Record<string, string> = {};
+      for (const [key, val] of Object.entries(cleanSettings.cardCommands)) {
+        if (val && val !== DEFAULT_CARD_COMMANDS[key]) {
+          activeCommands[key] = val as string;
+        }
+      }
+      if (Object.keys(activeCommands).length > 0) {
+        cleanSettings.cardCommands = activeCommands;
+      } else {
+        delete cleanSettings.cardCommands;
+      }
+    }
+
+    // Remove custom prompt sections that match the defaults
+    if (cleanSettings.customPromptSection1 === DEFAULT_PROMPT_SECTION_1) delete cleanSettings.customPromptSection1;
+    if (cleanSettings.customPromptSection2 === DEFAULT_PROMPT_SECTION_2) delete cleanSettings.customPromptSection2;
+    if (cleanSettings.customPromptSection3 === DEFAULT_PROMPT_SECTION_3) delete cleanSettings.customPromptSection3;
+    if (cleanSettings.customPromptSection4 === DEFAULT_PROMPT_SECTION_4) delete cleanSettings.customPromptSection4;
+
+    // Remove other settings if they match default values
+    if (cleanSettings.theme === "emerald") delete cleanSettings.theme;
+    if (cleanSettings.formattingMode === DEFAULT_FORMATTING_MODE) delete cleanSettings.formattingMode;
+    if (cleanSettings.analyzeWindow === 20) delete cleanSettings.analyzeWindow;
+    if (cleanSettings.memoraidThoughtLookback === 0) delete cleanSettings.memoraidThoughtLookback;
+    if (cleanSettings.memoraidPresenceLookback === 5) delete cleanSettings.memoraidPresenceLookback;
+    if (cleanSettings.interceptTimeout === 4) delete cleanSettings.interceptTimeout;
+    if (cleanSettings.locationMode === "optionA") delete cleanSettings.locationMode;
+    if (cleanSettings.enableProperNounDetection !== false) delete cleanSettings.enableProperNounDetection;
+    if (cleanSettings.manualMode === false) delete cleanSettings.manualMode;
+    if (cleanSettings.showDebug === false) delete cleanSettings.showDebug;
+    if (cleanSettings.useMemories === false) delete cleanSettings.useMemories;
+    if (cleanSettings.autoRegenerateNativeMemories === false) delete cleanSettings.autoRegenerateNativeMemories;
+    if (cleanSettings.useSinglePassGeneration === false) delete cleanSettings.useSinglePassGeneration;
+
+    // Public-only settings
+    if (cleanSettings.memoraidLookback === 8) delete cleanSettings.memoraidLookback;
+    if (cleanSettings.logPlotEssentials === false) delete cleanSettings.logPlotEssentials;
+    if (cleanSettings.characterCardLimit === 600) delete cleanSettings.characterCardLimit;
+    if (cleanSettings.thoughtCardLimit === 2000) delete cleanSettings.thoughtCardLimit;
+    if (cleanSettings.memoraidBannerDismissed === false) delete cleanSettings.memoraidBannerDismissed;
+
+    const jsonStr = JSON.stringify(cleanSettings);
+    try {
+      if (typeof CompressionStream !== "undefined") {
+        const stream = new Blob([jsonStr]).stream().pipeThrough(new CompressionStream("gzip"));
+        const response = new Response(stream);
+        const buffer = await response.arrayBuffer();
+        
+        let binary = "";
+        const bytes = new Uint8Array(buffer);
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
+          binary += String.fromCharCode(bytes[i]!);
+        }
+        return "gz:" + btoa(binary);
+      }
+    } catch (err) {
+      console.warn("[AID panel] Gzip compression failed, falling back to raw base64:", err);
+    }
+    return "raw:" + btoa(unescape(encodeURIComponent(jsonStr)));
+  }
+
+  function showQrModal(payload: string) {
+    root.getElementById("qr-modal")?.remove();
+
+    const modal = document.createElement("div");
+    modal.id = "qr-modal";
+    const activeTheme = lastState?.settings?.theme || "emerald";
+    modal.className = `theme-${activeTheme}`;
+    modal.style.cssText = "display:flex;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.65);align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);box-sizing:border-box;";
+
+    const container = document.createElement("div");
+    container.style.cssText = "background:#121215;border:1px solid var(--border-color);border-radius:12px;padding:20px;width:280px;display:flex;flex-direction:column;align-items:center;gap:12px;box-shadow:0 20px 40px rgba(0,0,0,0.65);text-align:center;color:var(--text-primary);box-sizing:border-box;";
+
+    const title = document.createElement("div");
+    title.style.cssText = "font-weight:700;color:var(--theme-text-color);font-size:14px;letter-spacing:0.02em;";
+    title.textContent = "Sync Settings to Mobile";
+
+    const note = document.createElement("div");
+    note.className = "note";
+    note.style.cssText = "margin:0;font-size:11px;line-height:1.4;color:var(--text-secondary);";
+    note.textContent = "Scan this code with your mobile device's camera to import settings (excluding API keys).";
+
+    const canvasContainer = document.createElement("div");
+    canvasContainer.id = "qr-canvas-container";
+    canvasContainer.style.cssText = "background:#fff;padding:8px;border-radius:8px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:180px;height:180px;";
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "btn";
+    closeBtn.style.cssText = "background:var(--accent-color);color:#fff;font-weight:600;font-size:11px;padding:6px 16px;border-radius:6px;border:none;cursor:pointer;margin-top:4px;width:100%;text-align:center;";
+    closeBtn.textContent = "Close";
+
+    container.appendChild(title);
+    container.appendChild(note);
+    container.appendChild(canvasContainer);
+    container.appendChild(closeBtn);
+    modal.appendChild(container);
+    root.appendChild(modal);
+
+    const closeModal = () => modal.remove();
+    closeBtn.addEventListener("click", closeModal);
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) closeModal();
+    });
+
+    const qrUrl = window.location.origin + "/?importSettings=" + encodeURIComponent(payload);
+    const accentColor = getComputedStyle(modal).getPropertyValue("--accent-color").trim() || "#000000";
+    try {
+      QrCreator.render({
+        text: qrUrl,
+        radius: 0.2,
+        ecLevel: "M",
+        fill: accentColor,
+        background: "#ffffff",
+        size: 164
+      }, canvasContainer);
+    } catch (err: any) {
+      console.error("[AID panel] QrCreator failed to render:", err);
+      canvasContainer.style.background = "#fee2e2";
+      canvasContainer.style.color = "#991b1b";
+      canvasContainer.style.flexDirection = "column";
+      canvasContainer.style.fontSize = "10px";
+      canvasContainer.style.padding = "12px";
+      canvasContainer.textContent = "QR Code generation failed. The settings payload may be too large. Try resetting some templates to default.";
+    }
+  }
+
+  api = {
     setStatus: (t) => { st.textContent = t; },
     showToast: (text, isError) => showToast(text, isError),
     onExport: (cb) => {
@@ -4108,7 +4533,12 @@ export function mountPanel(): PanelHandle {
         characterCardLimit,
         thoughtCardLimit
       );
-      showTrackerView();
+      if (lastState?.isManagerOnly) {
+        managerShowSettings = false;
+        switchTab("tab-manager");
+      } else {
+        showTrackerView();
+      }
     }),
     onThemeChange: (cb) => { themeChangeCb = cb; },
     onApplyInstruction: (cb) => { applyInstructionCb = cb; },
@@ -4212,23 +4642,49 @@ export function mountPanel(): PanelHandle {
         viewSettings.style.display = "flex";
         viewAnalyze.style.display = "none";
         
-        // Hide settings tab navigation and footer in manager-only mode
         const tabNav = viewSettings.querySelector(".tab-nav") as HTMLElement | null;
-        if (tabNav) tabNav.style.display = "none";
         const footer = root.getElementById("settings-footer");
-        if (footer) footer.style.display = "none";
         
-        // Hide all other panes in viewSettings
-        viewSettings.querySelectorAll(".tab-pane").forEach(pane => {
-          if (pane.id !== "tab-manager") {
-            (pane as HTMLElement).style.display = "none";
+        if (managerShowSettings) {
+          if (tabNav) {
+            tabNav.style.display = "flex";
+            tabNav.querySelectorAll(".tab-btn").forEach((btn) => {
+              const tab = btn.getAttribute("data-tab");
+              if (tab === "tab-prov" || tab === "tab-debug") {
+                (btn as HTMLElement).style.display = "";
+              } else {
+                (btn as HTMLElement).style.display = "none";
+              }
+            });
           }
-        });
-        
-        if (tabManagerPane) tabManagerPane.style.display = "flex";
+          if (footer) footer.style.display = "flex";
+          
+          const activeBtn = viewSettings.querySelector(".tab-btn.active") as HTMLElement | null;
+          const currentActiveTab = activeBtn?.getAttribute("data-tab");
+          if (currentActiveTab !== "tab-prov" && currentActiveTab !== "tab-debug") {
+            switchTab("tab-prov");
+          } else {
+            switchTab(currentActiveTab || "tab-prov");
+          }
+        } else {
+          if (tabNav) tabNav.style.display = "none";
+          if (footer) footer.style.display = "none";
+          
+          viewSettings.querySelectorAll(".tab-pane").forEach(pane => {
+            if (pane.id !== "tab-manager") {
+              (pane as HTMLElement).style.display = "none";
+            }
+          });
+          if (tabManagerPane) tabManagerPane.style.display = "flex";
+        }
       } else {
         const tabNav = viewSettings.querySelector(".tab-nav") as HTMLElement | null;
-        if (tabNav) tabNav.style.display = "flex";
+        if (tabNav) {
+          tabNav.style.display = "flex";
+          tabNav.querySelectorAll(".tab-btn").forEach((btn) => {
+            (btn as HTMLElement).style.display = "";
+          });
+        }
         const footer = root.getElementById("settings-footer");
         if (footer) footer.style.display = "flex";
         
@@ -4252,16 +4708,17 @@ export function mountPanel(): PanelHandle {
       // Window title: "AID Story Helper: <Scenario> - <Protagonist>"
       const titleTail = [state.scenario, state.protagonist].filter(Boolean).join(" - ");
       st.textContent = titleTail ? `AID Story Helper: ${titleTail}` : "AID Story Helper";
+      const shouldForceUpdate = isShortIdChanged || !prevState;
       if (isShortIdChanged) {
         protEl.value = state.protagonist || "";
-      } else if (document.activeElement !== protEl) {
+      } else if (root.activeElement !== protEl) {
         protEl.value = state.protagonist || "";
       }
-      if (state.settings?.theme && themeEl.value !== state.settings.theme) {
+      if (state.settings?.theme && (shouldForceUpdate || root.activeElement !== themeEl) && themeEl.value !== state.settings.theme) {
         themeEl.value = state.settings.theme;
         updateThemeClass();
       }
-      if (state.settings?.provider && provEl.value !== state.settings.provider) {
+      if (state.settings?.provider && (shouldForceUpdate || root.activeElement !== provEl) && provEl.value !== state.settings.provider) {
         provEl.value = state.settings.provider;
         updateProviderLabels();
       }
@@ -4273,33 +4730,35 @@ export function mountPanel(): PanelHandle {
         updateProviderLabels();
       }
 
-      if (state.settings?.analyzeWindow && !winEl.value) winEl.value = String(state.settings.analyzeWindow);
-      if (state.settings && !memoraidWinEl.value) {
+      if (state.settings?.analyzeWindow && (shouldForceUpdate || root.activeElement !== winEl) && winEl.value !== String(state.settings.analyzeWindow)) {
+        winEl.value = String(state.settings.analyzeWindow);
+      }
+      if (state.settings && (shouldForceUpdate || root.activeElement !== memoraidWinEl) && memoraidWinEl.value !== String(state.settings.memoraidLookback ?? 8)) {
         memoraidWinEl.value = String(state.settings.memoraidLookback ?? 8);
       }
-      if (state.settings && !memoraidThoughtWinEl.value) {
+      if (state.settings && (shouldForceUpdate || root.activeElement !== memoraidThoughtWinEl) && memoraidThoughtWinEl.value !== String(state.settings.memoraidThoughtLookback ?? 1)) {
         const val = state.settings.memoraidThoughtLookback ?? 1;
         memoraidThoughtWinEl.value = String(val >= 1 ? val : 1);
       }
-      if (state.settings && !memoraidPresenceWinEl.value) {
+      if (state.settings && (shouldForceUpdate || root.activeElement !== memoraidPresenceWinEl) && memoraidPresenceWinEl.value !== String(state.settings.memoraidPresenceLookback ?? 5)) {
         memoraidPresenceWinEl.value = String(state.settings.memoraidPresenceLookback ?? 5);
       }
-      if (state.settings && !interceptTimeoutEl.value) {
+      if (state.settings && (shouldForceUpdate || root.activeElement !== interceptTimeoutEl) && interceptTimeoutEl.value !== String(state.settings.interceptTimeout ?? 10)) {
         interceptTimeoutEl.value = String(state.settings.interceptTimeout ?? 10);
       }
-      if (state.settings && !charCardLimitEl.value) {
+      if (state.settings && (shouldForceUpdate || root.activeElement !== charCardLimitEl) && charCardLimitEl.value !== String(state.settings.characterCardLimit ?? 600)) {
         charCardLimitEl.value = String(state.settings.characterCardLimit ?? 600);
       }
-      if (state.settings && !thoughtCardLimitEl.value) {
+      if (state.settings && (shouldForceUpdate || root.activeElement !== thoughtCardLimitEl) && thoughtCardLimitEl.value !== String(state.settings.thoughtCardLimit ?? 2000)) {
         thoughtCardLimitEl.value = String(state.settings.thoughtCardLimit ?? 2000);
       }
       applyMemoraidTiming(state.memoraidTiming);
       const locModeEl = root.getElementById("location-mode") as HTMLSelectElement;
-      if (locModeEl && state.settings) {
+      if (locModeEl && state.settings && (shouldForceUpdate || root.activeElement !== locModeEl) && locModeEl.value !== (state.settings.locationMode || "optionA")) {
         locModeEl.value = state.settings.locationMode || "optionA";
       }
       const properNounDetectEl = root.getElementById("enable-proper-noun-detection") as HTMLInputElement;
-      if (properNounDetectEl && state.settings) {
+      if (properNounDetectEl && state.settings && (shouldForceUpdate || root.activeElement !== properNounDetectEl)) {
         properNounDetectEl.checked = state.settings.enableProperNounDetection !== false;
       }
       const hasConfigCard = (state.cards ?? []).some(
@@ -4318,23 +4777,23 @@ export function mountPanel(): PanelHandle {
         }
       }
       const manualModeEl = root.getElementById("enable-manual-mode") as HTMLInputElement;
-      if (manualModeEl && state.settings) {
+      if (manualModeEl && state.settings && (shouldForceUpdate || root.activeElement !== manualModeEl)) {
         manualModeEl.checked = !!state.settings.manualMode;
       }
       const showDbgEl = root.getElementById("show-dbg") as HTMLInputElement;
-      if (showDbgEl && state.settings) {
+      if (showDbgEl && state.settings && (shouldForceUpdate || root.activeElement !== showDbgEl)) {
         showDbgEl.checked = !!state.settings.showDebug;
       }
       const logPeEl = root.getElementById("log-pe-console") as HTMLInputElement;
-      if (logPeEl && state.settings) {
+      if (logPeEl && state.settings && (shouldForceUpdate || root.activeElement !== logPeEl)) {
         logPeEl.checked = !!state.settings.logPlotEssentials;
       }
       const useMemsEl = root.getElementById("use-memories") as HTMLInputElement;
-      if (useMemsEl && state.settings) {
+      if (useMemsEl && state.settings && (shouldForceUpdate || root.activeElement !== useMemsEl)) {
         useMemsEl.checked = !!state.settings.useMemories;
       }
       const autoRegenMemsEl = root.getElementById("auto-regen-memories") as HTMLInputElement;
-      if (autoRegenMemsEl && state.settings) {
+      if (autoRegenMemsEl && state.settings && (shouldForceUpdate || root.activeElement !== autoRegenMemsEl)) {
         autoRegenMemsEl.checked = !!state.settings.autoRegenerateNativeMemories;
       }
       if (state.settings) {
@@ -4342,10 +4801,10 @@ export function mountPanel(): PanelHandle {
         const s2 = root.getElementById("prompt-s2") as HTMLTextAreaElement;
         const s3 = root.getElementById("prompt-s3") as HTMLTextAreaElement;
         const s4 = root.getElementById("prompt-s4") as HTMLTextAreaElement;
-        if (s1 && root.activeElement !== s1) s1.value = state.settings.customPromptSection1 || DEFAULT_PROMPT_SECTION_1;
-        if (s2 && root.activeElement !== s2) s2.value = state.settings.customPromptSection2 || DEFAULT_PROMPT_SECTION_2;
-        if (s3 && root.activeElement !== s3) s3.value = state.settings.customPromptSection3 || DEFAULT_PROMPT_SECTION_3;
-        if (s4 && root.activeElement !== s4) s4.value = state.settings.customPromptSection4 || DEFAULT_PROMPT_SECTION_4;
+        if (s1 && (shouldForceUpdate || root.activeElement !== s1)) s1.value = state.settings.customPromptSection1 || DEFAULT_PROMPT_SECTION_1;
+        if (s2 && (shouldForceUpdate || root.activeElement !== s2)) s2.value = state.settings.customPromptSection2 || DEFAULT_PROMPT_SECTION_2;
+        if (s3 && (shouldForceUpdate || root.activeElement !== s3)) s3.value = state.settings.customPromptSection3 || DEFAULT_PROMPT_SECTION_3;
+        if (s4 && (shouldForceUpdate || root.activeElement !== s4)) s4.value = state.settings.customPromptSection4 || DEFAULT_PROMPT_SECTION_4;
       }
       const opsEl = root.getElementById("learned-ops-list");
       if (opsEl && state.ops) {
@@ -5027,4 +5486,5 @@ export function mountPanel(): PanelHandle {
       updateMinState();
     },
   };
+  return api;
 }

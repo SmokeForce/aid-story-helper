@@ -176,7 +176,7 @@ The communication contract between content scripts (panel UI) and the background
 | `setSettings` | `settings: Settings` | Saves modified settings singleton. |
 | `setProtagonist` | `shortId`, `name: string` | Records the protagonist character name. |
 | `analyzeRequest` | `shortId` | Triggers an AI analysis pass for Plot Essentials/Story Cards updates. |
-| `generateCard` | `shortId`, `cardId` | Triggers sequential multi-pass native GQL generation on AID for a card. |
+| `generateCard` | `shortId`, `cardId` | Triggers sequential multi-pass AI generation for a card using the configured provider, then saves it to AID via GQL mutation. |
 | `setVersionStatus` | `id`, `status: Version['status']` | Approves or rejects a pending AI version update. |
 | `applyToAid` | `id` | Pushes approved pending version changes to AI Dungeon servers via GQL. |
 | `getState` | `shortId` | Retrieves current state (actions, cards, versions, settings) for panel display. |
@@ -188,7 +188,7 @@ The communication contract between content scripts (panel UI) and the background
 | `saveCardKeys` | `shortId`, `cardId`, `keys` | Saves updated trigger keys for a story card and replays the GQL mutation to update AID. |
 | `processInterceptedAction` | `shortId`, `text: string`, `type: string` | Inspects live input to check for MemorAID presence triggers. |
 | `memoraidTiming` (broadcast) | `payload: { lastMs, avgMs, count }` | Background→tabs push of session-scoped MemorAID intercept-path timing for the readout under Action Intercept Timeout. |
-| `refineMemoryBlock` | `shortId`, `index` | Triggers native GQL generation to refine/regenerate a specific memory block. |
+| `refineMemoryBlock` | `shortId`, `index` | Triggers AI generation using the configured provider to refine/regenerate a specific memory block, then writes it back to AID via GQL mutation. |
 | `getManagerData` | *(none)* | Retrieves all local adventures, all story cards, all global assets, and general settings. |
 | `saveGlobalAsset` | `asset: GlobalAsset` | Saves or updates a global asset in the local IndexedDB. |
 | `deleteGlobalAsset` | `id: string` | Deletes a global asset from the local IndexedDB. |

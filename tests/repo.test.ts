@@ -64,6 +64,37 @@ describe("Repo", () => {
     expect((await repo.getActions("Z")).map((a) => a.id)).toEqual(["1"]);
     expect((await repo.getActions("Y")).map((a) => a.id)).toEqual(["9"]);
   });
+
+  it("exportAll omits API keys but keeps the rest of settings", async () => {
+    await repo.setSettings({ provider: "claude", apiKeys: { claude: "sk-secret" }, analyzeWindow: 30 } as any);
+    const backup = await repo.exportAll();
+    const settingsRows = backup.stores.settings ?? [];
+    expect(settingsRows.length).toBe(1);
+    expect(settingsRows[0].apiKeys).toBeUndefined();
+    // non-secret settings survive the backup
+    expect(settingsRows[0].provider).toBe("claude");
+    expect(settingsRows[0].analyzeWindow).toBe(30);
+    // serialized backup contains no trace of the key
+    expect(JSON.stringify(backup)).not.toContain("sk-secret");
+  });
+
+  it("importAll never clobbers API keys already on the device", async () => {
+    // Device already has keys configured.
+    await repo.setSettings({ provider: "claude", apiKeys: { claude: "sk-local" }, analyzeWindow: 20 } as any);
+    // A key-free backup (as exportAll now produces) carries other settings changes.
+    const backup = {
+      __aidBackup: true,
+      dbVersion: 4,
+      stores: { settings: [{ _k: "singleton", provider: "openai", analyzeWindow: 50 }] },
+    };
+    const res = await repo.importAll(backup);
+    expect(res.ok).toBe(true);
+
+    const settings = await repo.getSettings();
+    expect(settings?.apiKeys?.claude).toBe("sk-local"); // preserved, not wiped
+    expect(settings?.provider).toBe("openai");           // backup value applied
+    expect(settings?.analyzeWindow).toBe(50);
+  });
 });
 
 describe("Repo v2 per-action rows", () => {

@@ -41,6 +41,68 @@ function currentShortId(): string | null {
 }
 
 const panel = mountPanel();
+
+async function decompressSettings(payload: string): Promise<any> {
+  if (payload.startsWith("gz:")) {
+    const base64Data = payload.slice(3);
+    const binaryString = atob(base64Data);
+    const bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0));
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+    const response = new Response(stream);
+    const text = await response.text();
+    return JSON.parse(text);
+  } else if (payload.startsWith("raw:")) {
+    const base64Data = payload.slice(4);
+    const jsonText = decodeURIComponent(escape(atob(base64Data)));
+    return JSON.parse(jsonText);
+  } else {
+    try {
+      const binaryString = atob(payload);
+      const bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0));
+      if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+        const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+        const response = new Response(stream);
+        const text = await response.text();
+        return JSON.parse(text);
+      }
+      const jsonText = new TextDecoder().decode(bytes);
+      return JSON.parse(jsonText);
+    } catch (e) {
+      return JSON.parse(payload);
+    }
+  }
+}
+
+async function checkAndImportQrSettings() {
+  try {
+    const urlParams = new URLSearchParams(window.location.search);
+    const importPayload = urlParams.get("importSettings");
+    if (!importPayload) return;
+
+    panel.showToast("Importing settings...");
+    const settings = await decompressSettings(importPayload);
+    if (settings && typeof settings === "object") {
+      delete settings.apiKeys;
+      delete settings.keyStatus;
+
+      await browser.runtime.sendMessage({ kind: "setSettings", settings });
+      
+      const cleanUrl = window.location.origin + window.location.pathname;
+      window.history.replaceState({}, document.title, cleanUrl);
+      
+      panel.showToast("Settings imported successfully!");
+      refresh();
+    } else {
+      panel.showToast("Invalid settings payload.", true);
+    }
+  } catch (err: any) {
+    console.error("[AID content] Failed to import QR settings:", err);
+    panel.showToast("Import failed: " + (err?.message || String(err)), true);
+  }
+}
+
+checkAndImportQrSettings();
+
 panel.onRefresh(() => {
   dlog("[AID content] Direct refresh requested by panel callback");
   refresh();
@@ -281,10 +343,10 @@ window.addEventListener("message", (ev) => {
       if ((!hasAdventure || isSkeleton) && !autoBackfillsInFlight.has(shortId) && checkIsPlayUrl()) {
         autoBackfillsInFlight.add(shortId);
         console.log(`[AID content] Auto-triggering backfill for new/skeleton adventure: ${shortId}`);
-        browser.runtime.sendMessage({ kind: "backfillRequest", shortId }).then((res) => {
+        browser.runtime.sendMessage({ kind: "backfillRequest", shortId }).then((res: any) => {
           console.log(`[AID content] Auto-backfill completed for ${shortId}:`, res);
           refresh();
-        }).catch((err) => {
+        }).catch((err: any) => {
           console.error(`[AID content] Auto-backfill failed for ${shortId}:`, err);
         }).finally(() => {
           autoBackfillsInFlight.delete(shortId);
@@ -332,7 +394,7 @@ window.addEventListener("message", (ev) => {
         requestId: detail.requestId,
         updatedNames: res?.updatedNames || []
       }, location.origin);
-    }).catch((err) => {
+    }).catch((err: any) => {
       console.error("[AID content] Error processing intercepted action:", err);
       window.postMessage({
         source: "aid-extension-host",
@@ -491,7 +553,7 @@ panel.onBackfill(async () => {
 });
 
 panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow, showDebug, theme, s1, s2, s3, s4, cardCommands, useMemories, formattingMode, memoraidLookback, memoraidThoughtLookback, memoraidPresenceLookback, autoRegenerateNativeMemories, interceptTimeout, useSinglePassGeneration, locationMode, enableProperNounDetection, manualMode, logPlotEssentials, characterCardLimit, thoughtCardLimit) => {
-  const sid = currentShortId(); if (!sid) return;
+  const sid = currentShortId();
   const settings: any = {
     provider,
     model: model || undefined,
@@ -520,7 +582,7 @@ panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow,
   };
   if (apiKey) settings.apiKeys = { [provider]: apiKey };
   await browser.runtime.sendMessage({ kind: "setSettings", settings });
-  if (protagonist) await browser.runtime.sendMessage({ kind: "setProtagonist", shortId: sid, name: protagonist });
+  if (sid && protagonist) await browser.runtime.sendMessage({ kind: "setProtagonist", shortId: sid, name: protagonist });
   
   // Post settings update to injected script
   window.postMessage({
@@ -734,7 +796,7 @@ panel.onGrantPermissions(() => {
         panel.showToast("Failed to open permissions tab: " + (res?.error || "unknown error"), true);
       }
     })
-    .catch(err => {
+    .catch((err: any) => {
       panel.showToast("Failed to open permissions tab: " + err.message, true);
     });
 });

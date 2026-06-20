@@ -1236,6 +1236,24 @@ describe("MemorAID NPC Memory Cards", () => {
     expect(state.settings.interceptTimeout).toBe(10);
   });
 
+  it("saves and retrieves settings with custom characterCardLimit and thoughtCardLimit", async () => {
+    // 1. Save settings with custom limits
+    await repo.setSettings({
+      provider: "claude",
+      characterCardLimit: 500,
+      thoughtCardLimit: 1500
+    } as any);
+
+    // 2. Query getState via listener
+    const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
+    const state = await listener({ kind: "getState", shortId });
+
+    // 3. Verify limits are returned correctly
+    expect(state.settings).toBeDefined();
+    expect(state.settings.characterCardLimit).toBe(500);
+    expect(state.settings.thoughtCardLimit).toBe(1500);
+  });
+
   it("creates a new story card using createStoryCard message", async () => {
     const op = { operationName: "SaveQueueStoryCard", query: "mutation SaveQueueStoryCard { success }", variableKeys: [], kind: "write", learnedAt: "2026-05-30T00:00:00Z" } as any;
     await repo.putOp(op);
@@ -1933,6 +1951,211 @@ describe("MemorAID NPC Memory Cards", () => {
     expect(updated).toEqual(["Anna"]);
     expect(fetchMock).toHaveBeenCalled();
   });
+
+  it("gates rolling braced format only when memoraidThoughtLookback > 1", async () => {
+    // 1. Save settings with memoraidThoughtLookback = 1
+    await repo.setSettings({
+      provider: "claude",
+      apiKeys: { claude: "sk-ant-123" },
+      formattingMode: "squareBrackets",
+      memoraidThoughtLookback: 1,
+      cardCommands: { memoraid: "active" },
+      showDebug: true
+    } as any);
+
+    // Setup character card and Configure MemorAID card
+    await repo.putCards(shortId, [
+      {
+        shortId,
+        id: "char-anna",
+        type: "character",
+        title: "Anna",
+        keys: "anna",
+        value: "Anna details."
+      },
+      {
+        shortId,
+        id: "config-memoraid",
+        type: "custom",
+        title: "Configure MemorAID",
+        keys: "configure memoraid",
+        value: "active",
+        description: "IMPORTANT_CHARACTERS: Anna"
+      }
+    ]);
+
+    await repo.putActions(shortId, []);
+
+    // Mock response
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("api.anthropic.com")) {
+        return {
+          ok: true,
+          json: async () => ({
+            content: [{ type: "text", text: "[\n- Intake: Anna smiles.\n- Thought: Nice.\n- Action: Wait.\n]" }]
+          })
+        } as unknown as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ([{
+          data: {
+            updateStoryCard: {
+              success: true,
+              message: "Updated card",
+              storyCard: {
+                id: "mem-anna",
+                type: "Memory",
+                title: "Anna (Memory)",
+                value: "[\nAnna\'s Thoughts:\n- Intake: Anna smiles.\n- Thought: Nice.\n- Action: Wait.\n]"
+              }
+            }
+          }
+        }])
+      };
+    });
+
+    // Run check with lookback = 1. Should be plain format: "Anna's Thoughts:"
+    let updated = await checkMemorAIDUpdates(shortId, "Anna walked straight toward your row.");
+    expect(updated).toEqual(["Anna"]);
+    let dbCards = await repo.getCards(shortId);
+    let memCard = dbCards.find(c => c.title === "Anna (Memory)");
+    expect(memCard?.value).toContain("Anna's Thoughts:");
+    expect(memCard?.value).not.toContain("Anna's Thoughts (newest to oldest):");
+
+    // 2. Update settings to memoraidThoughtLookback = 2
+    (globalThis as any).indexedDB = new IDBFactory();
+    __resetDbForTests();
+    repo = new Repo();
+    await repo.setSettings({
+      provider: "claude",
+      apiKeys: { claude: "sk-ant-123" },
+      formattingMode: "squareBrackets",
+      memoraidThoughtLookback: 2,
+      cardCommands: { memoraid: "active" },
+      showDebug: true
+    } as any);
+
+    await repo.putCards(shortId, [
+      {
+        shortId,
+        id: "char-anna",
+        type: "character",
+        title: "Anna",
+        keys: "anna",
+        value: "Anna details."
+      },
+      {
+        shortId,
+        id: "config-memoraid",
+        type: "custom",
+        title: "Configure MemorAID",
+        keys: "configure memoraid",
+        value: "active",
+        description: "IMPORTANT_CHARACTERS: Anna"
+      }
+    ]);
+
+    // Clear actions & database card to run fresh
+    await repo.putActions(shortId, []);
+    fetchMock.mockClear();
+
+    // Run check with lookback = 2. Should use braced format: "Anna's Thoughts (newest to oldest):"
+    updated = await checkMemorAIDUpdates(shortId, "Anna walked straight toward your row.");
+    expect(updated).toEqual(["Anna"]);
+    dbCards = await repo.getCards(shortId);
+    memCard = dbCards.find(c => c.title === "Anna (Memory)");
+    expect(memCard?.value).toContain("Anna's Thoughts (newest to oldest):");
+    expect(memCard?.value).toContain("{- Intake: Anna smiles.");
+  });
+
+  it("handles triggers and mappings for joint character cards correctly without duplicates", async () => {
+    // 1. Setup Configure MemorAID and joint character card "Luna and Stella"
+    await repo.setSettings({
+      provider: "claude",
+      apiKeys: { claude: "sk-ant-123" },
+      formattingMode: "squareBrackets",
+      memoraidThoughtLookback: 1,
+      cardCommands: { memoraid: "active" }
+    } as any);
+
+    await repo.putCards(shortId, [
+      {
+        shortId,
+        id: "char-joint",
+        type: "character",
+        title: "Luna and Stella",
+        keys: "luna, stella",
+        value: "Luna and Stella details."
+      },
+      {
+        shortId,
+        id: "mem-joint",
+        type: "Memory",
+        title: "Luna and Stella (Memory)",
+        keys: "luna, stella",
+        value: "[\n - none\n]",
+        description: ""
+      },
+      {
+        shortId,
+        id: "config-memoraid",
+        type: "custom",
+        title: "Configure MemorAID",
+        keys: "configure memoraid",
+        value: "active",
+        description: "IMPORTANT_CHARACTERS: Luna, Stella"
+      }
+    ]);
+
+    await repo.putActions(shortId, []);
+
+    // Mock response for joint cards
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("api.anthropic.com")) {
+        return {
+          ok: true,
+          json: async () => ({
+            content: [{
+              type: "text",
+              text: "[\n- Intake: Luna feels form.\n- Thought: Tragedy.\n- Action: Embrace.\n- Intake: Stella watches.\n- Thought: Challenge.\n- Action: Dial back.\n]"
+            }]
+          })
+        } as unknown as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ([{
+          data: {
+            updateStoryCard: {
+              success: true,
+              message: "Updated card",
+              storyCard: {
+                id: "mem-joint",
+                type: "Memory",
+                title: "Luna and Stella (Memory)",
+                value: "[\nLuna and Stella's Thoughts:\n- Intake: Luna feels form.\n- Thought: Tragedy.\n- Action: Embrace.\n- Intake: Stella watches.\n- Thought: Challenge.\n- Action: Dial back.\n]"
+              }
+            }
+          }
+        }])
+      };
+    });
+
+    // Run check. Trigger both individual names (Luna and Stella are both listed).
+    // They both map to the same joint card. Only 1 generation request should fire, 
+    // and both loops should be parsed and present.
+    const updated = await checkMemorAIDUpdates(shortId, "Luna and Stella both walked toward you.");
+    console.log("FETCHMOCK CALLS:", fetchMock.mock.calls.map((c, i) => `${i + 1}: ${c[0]} ${c[1]?.headers?.Authorization || ""} ${c[1]?.body ? c[1].body.slice(0, 100) : ""}`));
+    expect(updated).toEqual(["Luna and Stella"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // 1 for Anthropic + 1 for GQL writeback
+
+    const dbCards = await repo.getCards(shortId);
+    const memCard = dbCards.find(c => c.title === "Luna and Stella (Memory)");
+    expect(memCard).toBeDefined();
+    expect(memCard?.value).toContain("Luna feels form");
+    expect(memCard?.value).toContain("Stella watches");
+  });
 });
 
 describe("looksLikeCharacterProfile (MemorAID guard)", () => {
@@ -1997,6 +2220,26 @@ describe("extractThoughtLoop (MemorAID salvage)", () => {
   it("passes already-clean output through unchanged", () => {
     const clean = "- Intake: a\n- Thought: b\n- Action: c";
     expect(extractThoughtLoop(clean)).toBe(clean);
+  });
+
+  it("extracts and formats multiple Intake-Thought-Action loops sequentially", () => {
+    const multiResponse = `
+    - Intake: Luna feels Slimey's trembling form.
+    - Thought: A shimmering tragedy.
+    - Action: Wrap him in embrace.
+    - Intake: Stella watches Slimey's bewilderment.
+    - Thought: His vulnerability is a challenge.
+    - Action: Dial back aggression.
+    `;
+    const out = extractThoughtLoop(multiResponse);
+    expect(out).toBe(
+      "- Intake: Luna feels Slimey's trembling form.\n" +
+      "- Thought: A shimmering tragedy.\n" +
+      "- Action: Wrap him in embrace.\n" +
+      "- Intake: Stella watches Slimey's bewilderment.\n" +
+      "- Thought: His vulnerability is a challenge.\n" +
+      "- Action: Dial back aggression."
+    );
   });
 });
 

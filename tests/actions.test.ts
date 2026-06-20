@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { countActions, sliceLastActions, determineFellOutCards, isCharacterTriggered } from "../src/shared/types";
+import { countActions, sliceLastActions, determineFellOutCards, isCharacterTriggered, isLocalDbEmpty } from "../src/shared/types";
 
 // Mirrors the real AID action stream: start (opening), then do/story (player inputs)
 // each followed by a continue (AI response), plus standalone continues (Continue presses).
@@ -103,5 +103,22 @@ describe("determineFellOutCards", () => {
     // Elias should NOT fall out because he is still active in the current window!
     const fellOut = determineFellOutCards(4, actions, 2, cards);
     expect(fellOut).toHaveLength(0);
+  });
+});
+
+describe("isLocalDbEmpty (self-heal banner gate)", () => {
+  it("is true only when there are no adventures, no actions, and no cards", () => {
+    expect(isLocalDbEmpty({ adventures: [], actionCount: 0, cards: [] })).toBe(true);
+    expect(isLocalDbEmpty({})).toBe(true);
+  });
+
+  it("is false when the current adventure has actions (the 203-actions false positive)", () => {
+    expect(isLocalDbEmpty({ adventures: [], actionCount: 203, cards: [] })).toBe(false);
+    expect(isLocalDbEmpty({ actionsCount: 203 })).toBe(false);
+  });
+
+  it("is false when any adventure or card exists", () => {
+    expect(isLocalDbEmpty({ adventures: [{}], actionCount: 0, cards: [] })).toBe(false);
+    expect(isLocalDbEmpty({ adventures: [], actionCount: 0, cards: [{}] })).toBe(false);
   });
 });

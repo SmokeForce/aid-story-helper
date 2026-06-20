@@ -20263,6 +20263,12 @@ HARD RULES (weaker models break these \u2014 do not):
       if (!rec) return void 0;
       const { _k, ...s3 } = rec;
       const settings = s3;
+      if (settings.enableProperNounDetection === void 0 && s3.enableLocationDetection !== void 0) {
+        settings.enableProperNounDetection = s3.enableLocationDetection;
+        delete settings.enableLocationDetection;
+        console.log("[AID repo] Migrating enableLocationDetection ->", settings.enableProperNounDetection, "(enableProperNounDetection).");
+        await this.setSettings(settings);
+      }
       if (settings.cardCommands?.memoraid) {
         const HISTORICAL_MEMORAID_DEFAULTS = [
           "Generate thoughts for {{title}} in the first-person perspective, capturing their subjective reactions and internal feelings about recent events, especially in relation to {protagonist}. Format the output strictly as a bulleted list inside square brackets, e.g. [\n- thought\n- thought\n]. Write exactly how {{title}} would think in this moment, using their profile and voice. Keep it under 300 characters total.",

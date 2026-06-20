@@ -673,7 +673,7 @@ async function runBackfill(shortId: string): Promise<{ loaded: number } | { erro
     const advData = items[0]?.data?.adventure;
     if (advData) {
       const rawMems = advData.state?.memories;
-      const oldMemories = (await repo.getAdventure(shortId))?.aidMemories || [];
+      const oldMemories = (await repo.getAdventure(shortId))?.memoryBankEntries || [];
       const parsedMems = Array.isArray(rawMems)
         ? rawMems.map((m: any) => {
             const text = typeof m === "string" ? m : (m?.text || "");
@@ -686,7 +686,7 @@ async function runBackfill(shortId: string): Promise<{ loaded: number } | { erro
       await repo.upsertAdventure({
         shortId,
         title: advData.title || undefined,
-        aidMemories: parsedMems
+        memoryBankEntries: parsedMems
       });
       dlog("[AID bg] Backfilled memories successfully using custom query.");
     }
@@ -704,7 +704,7 @@ async function runBackfill(shortId: string): Promise<{ loaded: number } | { erro
       shortId: string;
       title?: string;
       memory?: string;
-      aidMemories?: any[];
+      memoryBankEntries?: any[];
       instructions?: string;
       authorsNote?: string;
     } = { shortId };
@@ -712,9 +712,9 @@ async function runBackfill(shortId: string): Promise<{ loaded: number } | { erro
     if (parsed.memory) advUpdate.memory = parsed.memory;
     if (parsed.instructions) advUpdate.instructions = parsed.instructions;
     if (parsed.authorsNote) advUpdate.authorsNote = parsed.authorsNote;
-    if (parsed.aidMemories) {
-      const oldMemories = (await repo.getAdventure(shortId))?.aidMemories || [];
-      advUpdate.aidMemories = parsed.aidMemories.map((m: any) => {
+    if (parsed.memoryBankEntries) {
+      const oldMemories = (await repo.getAdventure(shortId))?.memoryBankEntries || [];
+      advUpdate.memoryBankEntries = parsed.memoryBankEntries.map((m: any) => {
         const text = typeof m === "string" ? m : (m?.text || "");
         const old = oldMemories.find((o) => o.text === text);
         if (old) return old;
@@ -724,7 +724,7 @@ async function runBackfill(shortId: string): Promise<{ loaded: number } | { erro
     if (
       advUpdate.title ||
       advUpdate.memory ||
-      advUpdate.aidMemories ||
+      advUpdate.memoryBankEntries ||
       advUpdate.instructions ||
       advUpdate.authorsNote
     ) {
@@ -2318,7 +2318,7 @@ function debouncedGameplayTurnCheck(shortId: string, upserts: any[]) {
 // cap before sending so a runaway generation degrades to a truncated memory instead of a server
 // rejection. Trim to a clause boundary so the result still reads as a sentence.
 const NATIVE_MEMORY_CHAR_CAP = 1500;
-function capNativeMemory(text: string): string {
+function capMemoryBankEntry(text: string): string {
   if (!text || text.length <= NATIVE_MEMORY_CHAR_CAP) return text;
   let t = text.slice(0, NATIVE_MEMORY_CHAR_CAP);
   const brk = Math.max(t.lastIndexOf(". "), t.lastIndexOf("; "), t.lastIndexOf(", "));
@@ -2337,7 +2337,7 @@ export async function regenerateMemoryBlock(shortId: string, index: number): Pro
     return { ok: false, error: "Adventure metadata not found in database." };
   }
 
-  const memories = adv.aidMemories || [];
+  const memories = adv.memoryBankEntries || [];
   if (memories.length === 0) {
     return { ok: false, error: "No native memories found to refine." };
   }
@@ -2417,7 +2417,7 @@ export async function regenerateMemoryBlock(shortId: string, index: number): Pro
 
   if (cleaned.length > NATIVE_MEMORY_CHAR_CAP) {
     console.warn(`[AID bg] Generated native memory summary was ${cleaned.length} chars (model overran the ~100-token limit); truncating to ${NATIVE_MEMORY_CHAR_CAP} to satisfy AID's 4,000-char EditMemory cap.`);
-    cleaned = capNativeMemory(cleaned);
+    cleaned = capMemoryBankEntry(cleaned);
   }
 
   // 4. Update the memory object in our database list
@@ -2434,7 +2434,7 @@ export async function regenerateMemoryBlock(shortId: string, index: number): Pro
     lastRelevantActionId: lastActId
   };
 
-  await repo.upsertAdventure({ shortId, aidMemories: updatedMemories });
+  await repo.upsertAdventure({ shortId, memoryBankEntries: updatedMemories });
 
   // 5. Replay EditMemory GQL mutation to AI Dungeon to update it on the server
   const editOp = await repo.getOp("EditMemory");
@@ -2464,7 +2464,7 @@ export async function regenerateMemoryBlock(shortId: string, index: number): Pro
 export async function regenerateLatestMemory(shortId: string): Promise<{ ok: boolean; error?: string; memories?: any[] }> {
   const adv = await repo.getAdventure(shortId);
   if (!adv) return { ok: false, error: "Adventure metadata not found." };
-  const memories = adv.aidMemories || [];
+  const memories = adv.memoryBankEntries || [];
   if (memories.length === 0) {
     return { ok: false, error: "No native memories found to refine." };
   }
@@ -3007,9 +3007,9 @@ async function handleMessage(msg: BgMessage): Promise<any> {
           return { error: err?.message || String(err) };
         }
       }
-      case "adventureMemories": {
+      case "memoryBankUpdate": {
         const adv = await repo.getAdventure(msg.shortId);
-        const oldMemories = adv?.aidMemories || [];
+        const oldMemories = adv?.memoryBankEntries || [];
         const normalized = (msg.memories || []).map((m: any) => {
           const text = typeof m === "string" ? m : (m?.text || "");
           const old = oldMemories.find((o) => o.text === text);
@@ -3019,11 +3019,11 @@ async function handleMessage(msg: BgMessage): Promise<any> {
           return typeof m === "string" ? { actionIds: [], text: m } : m;
         });
 
-        const update: any = { shortId: msg.shortId, aidMemories: normalized };
+        const update: any = { shortId: msg.shortId, memoryBankEntries: normalized };
         await repo.upsertAdventure(update);
 
         const settings = await repo.getSettings();
-        if (settings?.autoRegenerateNativeMemories) {
+        if (settings?.autoRegenerateMemoryBankEntry) {
           let shouldTrigger = false;
           if (normalized.length > oldMemories.length) {
             const isInitialLoad = oldMemories.length === 0;
@@ -3048,13 +3048,13 @@ async function handleMessage(msg: BgMessage): Promise<any> {
         }
         return;
       }
-      case "updateAidMemories": {
+      case "updateMemoryBank": {
         await ensureAuth();
         const normalized = msg.memories.map((m: any) => typeof m === "string" ? { actionIds: [], text: m } : m);
         const adv = await repo.getAdventure(msg.shortId);
-        const oldMemories = adv?.aidMemories || [];
+        const oldMemories = adv?.memoryBankEntries || [];
         
-        await repo.upsertAdventure({ shortId: msg.shortId, aidMemories: normalized });
+        await repo.upsertAdventure({ shortId: msg.shortId, memoryBankEntries: normalized });
         
         // Find which memory was edited by diffing by index
         let editedMemory: any = null;
@@ -3082,7 +3082,7 @@ async function handleMessage(msg: BgMessage): Promise<any> {
 
             try {
               dlog("[AID bg] Replaying EditMemory mutation to AI Dungeon...");
-              const req = buildEditMemory(gqlEndpoint, query, sessionToken, msg.shortId, actionId, capNativeMemory(editedMemory.text));
+              const req = buildEditMemory(gqlEndpoint, query, sessionToken, msg.shortId, actionId, capMemoryBankEntry(editedMemory.text));
               const res = await fetch(req.url, { method: "POST", headers: req.headers, body: req.body });
               const json = await res.json() as any;
               dlog("[AID bg] EditMemory response status:", res.status, JSON.stringify(json));
@@ -3645,7 +3645,7 @@ async function handleMessage(msg: BgMessage): Promise<any> {
         // Memories timeline looks up m.actionIds). Send just those instead of the entire action
         // list (which can be thousands of rows) on every refresh.
         const refIds = new Set<string>();
-        for (const m of (adv?.aidMemories ?? [])) {
+        for (const m of (adv?.memoryBankEntries ?? [])) {
           if (m && typeof m === "object") {
             for (const id of ((m as any).actionIds ?? [])) refIds.add(String(id));
             if ((m as any).lastRelevantActionId) refIds.add(String((m as any).lastRelevantActionId));
@@ -3687,7 +3687,7 @@ async function handleMessage(msg: BgMessage): Promise<any> {
             memoraidLookback: settings.memoraidLookback,
             memoraidThoughtLookback: settings.memoraidThoughtLookback ?? 1,
             memoraidPresenceLookback: settings.memoraidPresenceLookback,
-            autoRegenerateNativeMemories: !!settings.autoRegenerateNativeMemories,
+            autoRegenerateMemoryBankEntry: !!settings.autoRegenerateMemoryBankEntry,
             interceptTimeout: settings.interceptTimeout ?? 10,
             locationMode: settings.locationMode || "optionA",
             enableProperNounDetection: settings.enableProperNounDetection !== false, // opt-out: checked unless explicitly disabled
@@ -3703,7 +3703,7 @@ async function handleMessage(msg: BgMessage): Promise<any> {
           actionCount: actionsCount,
           actions: referencedActions.map(a => ({ id: a.id, text: a.text, type: a.type })),
           lastAnalysisAction: adv?.lastAnalysisAction ?? null,
-          aidMemories: adv?.aidMemories ?? null,
+          memoryBankEntries: adv?.memoryBankEntries ?? null,
           lastAutoUpdatedCard: adv?.lastAutoUpdatedCard ?? null,
           ops: ops.map((o) => ({ operationName: o.operationName, query: o.query, kind: o.kind })),
           activeLocationId: adv?.activeLocationId ?? null,

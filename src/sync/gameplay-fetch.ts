@@ -29,7 +29,7 @@ export interface GameplayParse {
   actionCount?: number;
   storyCards?: Array<{ id: string; type: string; title?: string; keys: string; value: string; description?: string }>;
   memory?: string;
-  aidMemories?: any[];
+  memoryBankEntries?: any[];
   instructions?: string;
   authorsNote?: string;
 }
@@ -62,7 +62,7 @@ export function parseGameplayResponse(json: unknown): GameplayParse {
         actionCount: adv.actionCount,
         storyCards: Array.isArray(adv.storyCards) ? adv.storyCards : undefined,
         memory: typeof adv.memory === "string" ? adv.memory : undefined,
-        aidMemories: Array.isArray(adv.state?.memories)
+        memoryBankEntries: Array.isArray(adv.state?.memories)
           ? adv.state.memories.map((m: any) => typeof m === "string" ? { actionIds: [], text: m } : m)
           : (Array.isArray(adv.gameState?.memories)
             ? adv.gameState.memories.map((m: any) => typeof m === "string" ? { actionIds: [], text: m } : m)

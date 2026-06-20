@@ -26,8 +26,8 @@ export type BgMessage =
   | { kind: "applyToAid"; id: string }
   | { kind: "getState"; shortId: string }
   | { kind: "listModels"; provider?: string; apiKey?: string }
-  | { kind: "adventureMemories"; shortId: string; memories: any[] }
-  | { kind: "updateAidMemories"; shortId: string; memories: any[] }
+  | { kind: "memoryBankUpdate"; shortId: string; memories: any[] }
+  | { kind: "updateMemoryBank"; shortId: string; memories: any[] }
   | { kind: "createConfigCard"; shortId: string }
   | { kind: "createStoryCard"; shortId: string; card: { type: string; title: string; keys: string; value: string; description?: string } }
   | { kind: "saveCardKeys"; shortId: string; cardId: string; keys: string }

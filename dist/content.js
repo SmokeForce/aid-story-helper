@@ -4291,8 +4291,8 @@ HARD RULES (weaker models break these \u2014 do not):
           badge.style.display = "none";
           badge.className = "";
         }
-        if (lastState?.aidMemories) {
-          lastViewedMemoriesCount = lastState.aidMemories.length;
+        if (lastState?.memoryBankEntries) {
+          lastViewedMemoriesCount = lastState.memoryBankEntries.length;
         }
       } else if (tabId === "main-tab-tracker") {
         const proposalsBadge = root.getElementById("tracker-proposals-badge");
@@ -4355,8 +4355,8 @@ HARD RULES (weaker models break these \u2014 do not):
           const idx = parseInt(card.getAttribute("data-idx"), 10);
           const textarea = card.querySelector(".edit-textarea");
           const newText = textarea.value.trim();
-          if (newText && lastState?.aidMemories) {
-            const updatedMemories = [...lastState.aidMemories];
+          if (newText && lastState?.memoryBankEntries) {
+            const updatedMemories = [...lastState.memoryBankEntries];
             const item = updatedMemories[idx];
             if (item) {
               updatedMemories[idx] = {
@@ -4364,7 +4364,7 @@ HARD RULES (weaker models break these \u2014 do not):
                 text: newText,
                 lastRelevantActionId: item.lastRelevantActionId
               };
-              updateAidMemoriesCb?.(updatedMemories);
+              updateMemoryBankCb?.(updatedMemories);
             }
           }
           return;
@@ -4373,10 +4373,10 @@ HARD RULES (weaker models break these \u2014 do not):
         if (deleteBtn) {
           const card = deleteBtn.closest(".memory-card");
           const idx = parseInt(card.getAttribute("data-idx"), 10);
-          if (lastState?.aidMemories) {
-            const updatedMemories = [...lastState.aidMemories];
+          if (lastState?.memoryBankEntries) {
+            const updatedMemories = [...lastState.memoryBankEntries];
             updatedMemories.splice(idx, 1);
-            updateAidMemoriesCb?.(updatedMemories);
+            updateMemoryBankCb?.(updatedMemories);
           }
           return;
         }
@@ -4408,7 +4408,7 @@ HARD RULES (weaker models break these \u2014 do not):
     let decisionCb = null;
     let pushCb = null;
     let genCardCb = null;
-    let updateAidMemoriesCb = null;
+    let updateMemoryBankCb = null;
     let refineMemoryBlockCb = null;
     let analyzeCb = null;
     let themeChangeCb = null;
@@ -4617,7 +4617,7 @@ HARD RULES (weaker models break these \u2014 do not):
       }
       const memListEl2 = root.getElementById("aid-memories-list");
       if (memListEl2) {
-        if (!state.aidMemories || state.aidMemories.length === 0) {
+        if (!state.memoryBankEntries || state.memoryBankEntries.length === 0) {
           setSafeHTML(memListEl2, `<div class="note" style="padding:12px;text-align:center;">No AID-generated memories captured yet.</div>`);
         } else {
           const actionMap = /* @__PURE__ */ new Map();
@@ -4627,7 +4627,7 @@ HARD RULES (weaker models break these \u2014 do not):
             }
           }
           const isInitialLoad = knownMemories.size === 0;
-          const itemsWithIndex = state.aidMemories.map((m, index) => ({ m, index }));
+          const itemsWithIndex = state.memoryBankEntries.map((m, index) => ({ m, index }));
           const reversedItems = [...itemsWithIndex].reverse();
           setSafeHTML(memListEl2, reversedItems.map(({ m, index }) => {
             const text = typeof m === "string" ? m : m?.text || "";
@@ -4681,7 +4681,7 @@ HARD RULES (weaker models break these \u2014 do not):
           }).join(""));
         }
       }
-      const memoriesCount = state.aidMemories?.length ?? 0;
+      const memoriesCount = state.memoryBankEntries?.length ?? 0;
       if (lastViewedMemoriesCount === -1) {
         lastViewedMemoriesCount = memoriesCount;
       }
@@ -4733,7 +4733,7 @@ HARD RULES (weaker models break these \u2014 do not):
       if (cleanSettings.manualMode === false) delete cleanSettings.manualMode;
       if (cleanSettings.showDebug === false) delete cleanSettings.showDebug;
       if (cleanSettings.useMemories === false) delete cleanSettings.useMemories;
-      if (cleanSettings.autoRegenerateNativeMemories === false) delete cleanSettings.autoRegenerateNativeMemories;
+      if (cleanSettings.autoRegenerateMemoryBankEntry === false) delete cleanSettings.autoRegenerateMemoryBankEntry;
       if (cleanSettings.useSinglePassGeneration === false) delete cleanSettings.useSinglePassGeneration;
       if (cleanSettings.memoraidLookback === 8) delete cleanSettings.memoraidLookback;
       if (cleanSettings.logPlotEssentials === false) delete cleanSettings.logPlotEssentials;
@@ -4837,8 +4837,8 @@ HARD RULES (weaker models break these \u2014 do not):
             btn.disabled = true;
             btn.textContent = "Regenerating memory...";
           }
-          if (refineMemoryBlockCb && lastState?.aidMemories && lastState.aidMemories.length > 0) {
-            refineMemoryBlockCb(lastState.aidMemories.length - 1);
+          if (refineMemoryBlockCb && lastState?.memoryBankEntries && lastState.memoryBankEntries.length > 0) {
+            refineMemoryBlockCb(lastState.memoryBankEntries.length - 1);
           }
         });
       },
@@ -4924,8 +4924,8 @@ HARD RULES (weaker models break these \u2014 do not):
       onGenerateCard: (cb) => {
         genCardCb = cb;
       },
-      onUpdateAidMemories: (cb) => {
-        updateAidMemoriesCb = cb;
+      onUpdateMemoryBank: (cb) => {
+        updateMemoryBankCb = cb;
       },
       onCreateConfigCard: (cb) => {
         createConfigCb = cb;
@@ -4998,7 +4998,7 @@ HARD RULES (weaker models break these \u2014 do not):
       },
       updateMemories: (memories) => {
         if (!lastState) return;
-        lastState.aidMemories = memories ?? [];
+        lastState.memoryBankEntries = memories ?? [];
         renderMemoriesSection(lastState);
       },
       updateMemoraidTiming: (stats) => {
@@ -5178,7 +5178,7 @@ HARD RULES (weaker models break these \u2014 do not):
         }
         const autoRegenMemsEl = root.getElementById("auto-regen-memories");
         if (autoRegenMemsEl && state.settings && (shouldForceUpdate || root.activeElement !== autoRegenMemsEl)) {
-          autoRegenMemsEl.checked = !!state.settings.autoRegenerateNativeMemories;
+          autoRegenMemsEl.checked = !!state.settings.autoRegenerateMemoryBankEntry;
         }
         if (state.settings) {
           const s1 = root.getElementById("prompt-s1");
@@ -5818,9 +5818,9 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       clearTimeout(memoriesUpdateTimeout);
     }
     memoriesUpdateTimeout = setTimeout(() => {
-      dlog(`[AID content] Sending debounced adventureMemories with ${latestMemories.length} memories.`);
+      dlog(`[AID content] Sending debounced memoryBankUpdate with ${latestMemories.length} memories.`);
       send({
-        kind: "adventureMemories",
+        kind: "memoryBankUpdate",
         shortId: sid,
         memories: latestMemories
       });
@@ -5853,7 +5853,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
           actionsCount: state.actionsCount,
           actionCount: state.actionCount,
           lastAnalysisAction: state.lastAnalysisAction,
-          aidMemories: state.aidMemories ?? [],
+          memoryBankEntries: state.memoryBankEntries ?? [],
           ops: state.ops ?? [],
           activeLocationId: state.activeLocationId ?? null,
           locationSuggestions: state.locationSuggestions ?? [],
@@ -6075,7 +6075,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       return;
     }
     if (detail?.transport === "ws" && detail.operationName === "AdventureMemoriesUpdate") {
-      const memories = detail.data?.adventureMemoriesUpdate?.memories;
+      const memories = detail.data?.memoryBankUpdateUpdate?.memories;
       if (Array.isArray(memories)) {
         dlog("[AID content] Captured real-time adventure memories update. count:", memories.length);
         bufferMemoriesUpdate(sid, memories || []);
@@ -6106,8 +6106,8 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       blob = new Blob([memory], { type: "text/plain" });
       filename = `aid-pe-${sid}.txt`;
     } else if (type === "aidmemories") {
-      const aidMemories = backup.adventure?.aidMemories || [];
-      blob = new Blob([JSON.stringify(aidMemories, null, 2)], { type: "application/json" });
+      const memoryBankEntries = backup.adventure?.memoryBankEntries || [];
+      blob = new Blob([JSON.stringify(memoryBankEntries, null, 2)], { type: "application/json" });
       filename = `aid-memories-${sid}.json`;
     } else if (type === "propernouns") {
       const logs = backup.adventure?.properNounLogs || [];
@@ -6144,7 +6144,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
     refresh();
   });
-  panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow, showDebug, theme, s1, s2, s3, s4, cardCommands, useMemories, formattingMode, memoraidLookback, memoraidThoughtLookback, memoraidPresenceLookback, autoRegenerateNativeMemories, interceptTimeout, useSinglePassGeneration, locationMode, enableProperNounDetection, manualMode, logPlotEssentials, characterCardLimit, thoughtCardLimit) => {
+  panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow, showDebug, theme, s1, s2, s3, s4, cardCommands, useMemories, formattingMode, memoraidLookback, memoraidThoughtLookback, memoraidPresenceLookback, autoRegenerateMemoryBankEntry, interceptTimeout, useSinglePassGeneration, locationMode, enableProperNounDetection, manualMode, logPlotEssentials, characterCardLimit, thoughtCardLimit) => {
     const sid = currentShortId();
     const settings = {
       provider,
@@ -6162,7 +6162,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       memoraidLookback,
       memoraidThoughtLookback,
       memoraidPresenceLookback,
-      autoRegenerateNativeMemories,
+      autoRegenerateMemoryBankEntry,
       interceptTimeout,
       useSinglePassGeneration,
       locationMode,
@@ -6282,10 +6282,10 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
     refresh();
   });
-  panel.onUpdateAidMemories(async (memories) => {
+  panel.onUpdateMemoryBank(async (memories) => {
     const sid = currentShortId();
     if (!sid) return;
-    await browser.runtime.sendMessage({ kind: "updateAidMemories", shortId: sid, memories });
+    await browser.runtime.sendMessage({ kind: "updateMemoryBank", shortId: sid, memories });
     refresh();
   });
   panel.onCreateConfigCard(async () => {

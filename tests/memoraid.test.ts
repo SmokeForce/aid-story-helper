@@ -750,7 +750,7 @@ describe("MemorAID NPC Memory Cards", () => {
   });
 
   it("can refine the latest AID memory natively via refineMemoryBlock message", async () => {
-    // 1. Prepare db data (actions, adventure with aidMemories, story cards)
+    // 1. Prepare db data (actions, adventure with memoryBankEntries, story cards)
     const act1 = { id: "10", text: "Smoke cooked tacos in the kitchen.", type: "do", createdAt: "2026-06-07T00:00:00Z" };
     const act2 = { id: "11", text: "Rena stepped close and brushed his chest.", type: "continue", createdAt: "2026-06-07T00:00:01Z" };
     const act3 = { id: "12", text: "Smoke smiled and thanked her.", type: "do", createdAt: "2026-06-07T00:00:02Z" };
@@ -770,7 +770,7 @@ describe("MemorAID NPC Memory Cards", () => {
       shortId,
       title: "Test Adventure",
       protagonistName: "Smoke",
-      aidMemories: initialMemories
+      memoryBankEntries: initialMemories
     });
 
     await repo.putCards(shortId, [
@@ -854,7 +854,7 @@ describe("MemorAID NPC Memory Cards", () => {
   });
 
   it("can refine any older AID memory block natively via refineMemoryBlock message", async () => {
-    // 1. Prepare db data (actions, adventure with aidMemories, story cards)
+    // 1. Prepare db data (actions, adventure with memoryBankEntries, story cards)
     const act1 = { id: "10", text: "Smoke cooked tacos in the kitchen.", type: "do", createdAt: "2026-06-07T00:00:00Z" };
     const act2 = { id: "11", text: "Rena stepped close and brushed his chest.", type: "continue", createdAt: "2026-06-07T00:00:01Z" };
     const act3 = { id: "12", text: "Smoke smiled and thanked her.", type: "do", createdAt: "2026-06-07T00:00:02Z" };
@@ -880,7 +880,7 @@ describe("MemorAID NPC Memory Cards", () => {
       shortId,
       title: "Test Adventure",
       protagonistName: "Smoke",
-      aidMemories: initialMemories
+      memoryBankEntries: initialMemories
     });
 
     await repo.putCards(shortId, [
@@ -969,7 +969,7 @@ describe("MemorAID NPC Memory Cards", () => {
   });
 
   it("falls back to un-summarized actions when refining the latest memory block if its actionIds is empty", async () => {
-    // 1. Prepare db data (actions, adventure with aidMemories, story cards)
+    // 1. Prepare db data (actions, adventure with memoryBankEntries, story cards)
     const act1 = { id: "10", text: "Smoke cooked tacos in the kitchen.", type: "do", createdAt: "2026-06-07T00:00:00Z" };
     const act2 = { id: "11", text: "Rena stepped close and brushed his chest.", type: "continue", createdAt: "2026-06-07T00:00:01Z" };
     const act3 = { id: "12", text: "Smoke smiled and thanked her.", type: "do", createdAt: "2026-06-07T00:00:02Z" };
@@ -989,7 +989,7 @@ describe("MemorAID NPC Memory Cards", () => {
       shortId,
       title: "Test Adventure",
       protagonistName: "Smoke",
-      aidMemories: initialMemories
+      memoryBankEntries: initialMemories
     });
 
     await repo.putCards(shortId, [
@@ -1078,13 +1078,13 @@ describe("MemorAID NPC Memory Cards", () => {
     expect(fetchMock).toHaveBeenCalled();
   });
 
-  it("automatically regenerates the latest native memory on adventureMemories if enabled and a new block is added or active block grows, and avoids infinite loops", async () => {
+  it("automatically regenerates the latest native memory on memoryBankUpdate if enabled and a new block is added or active block grows, and avoids infinite loops", async () => {
     // 1. Enable setting
     await repo.setSettings({
       provider: "claude",
       apiKeys: { claude: "sk-ant-123" },
       model: "claude-3-5-sonnet-latest",
-      autoRegenerateNativeMemories: true
+      autoRegenerateMemoryBankEntry: true
     } as any);
 
     // Prepare mock data
@@ -1132,7 +1132,7 @@ describe("MemorAID NPC Memory Cards", () => {
       shortId,
       title: "Test Adventure",
       protagonistName: "Smoke",
-      aidMemories: initialMemories
+      memoryBankEntries: initialMemories
     });
 
     fetchMock.mockClear();
@@ -1172,7 +1172,7 @@ describe("MemorAID NPC Memory Cards", () => {
       return { ok: true, json: async () => ({}) } as any;
     });
 
-    // 2. Invoke message listener for adventureMemories
+    // 2. Invoke message listener for memoryBankUpdate
     const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
     
     // Case 1: A new block is added
@@ -1180,9 +1180,9 @@ describe("MemorAID NPC Memory Cards", () => {
       "You cooked tacos in the kitchen.",
       "Rena brushed your chest."
     ];
-    await listener({ kind: "adventureMemories", shortId, memories: newMemoriesList });
+    await listener({ kind: "memoryBankUpdate", shortId, memories: newMemoriesList });
 
-    // Wait for async background regeneration to run (since it's fired asynchronously in case "adventureMemories")
+    // Wait for async background regeneration to run (since it's fired asynchronously in case "memoryBankUpdate")
     await new Promise(resolve => setTimeout(resolve, 100));
 
     expect(generateCallCount).toBe(1);
@@ -1191,7 +1191,7 @@ describe("MemorAID NPC Memory Cards", () => {
     // The text on the server for the latest memory will now be the refined text.
     // The local database was updated by the refinement function to have actionIds and text "You cooked tacos while Rena brushed your chest."
     const localAdv = await repo.getAdventure(shortId);
-    const localMemories = localAdv?.aidMemories || [];
+    const localMemories = localAdv?.memoryBankEntries || [];
     expect(localMemories[1].text).toBe("You cooked tacos while Rena brushed your chest.");
     expect(localMemories[1].actionIds).toEqual(["11"]);
 
@@ -1202,7 +1202,7 @@ describe("MemorAID NPC Memory Cards", () => {
     ];
 
     generateCallCount = 0; // reset
-    await listener({ kind: "adventureMemories", shortId, memories: serverBroadcastMemories });
+    await listener({ kind: "memoryBankUpdate", shortId, memories: serverBroadcastMemories });
     await new Promise(resolve => setTimeout(resolve, 100));
 
     // It should NOT trigger regeneration again because the text is the same (avoiding infinite loops)
@@ -1213,7 +1213,7 @@ describe("MemorAID NPC Memory Cards", () => {
       "You cooked tacos in the kitchen.",
       "You cooked tacos while Rena brushed your chest and she hummed."
     ];
-    await listener({ kind: "adventureMemories", shortId, memories: grownServerMemories });
+    await listener({ kind: "memoryBankUpdate", shortId, memories: grownServerMemories });
     await new Promise(resolve => setTimeout(resolve, 100));
 
     // It should trigger regeneration since the active block's text changed on the server (which resets actionIds on map)

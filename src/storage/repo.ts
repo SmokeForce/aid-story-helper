@@ -50,7 +50,15 @@ export class Repo {
 
   async getAdventure(shortId: string): Promise<AdventureMeta | undefined> {
     const db = await openAidDb();
-    return db.get("adventures", shortId);
+    const rec = await db.get("adventures", shortId);
+    // Renamed Native/AID-Memory field -> Memory Bank: migrate the legacy `aidMemories` field on a
+    // pre-rename record to `memoryBankEntries` (one-time per adventure; persisted so it stops firing).
+    if (rec && (rec as any).aidMemories !== undefined && (rec as any).memoryBankEntries === undefined) {
+      (rec as any).memoryBankEntries = (rec as any).aidMemories;
+      delete (rec as any).aidMemories;
+      await db.put("adventures", rec);
+    }
+    return rec;
   }
 
   async hideAdventure(shortId: string): Promise<void> {
@@ -211,6 +219,13 @@ export class Repo {
       settings.enableProperNounDetection = (s as any).enableLocationDetection;
       delete (settings as any).enableLocationDetection;
       console.log("[AID repo] Migrating enableLocationDetection ->", settings.enableProperNounDetection, "(enableProperNounDetection).");
+      await this.setSettings(settings);
+    }
+    // Renamed Native/AID-Memory identifiers -> Memory Bank: carry forward the legacy settings key.
+    if (settings.autoRegenerateMemoryBankEntry === undefined && (s as any).autoRegenerateNativeMemories !== undefined) {
+      settings.autoRegenerateMemoryBankEntry = (s as any).autoRegenerateNativeMemories;
+      delete (settings as any).autoRegenerateNativeMemories;
+      console.log("[AID repo] Migrating autoRegenerateNativeMemories ->", settings.autoRegenerateMemoryBankEntry, "(autoRegenerateMemoryBankEntry).");
       await this.setSettings(settings);
     }
     if (settings.cardCommands?.memoraid) {

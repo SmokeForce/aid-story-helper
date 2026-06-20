@@ -189,9 +189,9 @@ function bufferMemoriesUpdate(sid: string, memories: any[]) {
   }
   
   memoriesUpdateTimeout = setTimeout(() => {
-    dlog(`[AID content] Sending debounced adventureMemories with ${latestMemories.length} memories.`);
+    dlog(`[AID content] Sending debounced memoryBankUpdate with ${latestMemories.length} memories.`);
     send({
-      kind: "adventureMemories",
+      kind: "memoryBankUpdate",
       shortId: sid,
       memories: latestMemories
     });
@@ -227,7 +227,7 @@ async function refresh() {
         actionsCount: state.actionsCount,
         actionCount: state.actionCount,
         lastAnalysisAction: state.lastAnalysisAction,
-        aidMemories: state.aidMemories ?? [],
+        memoryBankEntries: state.memoryBankEntries ?? [],
         ops: state.ops ?? [],
         activeLocationId: state.activeLocationId ?? null,
         locationSuggestions: state.locationSuggestions ?? [],
@@ -477,7 +477,7 @@ window.addEventListener("message", (ev) => {
     return;
   }
   if (detail?.transport === "ws" && detail.operationName === "AdventureMemoriesUpdate") {
-    const memories = detail.data?.adventureMemoriesUpdate?.memories;
+    const memories = detail.data?.memoryBankUpdateUpdate?.memories;
     if (Array.isArray(memories)) {
       dlog("[AID content] Captured real-time adventure memories update. count:", memories.length);
       bufferMemoriesUpdate(sid, memories || []);
@@ -509,8 +509,8 @@ panel.onExport(async (type) => {
     blob = new Blob([memory], { type: "text/plain" });
     filename = `aid-pe-${sid}.txt`;
   } else if (type === "aidmemories") {
-    const aidMemories = backup.adventure?.aidMemories || [];
-    blob = new Blob([JSON.stringify(aidMemories, null, 2)], { type: "application/json" });
+    const memoryBankEntries = backup.adventure?.memoryBankEntries || [];
+    blob = new Blob([JSON.stringify(memoryBankEntries, null, 2)], { type: "application/json" });
     filename = `aid-memories-${sid}.json`;
   } else if (type === "propernouns") {
     const logs = backup.adventure?.properNounLogs || [];
@@ -552,7 +552,7 @@ panel.onBackfill(async () => {
   refresh();
 });
 
-panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow, showDebug, theme, s1, s2, s3, s4, cardCommands, useMemories, formattingMode, memoraidLookback, memoraidThoughtLookback, memoraidPresenceLookback, autoRegenerateNativeMemories, interceptTimeout, useSinglePassGeneration, locationMode, enableProperNounDetection, manualMode, logPlotEssentials, characterCardLimit, thoughtCardLimit) => {
+panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow, showDebug, theme, s1, s2, s3, s4, cardCommands, useMemories, formattingMode, memoraidLookback, memoraidThoughtLookback, memoraidPresenceLookback, autoRegenerateMemoryBankEntry, interceptTimeout, useSinglePassGeneration, locationMode, enableProperNounDetection, manualMode, logPlotEssentials, characterCardLimit, thoughtCardLimit) => {
   const sid = currentShortId();
   const settings: any = {
     provider,
@@ -570,7 +570,7 @@ panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow,
     memoraidLookback,
     memoraidThoughtLookback,
     memoraidPresenceLookback,
-    autoRegenerateNativeMemories,
+    autoRegenerateMemoryBankEntry,
     interceptTimeout,
     useSinglePassGeneration,
     locationMode,
@@ -712,9 +712,9 @@ panel.onPushVersion(async (id) => {
 });
 
 // 10) AID Memories Tab Event Hooks
-panel.onUpdateAidMemories(async (memories) => {
+panel.onUpdateMemoryBank(async (memories) => {
   const sid = currentShortId(); if (!sid) return;
-  await browser.runtime.sendMessage({ kind: "updateAidMemories", shortId: sid, memories });
+  await browser.runtime.sendMessage({ kind: "updateMemoryBank", shortId: sid, memories });
   refresh();
 });
 

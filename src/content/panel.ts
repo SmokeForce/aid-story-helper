@@ -37,7 +37,7 @@ export interface PanelState {
     memoraidLookback?: number;
     memoraidThoughtLookback?: number;
     memoraidPresenceLookback?: number;
-    autoRegenerateNativeMemories?: boolean;
+    autoRegenerateMemoryBankEntry?: boolean;
     interceptTimeout?: number;
     locationMode?: "optionA" | "optionB";
     enableProperNounDetection?: boolean;
@@ -54,7 +54,7 @@ export interface PanelState {
   actionsCount?: number;
   actionCount?: number;
   lastAnalysisAction?: number | null;
-  aidMemories?: { actionIds: string[]; text: string; lastRelevantActionId?: string }[] | null;
+  memoryBankEntries?: { actionIds: string[]; text: string; lastRelevantActionId?: string }[] | null;
   lastAutoUpdatedCard?: string | null;
   ops?: { operationName: string; query: string; kind: string }[];
   actions?: { id: string; text: string; type?: string }[] | null;
@@ -77,14 +77,14 @@ export interface PanelHandle {
   showToast(text: string, isError?: boolean): void;
   onExport(cb: (type: "story" | "cards" | "pe" | "aidmemories" | "propernouns" | "all") => void): void;
   onBackfill(cb: () => void): void;
-  onSaveSettings(cb: (provider: string, apiKey: string, protagonist: string, model: string, analyzeWindow: number, showDebug: boolean, theme: string, s1: string, s2: string, s3: string, s4: string, cardCommands: Record<string, string>, useMemories: boolean, formattingMode: string, memoraidLookback: number, memoraidThoughtLookback: number, memoraidPresenceLookback: number, autoRegenerateNativeMemories: boolean, interceptTimeout: number, useSinglePassGeneration: boolean, locationMode: "optionA" | "optionB", enableProperNounDetection: boolean, manualMode: boolean, logPlotEssentials: boolean, characterCardLimit: number, thoughtCardLimit: number) => void): void;
+  onSaveSettings(cb: (provider: string, apiKey: string, protagonist: string, model: string, analyzeWindow: number, showDebug: boolean, theme: string, s1: string, s2: string, s3: string, s4: string, cardCommands: Record<string, string>, useMemories: boolean, formattingMode: string, memoraidLookback: number, memoraidThoughtLookback: number, memoraidPresenceLookback: number, autoRegenerateMemoryBankEntry: boolean, interceptTimeout: number, useSinglePassGeneration: boolean, locationMode: "optionA" | "optionB", enableProperNounDetection: boolean, manualMode: boolean, logPlotEssentials: boolean, characterCardLimit: number, thoughtCardLimit: number) => void): void;
   onDismissMemoraidBanner(cb: () => void): void;
   onThemeChange(cb: (theme: string) => void): void;
   onAnalyze(cb: () => void): void;
   onGenerateCard(cb: (cardId: string) => void): void;
   onProposalDecision(cb: (versionId: string, status: "applied" | "rejected") => void): void;
   onPushVersion(cb: (versionId: string) => void): void;
-  onUpdateAidMemories(cb: (memories: any[]) => void): void;
+  onUpdateMemoryBank(cb: (memories: any[]) => void): void;
   onCreateConfigCard(cb: () => void): void;
   onCreateStoryCard(cb: (card: { type: string; title: string; keys: string; value: string; description?: string }) => Promise<{ ok?: boolean; error?: string }>): void;
   onSaveCardKeys(cb: (cardId: string, keys: string) => Promise<{ ok?: boolean; error?: string }>): void;
@@ -111,7 +111,7 @@ export interface PanelHandle {
   /** Surgically update the Actions counter + "Since Last Update Check" stat without a full re-render. */
   updateActionCount(count: number, lastAnalysisAction?: number | null): void;
   /** Surgically re-render the AID Memories list (and unread badge) without a full re-render. */
-  updateMemories(memories: PanelState["aidMemories"]): void;
+  updateMemories(memories: PanelState["memoryBankEntries"]): void;
   /** Surgically update the MemorAID intercept timing readout (last run + session average). */
   updateMemoraidTiming(stats: PanelState["memoraidTiming"]): void;
   setModels(models: string[], current?: string): void;
@@ -3839,8 +3839,8 @@ export function mountPanel(): PanelHandle {
         badge.style.display = "none";
         badge.className = "";
       }
-      if (lastState?.aidMemories) {
-        lastViewedMemoriesCount = lastState.aidMemories.length;
+      if (lastState?.memoryBankEntries) {
+        lastViewedMemoriesCount = lastState.memoryBankEntries.length;
       }
     } else if (tabId === "main-tab-tracker") {
       // Clear badge
@@ -3918,8 +3918,8 @@ export function mountPanel(): PanelHandle {
         const textarea = card.querySelector(".edit-textarea") as HTMLTextAreaElement;
         const newText = textarea.value.trim();
         
-        if (newText && lastState?.aidMemories) {
-          const updatedMemories = [...lastState.aidMemories];
+        if (newText && lastState?.memoryBankEntries) {
+          const updatedMemories = [...lastState.memoryBankEntries];
           const item = updatedMemories[idx];
           if (item) {
             updatedMemories[idx] = {
@@ -3927,7 +3927,7 @@ export function mountPanel(): PanelHandle {
               text: newText,
               lastRelevantActionId: item.lastRelevantActionId
             };
-            updateAidMemoriesCb?.(updatedMemories);
+            updateMemoryBankCb?.(updatedMemories);
           }
         }
         return;
@@ -3939,10 +3939,10 @@ export function mountPanel(): PanelHandle {
         const card = deleteBtn.closest(".memory-card") as HTMLElement;
         const idx = parseInt(card.getAttribute("data-idx")!, 10);
         
-        if (lastState?.aidMemories) {
-          const updatedMemories = [...lastState.aidMemories];
+        if (lastState?.memoryBankEntries) {
+          const updatedMemories = [...lastState.memoryBankEntries];
           updatedMemories.splice(idx, 1);
-          updateAidMemoriesCb?.(updatedMemories);
+          updateMemoryBankCb?.(updatedMemories);
         }
         return;
       }
@@ -3981,7 +3981,7 @@ export function mountPanel(): PanelHandle {
   let decisionCb: ((id: string, s: "applied" | "rejected") => void) | null = null;
   let pushCb: ((id: string) => void) | null = null;
   let genCardCb: ((cardId: string) => void) | null = null;
-  let updateAidMemoriesCb: ((memories: any[]) => void) | null = null;
+  let updateMemoryBankCb: ((memories: any[]) => void) | null = null;
   let refineMemoryBlockCb: ((index: number) => void) | null = null;
   let analyzeCb: (() => void) | null = null;
   let themeChangeCb: ((theme: string) => void) | null = null;
@@ -4215,7 +4215,7 @@ export function mountPanel(): PanelHandle {
     }
     const memListEl = root.getElementById("aid-memories-list");
     if (memListEl) {
-      if (!state.aidMemories || state.aidMemories.length === 0) {
+      if (!state.memoryBankEntries || state.memoryBankEntries.length === 0) {
         setSafeHTML(memListEl, `<div class="note" style="padding:12px;text-align:center;">No AID-generated memories captured yet.</div>`);
       } else {
         const actionMap = new Map<string, string>();
@@ -4226,7 +4226,7 @@ export function mountPanel(): PanelHandle {
         }
 
         const isInitialLoad = knownMemories.size === 0;
-        const itemsWithIndex = state.aidMemories.map((m, index) => ({ m, index }));
+        const itemsWithIndex = state.memoryBankEntries.map((m, index) => ({ m, index }));
         const reversedItems = [...itemsWithIndex].reverse();
         setSafeHTML(memListEl, reversedItems.map(({ m, index }) => {
           const text = typeof m === "string" ? m : (m?.text || "");
@@ -4294,7 +4294,7 @@ export function mountPanel(): PanelHandle {
     }
 
     // Handle unread badge
-    const memoriesCount = state.aidMemories?.length ?? 0;
+    const memoriesCount = state.memoryBankEntries?.length ?? 0;
     if (lastViewedMemoriesCount === -1) {
       lastViewedMemoriesCount = memoriesCount;
     }
@@ -4353,7 +4353,7 @@ export function mountPanel(): PanelHandle {
     if (cleanSettings.manualMode === false) delete cleanSettings.manualMode;
     if (cleanSettings.showDebug === false) delete cleanSettings.showDebug;
     if (cleanSettings.useMemories === false) delete cleanSettings.useMemories;
-    if (cleanSettings.autoRegenerateNativeMemories === false) delete cleanSettings.autoRegenerateNativeMemories;
+    if (cleanSettings.autoRegenerateMemoryBankEntry === false) delete cleanSettings.autoRegenerateMemoryBankEntry;
     if (cleanSettings.useSinglePassGeneration === false) delete cleanSettings.useSinglePassGeneration;
 
     // Public-only settings
@@ -4470,8 +4470,8 @@ export function mountPanel(): PanelHandle {
           btn.disabled = true;
           btn.textContent = "Regenerating memory...";
         }
-        if (refineMemoryBlockCb && lastState?.aidMemories && lastState.aidMemories.length > 0) {
-          refineMemoryBlockCb(lastState.aidMemories.length - 1);
+        if (refineMemoryBlockCb && lastState?.memoryBankEntries && lastState.memoryBankEntries.length > 0) {
+          refineMemoryBlockCb(lastState.memoryBankEntries.length - 1);
         }
       });
     },
@@ -4545,7 +4545,7 @@ export function mountPanel(): PanelHandle {
     onProposalDecision: (cb) => { decisionCb = cb; },
     onPushVersion: (cb) => { pushCb = cb; },
     onGenerateCard: (cb) => { genCardCb = cb; },
-    onUpdateAidMemories: (cb) => { updateAidMemoriesCb = cb; },
+    onUpdateMemoryBank: (cb) => { updateMemoryBankCb = cb; },
     onCreateConfigCard: (cb) => { createConfigCb = cb; },
     onCreateStoryCard: (cb) => { createStoryCardCb = cb; },
     onSaveCardKeys: (cb) => { saveCardKeysCb = cb; },
@@ -4582,7 +4582,7 @@ export function mountPanel(): PanelHandle {
     },
     updateMemories: (memories) => {
       if (!lastState) return; // nothing mounted yet — the first full render will include them
-      lastState.aidMemories = memories ?? [];
+      lastState.memoryBankEntries = memories ?? [];
       renderMemoriesSection(lastState);
     },
     updateMemoraidTiming: (stats) => {
@@ -4794,7 +4794,7 @@ export function mountPanel(): PanelHandle {
       }
       const autoRegenMemsEl = root.getElementById("auto-regen-memories") as HTMLInputElement;
       if (autoRegenMemsEl && state.settings && (shouldForceUpdate || root.activeElement !== autoRegenMemsEl)) {
-        autoRegenMemsEl.checked = !!state.settings.autoRegenerateNativeMemories;
+        autoRegenMemsEl.checked = !!state.settings.autoRegenerateMemoryBankEntry;
       }
       if (state.settings) {
         const s1 = root.getElementById("prompt-s1") as HTMLTextAreaElement;

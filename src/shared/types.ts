@@ -79,7 +79,7 @@ export interface Settings {
   memoraidLookback?: number;              // MemorAID thought generation lookback window
   memoraidThoughtLookback?: number;       // MemorAID rolling thought window: N complete prior thoughts kept in the card entry & fed as context (default = 1, single newest thought)
   memoraidPresenceLookback?: number;      // MemorAID presence tracking lookback window
-  autoRegenerateNativeMemories?: boolean; // Automatically regenerate last native AID Memory when adventure memories update
+  autoRegenerateMemoryBankEntry?: boolean; // Automatically regenerate last native AID Memory when adventure memories update
   interceptTimeout?: number;              // Action interception release timeout in seconds
   useSinglePassGeneration?: boolean;      // Use single-pass instead of 4-pass character card generation
   locationMode?: "optionA" | "optionB";

@@ -10,7 +10,7 @@ export interface AdventureMeta {
   authorsNote?: string;
   instructions?: string;
   lastAnalysisAction?: number;
-  aidMemories?: any[];
+  memoryBankEntries?: any[];
   lastAutoUpdatedCard?: string;
   activeLocationId?: string;
   locationSuggestions?: { properNoun: string; actionId: string; actionText: string; timestamp: string; status: "pending" | "approved" | "rejected"; askingCharacter?: boolean }[];

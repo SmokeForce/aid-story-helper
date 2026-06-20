@@ -20114,7 +20114,13 @@ HARD RULES (weaker models break these \u2014 do not):
     }
     async getAdventure(shortId) {
       const db = await openAidDb();
-      return db.get("adventures", shortId);
+      const rec = await db.get("adventures", shortId);
+      if (rec && rec.aidMemories !== void 0 && rec.memoryBankEntries === void 0) {
+        rec.memoryBankEntries = rec.aidMemories;
+        delete rec.aidMemories;
+        await db.put("adventures", rec);
+      }
+      return rec;
     }
     async hideAdventure(shortId) {
       const db = await openAidDb();
@@ -20267,6 +20273,12 @@ HARD RULES (weaker models break these \u2014 do not):
         settings.enableProperNounDetection = s3.enableLocationDetection;
         delete settings.enableLocationDetection;
         console.log("[AID repo] Migrating enableLocationDetection ->", settings.enableProperNounDetection, "(enableProperNounDetection).");
+        await this.setSettings(settings);
+      }
+      if (settings.autoRegenerateMemoryBankEntry === void 0 && s3.autoRegenerateNativeMemories !== void 0) {
+        settings.autoRegenerateMemoryBankEntry = s3.autoRegenerateNativeMemories;
+        delete settings.autoRegenerateNativeMemories;
+        console.log("[AID repo] Migrating autoRegenerateNativeMemories ->", settings.autoRegenerateMemoryBankEntry, "(autoRegenerateMemoryBankEntry).");
         await this.setSettings(settings);
       }
       if (settings.cardCommands?.memoraid) {
@@ -20482,7 +20494,7 @@ Notable Items: specific permanent contents. You must preserve the literal names 
           actionCount: adv.actionCount,
           storyCards: Array.isArray(adv.storyCards) ? adv.storyCards : void 0,
           memory: typeof adv.memory === "string" ? adv.memory : void 0,
-          aidMemories: Array.isArray(adv.state?.memories) ? adv.state.memories.map((m3) => typeof m3 === "string" ? { actionIds: [], text: m3 } : m3) : Array.isArray(adv.gameState?.memories) ? adv.gameState.memories.map((m3) => typeof m3 === "string" ? { actionIds: [], text: m3 } : m3) : void 0,
+          memoryBankEntries: Array.isArray(adv.state?.memories) ? adv.state.memories.map((m3) => typeof m3 === "string" ? { actionIds: [], text: m3 } : m3) : Array.isArray(adv.gameState?.memories) ? adv.gameState.memories.map((m3) => typeof m3 === "string" ? { actionIds: [], text: m3 } : m3) : void 0,
           instructions,
           authorsNote
         };
@@ -22510,7 +22522,7 @@ ${e2.text}` : e2.text;
       const advData = items[0]?.data?.adventure;
       if (advData) {
         const rawMems = advData.state?.memories;
-        const oldMemories = (await repo.getAdventure(shortId))?.aidMemories || [];
+        const oldMemories = (await repo.getAdventure(shortId))?.memoryBankEntries || [];
         const parsedMems = Array.isArray(rawMems) ? rawMems.map((m3) => {
           const text = typeof m3 === "string" ? m3 : m3?.text || "";
           const old = oldMemories.find((o2) => o2.text === text);
@@ -22520,7 +22532,7 @@ ${e2.text}` : e2.text;
         await repo.upsertAdventure({
           shortId,
           title: advData.title || void 0,
-          aidMemories: parsedMems
+          memoryBankEntries: parsedMems
         });
         dlog("[AID bg] Backfilled memories successfully using custom query.");
       }
@@ -22538,16 +22550,16 @@ ${e2.text}` : e2.text;
       if (parsed.memory) advUpdate.memory = parsed.memory;
       if (parsed.instructions) advUpdate.instructions = parsed.instructions;
       if (parsed.authorsNote) advUpdate.authorsNote = parsed.authorsNote;
-      if (parsed.aidMemories) {
-        const oldMemories = (await repo.getAdventure(shortId))?.aidMemories || [];
-        advUpdate.aidMemories = parsed.aidMemories.map((m3) => {
+      if (parsed.memoryBankEntries) {
+        const oldMemories = (await repo.getAdventure(shortId))?.memoryBankEntries || [];
+        advUpdate.memoryBankEntries = parsed.memoryBankEntries.map((m3) => {
           const text = typeof m3 === "string" ? m3 : m3?.text || "";
           const old = oldMemories.find((o2) => o2.text === text);
           if (old) return old;
           return typeof m3 === "string" ? { actionIds: [], text: m3 } : m3;
         });
       }
-      if (advUpdate.title || advUpdate.memory || advUpdate.aidMemories || advUpdate.instructions || advUpdate.authorsNote) {
+      if (advUpdate.title || advUpdate.memory || advUpdate.memoryBankEntries || advUpdate.instructions || advUpdate.authorsNote) {
         await repo.upsertAdventure(advUpdate);
       }
       if (Array.isArray(parsed.storyCards)) {
@@ -23870,7 +23882,7 @@ ${inner}
     gameplayTurnCheckTimers.set(shortId, timer);
   }
   var NATIVE_MEMORY_CHAR_CAP = 1500;
-  function capNativeMemory(text) {
+  function capMemoryBankEntry(text) {
     if (!text || text.length <= NATIVE_MEMORY_CHAR_CAP) return text;
     let t3 = text.slice(0, NATIVE_MEMORY_CHAR_CAP);
     const brk = Math.max(t3.lastIndexOf(". "), t3.lastIndexOf("; "), t3.lastIndexOf(", "));
@@ -23886,7 +23898,7 @@ ${inner}
     if (!adv) {
       return { ok: false, error: "Adventure metadata not found in database." };
     }
-    const memories = adv.aidMemories || [];
+    const memories = adv.memoryBankEntries || [];
     if (memories.length === 0) {
       return { ok: false, error: "No native memories found to refine." };
     }
@@ -23943,7 +23955,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
     }
     if (cleaned.length > NATIVE_MEMORY_CHAR_CAP) {
       console.warn(`[AID bg] Generated native memory summary was ${cleaned.length} chars (model overran the ~100-token limit); truncating to ${NATIVE_MEMORY_CHAR_CAP} to satisfy AID's 4,000-char EditMemory cap.`);
-      cleaned = capNativeMemory(cleaned);
+      cleaned = capMemoryBankEntry(cleaned);
     }
     const updatedMemories = [...memories];
     const oldMemory = updatedMemories[index3];
@@ -23955,7 +23967,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
       actionIds: newActionIds,
       lastRelevantActionId: lastActId
     };
-    await repo.upsertAdventure({ shortId, aidMemories: updatedMemories });
+    await repo.upsertAdventure({ shortId, memoryBankEntries: updatedMemories });
     const editOp = await repo.getOp("EditMemory");
     const editQuery = editOp?.query || DEFAULT_GQL_QUERIES.EditMemory;
     const actionId = oldMemory.actionIds && oldMemory.actionIds.length > 0 ? oldMemory.actionIds[oldMemory.actionIds.length - 1] : oldMemory.lastRelevantActionId;
@@ -23977,7 +23989,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
   async function regenerateLatestMemory(shortId) {
     const adv = await repo.getAdventure(shortId);
     if (!adv) return { ok: false, error: "Adventure metadata not found." };
-    const memories = adv.aidMemories || [];
+    const memories = adv.memoryBankEntries || [];
     if (memories.length === 0) {
       return { ok: false, error: "No native memories found to refine." };
     }
@@ -24449,9 +24461,9 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
             return { error: err?.message || String(err) };
           }
         }
-        case "adventureMemories": {
+        case "memoryBankUpdate": {
           const adv = await repo.getAdventure(msg.shortId);
-          const oldMemories = adv?.aidMemories || [];
+          const oldMemories = adv?.memoryBankEntries || [];
           const normalized = (msg.memories || []).map((m3) => {
             const text = typeof m3 === "string" ? m3 : m3?.text || "";
             const old = oldMemories.find((o2) => o2.text === text);
@@ -24460,10 +24472,10 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
             }
             return typeof m3 === "string" ? { actionIds: [], text: m3 } : m3;
           });
-          const update = { shortId: msg.shortId, aidMemories: normalized };
+          const update = { shortId: msg.shortId, memoryBankEntries: normalized };
           await repo.upsertAdventure(update);
           const settings = await repo.getSettings();
-          if (settings?.autoRegenerateNativeMemories) {
+          if (settings?.autoRegenerateMemoryBankEntry) {
             let shouldTrigger = false;
             if (normalized.length > oldMemories.length) {
               const isInitialLoad = oldMemories.length === 0;
@@ -24487,12 +24499,12 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
           }
           return;
         }
-        case "updateAidMemories": {
+        case "updateMemoryBank": {
           await ensureAuth();
           const normalized = msg.memories.map((m3) => typeof m3 === "string" ? { actionIds: [], text: m3 } : m3);
           const adv = await repo.getAdventure(msg.shortId);
-          const oldMemories = adv?.aidMemories || [];
-          await repo.upsertAdventure({ shortId: msg.shortId, aidMemories: normalized });
+          const oldMemories = adv?.memoryBankEntries || [];
+          await repo.upsertAdventure({ shortId: msg.shortId, memoryBankEntries: normalized });
           let editedMemory = null;
           for (let i3 = 0; i3 < normalized.length; i3++) {
             const newMem = normalized[i3];
@@ -24513,7 +24525,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
               const query = op?.query || DEFAULT_GQL_QUERIES.EditMemory;
               try {
                 dlog("[AID bg] Replaying EditMemory mutation to AI Dungeon...");
-                const req = buildEditMemory(gqlEndpoint, query, sessionToken, msg.shortId, actionId, capNativeMemory(editedMemory.text));
+                const req = buildEditMemory(gqlEndpoint, query, sessionToken, msg.shortId, actionId, capMemoryBankEntry(editedMemory.text));
                 const res = await fetch2(req.url, { method: "POST", headers: req.headers, body: req.body });
                 const json = await res.json();
                 dlog("[AID bg] EditMemory response status:", res.status, JSON.stringify(json));
@@ -25019,7 +25031,7 @@ ${toAppend}` : toAppend;
             }
           }
           const refIds = /* @__PURE__ */ new Set();
-          for (const m3 of adv?.aidMemories ?? []) {
+          for (const m3 of adv?.memoryBankEntries ?? []) {
             if (m3 && typeof m3 === "object") {
               for (const id of m3.actionIds ?? []) refIds.add(String(id));
               if (m3.lastRelevantActionId) refIds.add(String(m3.lastRelevantActionId));
@@ -25060,7 +25072,7 @@ ${toAppend}` : toAppend;
               memoraidLookback: settings.memoraidLookback,
               memoraidThoughtLookback: settings.memoraidThoughtLookback ?? 1,
               memoraidPresenceLookback: settings.memoraidPresenceLookback,
-              autoRegenerateNativeMemories: !!settings.autoRegenerateNativeMemories,
+              autoRegenerateMemoryBankEntry: !!settings.autoRegenerateMemoryBankEntry,
               interceptTimeout: settings.interceptTimeout ?? 10,
               locationMode: settings.locationMode || "optionA",
               enableProperNounDetection: settings.enableProperNounDetection !== false,
@@ -25077,7 +25089,7 @@ ${toAppend}` : toAppend;
             actionCount: actionsCount,
             actions: referencedActions.map((a2) => ({ id: a2.id, text: a2.text, type: a2.type })),
             lastAnalysisAction: adv?.lastAnalysisAction ?? null,
-            aidMemories: adv?.aidMemories ?? null,
+            memoryBankEntries: adv?.memoryBankEntries ?? null,
             lastAutoUpdatedCard: adv?.lastAutoUpdatedCard ?? null,
             ops: ops.map((o2) => ({ operationName: o2.operationName, query: o2.query, kind: o2.kind })),
             activeLocationId: adv?.activeLocationId ?? null,

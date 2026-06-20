@@ -62,7 +62,7 @@ All data is stored locally in IndexedDB under the database name `"aid-tracker"` 
   - `protagonistName` (string, optional)
   - `memory` (string, raw Plot Essentials block, optional)
   - `lastAnalysisAction` (number, optional)
-  - `aidMemories` (array of memory objects, optional)
+  - `memoryBankEntries` (array of memory objects, optional)
     - Shape: `{ actionIds: string[], text: string, lastRelevantActionId?: string, isUsed?: boolean, active?: boolean }[]`
   - `lastAutoUpdatedCard` (string, optional)
   - `authorsNote` (string, optional, cached Author's Note text)
@@ -139,11 +139,15 @@ All data is stored locally in IndexedDB under the database name `"aid-tracker"` 
   - `memoraidThoughtLookback` (number, default `0`, rolling thought window: N complete PRIOR thoughts kept in the card entry and fed as context; `0` = single fresh thought only — see §A)
   - `memoraidPresenceLookback` (number, default `5`)
   - `interceptTimeout` (number, default `4`)
-  - `autoRegenerateNativeMemories` (boolean, optional — auto-regen the latest Memory Bank block, see §H)
+  - `autoRegenerateMemoryBankEntry` (boolean, optional — auto-regen the latest Memory Bank block, see §H)
   - `useSinglePassGeneration` (boolean, optional — 1-pass vs 4-pass character generation, see §E)
   - `locationMode` (`"optionA" | "optionB"`, default `"optionA"`, Active Location Manager mode, see §K)
   - `enableProperNounDetection` (boolean, opt-out/ON by default, see §K)
   - `manualMode` (boolean, optional — when set, suppresses automatic background auto-update triggers)
+  - `logPlotEssentials` (boolean, optional — log ONLY the last Update Plot Essentials raw AI request/response to the Console; independent of `showDebug` verbose logging)
+  - `characterCardLimit` (number, default `600` — hard character cap for generated Character/Story Card entries)
+  - `thoughtCardLimit` (number, default `2000` — character cap for MemorAID Thought Card entries; the rolling-window `maxChars`/`ENTRY_CAP`)
+  - `memoraidBannerDismissed` (boolean, optional — user dismissed the "Enable MemorAID" config-card banner)
 
 ### 7. `globalAssets`
 - **Key Path**: `id` (string)
@@ -181,8 +185,8 @@ The communication contract between content scripts (panel UI) and the background
 | `applyToAid` | `id` | Pushes approved pending version changes to AI Dungeon servers via GQL. |
 | `getState` | `shortId` | Retrieves current state (actions, cards, versions, settings) for panel display. |
 | `listModels` | *(none)* | Queries available models for the selected provider. |
-| `adventureMemories` | `shortId`, `memories: any[]` | Puts the full list of raw AID-generated memories into the database. |
-| `updateAidMemories`| `shortId`, `memories: any[]` | Triggered when a user edits/deletes a native AID memory in the panel. |
+| `memoryBankUpdate` | `shortId`, `memories: any[]` | Puts the full list of raw Memory Bank entries into the database. |
+| `updateMemoryBank`| `shortId`, `memories: any[]` | Triggered when a user edits/deletes a Memory Bank entry in the panel. |
 | `createConfigCard` | `shortId` | Creates a new companion memory card configuration card on AID. |
 | `createStoryCard` | `shortId`, `card: { type, title, keys, value, description? }` | Creates a new story card whole-cloth and pushes it to AID via GQL mutation. |
 | `saveCardKeys` | `shortId`, `cardId`, `keys` | Saves updated trigger keys for a story card and replays the GQL mutation to update AID. |
@@ -205,7 +209,7 @@ The communication contract between content scripts (panel UI) and the background
 - **Auth Token & Endpoint Storage**: The GQL `sessionToken` (AID Authorization header) and `gqlEndpoint` are held in memory in the background worker and mirrored ONLY to `browser.storage.session` — an in-memory, session-scoped store that is **never written to persistent disk**. `rememberAuth()` writes there alone (no `storage.local`).
 - **Why session-only is sufficient**: `storage.session` already survives MV3 worker recycling *within* a browser session — the actual problem `ensureAuth` solves. It is cleared on browser close, but every background op that needs auth (auto-update, MemorAID, memory regen) is downstream of page activity, and the fetch/XHR interceptor re-captures a fresh token from the first authenticated page request each session. So disk persistence bought almost nothing while exposing the bearer token at rest — it was removed.
 - **Disk scrub**: at module load the worker calls `browser.storage.local.remove(["aidToken", "aidEndpoint"])` once, to clean up any token a prior build had mirrored to disk. (The `storage` permission in `manifest.json` backs `storage.session` and this scrub.)
-- **Rehydration**: `ensureAuth()` (in `src/background/background.ts`) is idempotent — returns early if both are in memory, else fills them from `storage.session`. It is `await`ed at the top of every handler that performs a GQL write (`checkMemorAIDUpdates`, `regenerateMemoryBlock`, `updateAidMemories`, `saveCardValue`, …) so a recycled worker never proceeds tokenless.
+- **Rehydration**: `ensureAuth()` (in `src/background/background.ts`) is idempotent — returns early if both are in memory, else fills them from `storage.session`. It is `await`ed at the top of every handler that performs a GQL write (`checkMemorAIDUpdates`, `regenerateMemoryBlock`, `updateMemoryBank`, `saveCardValue`, …) so a recycled worker never proceeds tokenless.
 
 ---
 
@@ -219,7 +223,7 @@ Several helper modules handle the parsing of complex blocks:
 - **`replaceBlock(memory, name, newEntry)`**: Finds the bracketed/braced block corresponding to `name` (case-insensitive) or `"memories"` and replaces it with `newEntry`, preserving the original wrapping format (`[...]` or `{...}`).
 
 ### 2. Gameplay Fetch Parser (`src/sync/gameplay-fetch.ts`)
-- **`parseGameplayResponse(json)`**: Extracts the list of actions (`RawAction[]`), adventure title, total action count, story cards, and the list of native AID memories (`gameState.memories` or `state.memories`) from the `GetGameplayAdventure` API response.
+- **`parseGameplayResponse(json)`**: Extracts the list of actions (`RawAction[]`), adventure title, total action count, story cards, and the Memory Bank entries (`gameState.memories` or `state.memories`) from the `GetGameplayAdventure` API response.
 
 ### 1.5 CORS Bypass & GraphQL Fetch Relaying
 To ensure bulletproof reliability in strict browser contexts (such as Firefox Manifest V3 where required host permissions are not automatically granted upon installation and must be explicitly enabled by the user), the background script implements a module-scoped `fetchWithRelay` proxy:
@@ -256,7 +260,7 @@ To reduce local database overhead, lower IPC latency, and comply with server com
 7a. **Trigger-Keys Stale-Autosave Protection (`approvedCardKeys`)**: A card's `keys` (triggers) live in their own field, NOT covered by the `approvedCards` value/description registry. When the extension changes keys (link-a-noun-to-card, panel "save triggers") while AID's card editor is OPEN, the editor keeps showing the pre-update keys and its autosave reverts the server (and the next gameplay-fetch then wipes the local DB change too — symptom: linked trigger appears in the panel, never in AID, gone after refresh). Fix mirrors the PE stale-autosave protection but for keys: `saveCardKeys`/`linkProperNounToCard` broadcast `keys` + `prevKeys`; `handleSuccessfulPush` forwards them; the injected script stores `approvedCardKeys[cardId] = { keys, prev }` and, on every page card-write, runs `applyApprovedKeys` INDEPENDENTLY of the value/description `isEditingInGui` branch — a write whose key-set equals `prev` (order/case-insensitive via `keySig`) is a stale autosave and is rewritten to `keys`; any other key-set is a genuine user edit and is adopted as the new truth. `applyResponseOverrides` and an Apollo `cache.modify({ keys })` keep refetched/reopened editors consistent. Do NOT gate keys protection on the `isEditingInGui` heuristic — an open editor focused on the entry field reads as "editing", which would wrongly adopt its stale keys.
 8. **Surgical DOM Updates & Redraw Elimination**: To prevent UI flicker and cursor/focus loss during normal gameplay turns, turn-based redraws are surgical rather than full re-renders:
    - **`updateActionCount(count, lastAnalysisAction)`** surgically modifies the turn count display in the header.
-   - **`updateMemories(aidMemories)`** surgically updates the Memory Bank list elements (`#aid-memories-list`) and the unread badge (`#unread-memories-badge`) when a WebSocket `AdventureMemoriesUpdate` event is received.
+   - **`updateMemories(memoryBankEntries)`** surgically updates the Memory Bank list elements (`#aid-memories-list`) and the unread badge (`#unread-memories-badge`) when a WebSocket `AdventureMemoriesUpdate` event is received.
    - Retriggering `refresh()` is blocked on the turn-level `interceptedAction` event, as no data has actually updated on the server at the moment of input submission. The full `refresh()` (re-rendering the entire Shadow DOM) is only invoked on manual updates (manual generation/analysis, manual edits, settings saves, config card creation) and when a background proposal actually gets generated (`proposalCreated` message).
 
 ---
@@ -338,7 +342,7 @@ C:\Users\x509x\Documents\Claude\
   - Action: [Impulse/Plan]
   ```
 - **Description Archive**: Updates the memory card `value` with the new thought, and prepends historical thought logs into the card's `description`.
-- **Rolling Thought Window (`memoraidThoughtLookback`, `src/inference/memoraid-notes.ts`)**: When `memoraidThoughtLookback > 0`, the memory card's `value` holds the last **N complete thoughts** as a rolling window instead of a single fresh thought. `renderThoughtWindow(log, n, name, maxChars)` renders them NEWEST→OLDEST under a `"<name>'s Thoughts (newest to oldest):"` header for the card entry (capped at the 600-char `ENTRY_CAP`), and `buildThoughtContext(log, n, name, maxChars)` renders the same N thoughts OLDEST→NEWEST (≤3000 chars) prepended to the character profile as generation context, so each new thought is written with continuity from the prior ones. Both reuse `renderThoughtBlock`, which keeps only whole thoughts that fit the budget (oldest dropped first, never split) and wraps each in `{…}` so discrete thoughts stay unambiguous. `memoraidThoughtLookback = 0` (default) preserves the original single-thought behavior. Configurable under Settings → General ("MemorAID Thought Lookback (previous thoughts)").
+- **Rolling Thought Window (`memoraidThoughtLookback`, `src/inference/memoraid-notes.ts`)**: When `memoraidThoughtLookback > 0`, the memory card's `value` holds the last **N complete thoughts** as a rolling window instead of a single fresh thought. `renderThoughtWindow(log, n, name, maxChars)` renders them NEWEST→OLDEST under a `"<name>'s Thoughts (newest to oldest):"` header for the card entry (capped at `settings.thoughtCardLimit`, default 2000 — the `ENTRY_CAP`), and `buildThoughtContext(log, n, name, maxChars)` renders the same N thoughts OLDEST→NEWEST (≤3000 chars) prepended to the character profile as generation context, so each new thought is written with continuity from the prior ones. Both reuse `renderThoughtBlock`, which keeps only whole thoughts that fit the budget (oldest dropped first, never split) and wraps each in `{…}` so discrete thoughts stay unambiguous. `memoraidThoughtLookback = 0` (default) preserves the original single-thought behavior. Configurable under Settings → General ("MemorAID Thought Lookback (previous thoughts)").
 - **GUI-Edit Field Detection (`pickActiveField`, `src/interceptor/gui-edit.ts`)**: The "is the user editing this card in AID's GUI?" guard (which decides whether a page card-write is a genuine user edit vs a stale autosave to be rewritten) picks the active edit field via `pickActiveField(activeEl, lastActiveEl, lastActiveTime, now, recentMs=15000)`. Because `document.activeElement` is never null (it becomes the clicked "Finish"/"Update" button by the time autosave fires), the helper prefers the currently-focused textarea/input but falls back to the most-recently-focused field (tracked on input/change/focusin) when focus has moved off a text field within the last 15 s — without this fallback, clicking Save left focus on the button, the edit was misclassified as a stale autosave, and the genuine edit was overwritten with the seeded approved value.
 - **Config Card Type (`Configure MemorAID`)**: The MemorAID settings card is created with its own dedicated card type `"MemorAID"` (constant `MEMORAID_CONFIG_TYPE`) so it files under its own category in AID and the panel instead of the generic `custom` group. Legacy cards created as `custom` are lazily migrated on adventure load (`getState`) by `migrateConfigCardType()`: it pushes the type change back to AID via `UseAutoSaveStoryCard` and updates the local copy only on success — best-effort and idempotent (a not-ready/failed push is retried on the next load; `getState` is never blocked).
 - **Real-Time UI DOM Synchronization**: To eliminate lag in the card editor UI when new thoughts or descriptions (Notes) are generated or approved, `injected.ts` features `updateOpenEditorDom`. This helper queries the DOM for open textareas (filtering out the main game input), sets their value directly, and dispatches a React-compatible input event to update React component states immediately.
@@ -370,15 +374,15 @@ C:\Users\x509x\Documents\Claude\
 - **Semantic Pacing Gates**: To resolve relationship acceleration issues (e.g., leaping to unearned codependency or sudden implacable hatred), a bidirectional `[CRITICAL RELATIONSHIP PACING DIRECTIVE]` is injected into Pass 4 of Multi-Pass, the Single-Pass template, default card command templates, and the background update engine (`DEFAULT_PROMPT_SECTION_2`). This directive forces the model to respect psychological inertia, evaluating pre-existing profiles to ensure relationships shift logically and incrementally in both positive and negative directions rather than making extreme sudden swings.
 - **Context Injection**: Automatically finds companion memory cards and prepends their current thoughts to `storyInformation` to keep descriptions in sync with the story.
 
-### F. Native Memory Bank Handling
+### F. Memory Bank Handling
 
 > [!WARNING]
 > **CRITICAL ARCHITECTURAL DISTINCTION**:
 > 1. **Plot Essentials Memories**: A text block formatted as `[Memories (newest to oldest):\n...]` kept inside the adventure's global `memory` (Plot Essentials) text. Updated via the `UpdateAdventurePlot` GQL mutation.
-> 2. **Native Memory Bank**: Discrete, individual memory records generated by AI Dungeon's timeline engine and stored in `AdventureMeta.aidMemories`. Edited/saved individually via the `EditMemory` GQL mutation.
+> 2. **Memory Bank**: Discrete, individual memory records generated by AI Dungeon's timeline engine and stored in `AdventureMeta.memoryBankEntries`. Edited/saved individually via the `EditMemory` GQL mutation.
 > These two memory architectures (Plot Essentials Memories vs Memory Bank) are **completely separate** in terms of database storage, message routing, UI panels, and GQL endpoints.
 
-- **Editing Native Memories**: In the panel UI's "Memory Bank" tab, when a user clicks Edit and saves a new value, the panel fires `updateAidMemories` message to the background.
+- **Editing Memory Bank Entries**: In the panel UI's "Memory Bank" tab, when a user clicks Edit and saves a new value, the panel fires `updateMemoryBank` message to the background.
 - **Diffing & Target Identification**: The background compares the updated array with the `oldMemories` array to identify the memory block modified. It extracts the block's `lastRelevantActionId` (or the first entry in its `actionIds`) to target it.
 - **GraphQL Push**: Replays the `EditMemory` GQL mutation passing the `shortId` (as `adventureId`), the identified `actionId`, and the modified `text`.
 
@@ -389,11 +393,11 @@ C:\Users\x509x\Documents\Claude\
   - It uses *exactly* the constant array of `actionIds` stored in the memory block (for both latest and older blocks) to prevent context bleeding from newer actions.
   - If `actionIds` is empty (e.g., for legacy/plain-string memories), it falls back to using un-summarized actions for the latest memory block.
 - **Generation**: Summarizes the target actions using the configured 3rd-party provider (`provider.complete()`). The prompt instructs the LLM to write a concise, single-sentence summary of the provided actions in second-person (targeting ~100 tokens, structured as a series of comma-separated clauses starting with "You").
-- **GraphQL Save**: Cleans the returned text, updates the memory block in IndexedDB, and replays the `EditMemory` GQL mutation with the memory's associated `actionId` to update it on the server. **Length cap**: AID's `EditMemory` hard-rejects text over **4,000 chars** (`"Memory entry cannot exceed 4,000 characters"`). A native memory targets ~100 tokens, but a weak local model can overrun the length instruction wildly (observed 34,012 chars), so `capNativeMemory()` (default 1,500, trimmed to a clause boundary) is applied to the generated summary before BOTH the IndexedDB write and the `EditMemory` replay — in `regenerateMemoryBlock` and the auto-regen path. Without it the runaway generation fails the server write entirely.
+- **GraphQL Save**: Cleans the returned text, updates the memory block in IndexedDB, and replays the `EditMemory` GQL mutation with the memory's associated `actionId` to update it on the server. **Length cap**: AID's `EditMemory` hard-rejects text over **4,000 chars** (`"Memory entry cannot exceed 4,000 characters"`). A Memory Bank entry targets ~100 tokens, but a weak local model can overrun the length instruction wildly (observed 34,012 chars), so `capMemoryBankEntry()` (default 1,500, trimmed to a clause boundary) is applied to the generated summary before BOTH the IndexedDB write and the `EditMemory` replay — in `regenerateMemoryBlock` and the auto-regen path. Without it the runaway generation fails the server write entirely.
 
-### H. Automatic Native Memory Regeneration
-- **Toggle**: Controlled by `"Automatically regen latest Memory Bank entry?"` checkbox in Settings → General (persisted as `settings.autoRegenerateNativeMemories`).
-- **Trigger**: Fired automatically when `adventureMemories` update messages are received via WebSocket subscription.
+### H. Automatic Memory Bank Regeneration
+- **Toggle**: Controlled by `"Automatically regen latest Memory Bank entry?"` checkbox in Settings → General (persisted as `settings.autoRegenerateMemoryBankEntry`).
+- **Trigger**: Fired automatically when `memoryBankUpdate` messages are received via WebSocket subscription.
 - **Loop-Safe Detection**:
   - The background script maps incoming server memory text to database memory objects. If the incoming text matches the existing text in our IndexedDB local cache, the existing database object is preserved along with its computed `actionIds` and `lastRelevantActionId`.
   - Auto-regeneration of the latest memory block runs only if:
@@ -402,7 +406,7 @@ C:\Users\x509x\Documents\Claude\
   - This diffing logic prevents endless regeneration loop cycles when the refined text is pushed back to the server and broadcasted again.
 
 ### I. Story Backfill & Synchronization
-- **Purpose**: Restores and synchronizes the complete history of an adventure (actions, metadata, story cards, and native memories) between the AI Dungeon servers and the local IndexedDB cache. This provides the historical foundation for AI analysis and companion card operations.
+- **Purpose**: Restores and synchronizes the complete history of an adventure (actions, metadata, story cards, and Memory Bank entries) between the AI Dungeon servers and the local IndexedDB cache. This provides the historical foundation for AI analysis and companion card operations.
 - **Trigger**: Activated manually by the user clicking the "Backfill" button on the extension panel, or triggered automatically on page load (`adventureLoaded`) when an adventure is opened that does not exist in the local IndexedDB database.
 - **Core Workflow**:
   1. **Operation Recovery**: Reads the learned `GetGameplayAdventure` GraphQL read operation from the `operations` store. If the extension has not observed this operation yet, the user must open/interact with the adventure once to let `injected.ts` capture and cache the query format.
@@ -469,7 +473,7 @@ C:\Users\x509x\Documents\Claude\
   - **Author's Notes / Plot Essentials (`an` / `pe`)**: Appends the text (wrapping PE character descriptions in name-is syntax) and calls `UpdateAdventurePlot`.
 
 > [!NOTE]
-> **Intentionally NOT implemented — do not "restore":** bulk refiners for Story Cards (the old "⟳ Update Cards" bulk update) and for native Memory Bank (the old "⚡ Regenerate All (Oldest ➔ Newest)"). Their backends were deliberately removed; the dead panel buttons/plumbing were cleaned up on 2026-06-11. Single-target operations (per-card ⚡ Generate, per-memory regenerate, "⚡ Regenerate Latest") remain supported.
+> **Intentionally NOT implemented — do not "restore":** bulk refiners for Story Cards (the old "⟳ Update Cards" bulk update) and for the Memory Bank (the old "⚡ Regenerate All (Oldest ➔ Newest)"). Their backends were deliberately removed; the dead panel buttons/plumbing were cleaned up on 2026-06-11. Single-target operations (per-card ⚡ Generate, per-memory regenerate, "⚡ Regenerate Latest") remain supported.
 
 ---
 
@@ -479,6 +483,16 @@ C:\Users\x509x\Documents\Claude\
 - **Restore (`repo.importAll` ← `importAll` msg)**: Validates the `__aidBackup` envelope, then `put`s every row into its store. It **upserts by key — it merges into, never wipes, existing data** (a malformed row is skipped, not fatal). The `settings` singleton is merged so **API keys already on the device are never clobbered** (device keys win; a legacy backup's keys are used only if the device has none). Returns per-store `counts`.
 - **Self-Heal Banner (state-driven)**: An "empty database detected — restore a backup?" banner with Restore + Dismiss buttons. Its visibility is computed every `render()` from `isLocalDbEmpty(state)` (`shared/types.ts`) — shown ONLY when the DB is genuinely empty (no adventures, no current actions, no cards) and not dismissed this session. This deliberately replaced an earlier one-shot `isDbEmpty` probe fired on content-script load, which raced auto-backfill and stuck the banner on populated adventures (it showed even with 203 actions, because the surgical `updateActionCount` never touched it). Driving it from the authoritative `getState` snapshot means it self-hides the moment backfill repopulates the adventure. Dismiss sets a session-scoped flag (`selfHealDismissed`) so a later empty render won't resurface it. The same Backup/Restore controls also live permanently in Settings → General. (The `isDbEmpty` repo method / message remain as a utility but no longer gate the banner.)
 - **Direct Card-Entry Editing (`saveCardValue`)**: The panel can edit a Story Card's `value` (entry text) in place; `onSaveCardValue(cardId, value)` → `saveCardValue` msg → background replays `UseAutoSaveStoryCard` and broadcasts `approvedCardSync` so an open AID card editor stays in sync.
+
+### N. Mobile Settings Sync (QR Code)
+- **Purpose**: Move your configured settings (provider/model choice, prompts, card commands, windows, limits, etc.) from a desktop session to a phone without re-typing — useful because the extension runs the same on mobile browsers but typing long prompt templates there is painful. **API keys are never included.**
+- **Generate (desktop, `panel.ts`)**: Settings → **"Mobile Settings Sync (QR Code)" → "Generate Sync QR Code"** calls `compressSettings(settings)`, which (1) strips `apiKeys`/`keyStatus`, (2) drops every field equal to its default and every `cardCommand`/prompt section equal to the built-in default (to shrink the payload — QR capacity is limited), then (3) gzip-compresses via the `CompressionStream` API and base64-encodes as `gz:<base64>` (fallback `raw:<base64>` when `CompressionStream` is unavailable). `showQrModal` renders the QR (via the `qr-creator` dependency) encoding the URL `<origin>/?importSettings=<payload>`. If the payload is too large to encode, the modal advises resetting some templates to default.
+- **Import (mobile, `content.ts`)**: `checkAndImportQrSettings()` runs on every content-script load; if `?importSettings=` is present it `decompressSettings()` (handles `gz:`, `raw:`, and bare/legacy base64 or JSON — sniffing the gzip `1f 8b` magic), defensively deletes `apiKeys`/`keyStatus`, persists via the `setSettings` message, strips the param from the URL with `history.replaceState`, and refreshes. The QR target is the AID origin root, which the content script already matches.
+
+### O. Mobile / Responsive UI & Panel-State Persistence
+- **Responsive layout (`panel.ts`)**: The Shadow-DOM panel is breakpointed at **600px**. On wider viewports it is a draggable, resizable floating box; at `≤600px` it **docks** to fixed insets (full-width, `top:60px`/`bottom:80px`) and its minimized state renders as a **circle icon** instead of the desktop pill. Dragging the expanded box is disabled on mobile (it's docked).
+- **Touch support**: Drag/move/minimize handlers bind both mouse and touch events (`touchstart`/`touchmove`/`touchend`); `touchstart` is intentionally NOT `preventDefault`-ed so emulated click events still fire, and a higher (15px) movement threshold distinguishes a tap from a drag. Active drags `preventDefault` on `touchmove` to stop the page scrolling underneath.
+- **Panel-state persistence (`localStorage`, page-origin)**: The panel position (`aid-tracker-pos-left/-top`), size (`aid-tracker-size-width/-height`), and minimized state (`aid-tracker-minimized`) are saved to `localStorage` on drag/resize/minimize and restored on load (desktop only — mobile is always docked). Because this is page-origin `localStorage` (not extension storage), it is independent of the IndexedDB/`storage.*` layers and survives an extension UUID swap.
 
 ---
 
@@ -501,7 +515,7 @@ The extension captures and replays the following key AI Dungeon mutations:
 - **Operation Name**: `EditMemory`
 - **Variables**:
   - `input: { adventureId, actionId, text }`
-- **Purpose**: Commits text edits to a specific native AID memory block associated with `actionId`.
+- **Purpose**: Commits text edits to a specific Memory Bank entry associated with `actionId`.
 
 ### 4. `UpdateAdventurePlot` (Save PE Memory / Author's Note)
 - **Operation Name**: `UpdateAdventurePlot`

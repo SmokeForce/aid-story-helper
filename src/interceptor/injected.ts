@@ -1590,7 +1590,7 @@ import { pickActiveField } from "./gui-edit";
             } else if (resolved.data) {
               // Fallback: check the payload structure
               const data = resolved.data as any;
-              const adv = data?.adventureMetadataUpdate || data?.adventureStoryCardsUpdate || data?.adventureMemoriesUpdate || data?.memory || data?.actionUpdates;
+              const adv = data?.adventureMetadataUpdate || data?.adventureStoryCardsUpdate || data?.memoryBankUpdateUpdate || data?.memory || data?.actionUpdates;
               const itemSid = adv?.shortId || adv?.adventure?.shortId || adv?.adventureId;
               if (itemSid && !/^\d+$/.test(String(itemSid)) && String(itemSid) !== activeSid) {
                 skipWs = true;

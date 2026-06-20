@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AID Story Helper",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Local archive + character tracking for AI Dungeon.",
   "background": { "service_worker": "background.js" },
   "permissions": ["storage", "unlimitedStorage"],

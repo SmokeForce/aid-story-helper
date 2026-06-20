@@ -79,7 +79,7 @@ describe("parseGameplayResponse", () => {
     expect(r.memory).toContain("Jessica");
   });
 
-  it("extracts aidMemories from the adventure state/gameState object", () => {
+  it("extracts memoryBankEntries from the adventure state/gameState object", () => {
     const withMems = [
       { data: { adventure: {
         title: "Saving the Queen Bee",
@@ -96,10 +96,10 @@ describe("parseGameplayResponse", () => {
       } } }
     ];
     const r = parseGameplayResponse(withMems);
-    expect(r.aidMemories).toBeDefined();
-    expect(r.aidMemories).toHaveLength(1);
-    expect(r.aidMemories![0]!.text).toBe("Preparing for the Weeping Crags...");
-    expect(r.aidMemories![0]!.lastRelevantActionId).toBe("277");
+    expect(r.memoryBankEntries).toBeDefined();
+    expect(r.memoryBankEntries).toHaveLength(1);
+    expect(r.memoryBankEntries![0]!.text).toBe("Preparing for the Weeping Crags...");
+    expect(r.memoryBankEntries![0]!.lastRelevantActionId).toBe("277");
   });
 
   it("extracts authorsNote from multiple potential locations", () => {

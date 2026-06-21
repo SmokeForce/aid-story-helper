@@ -1,5 +1,5 @@
 import QrCreator from "qr-creator";
-import { parsePlotEssentials } from "../inference/plot";
+import { parsePlotEssentials, getRestOfPlotEssentials } from "../inference/plot";
 import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_PROMPT_SECTION_1,
@@ -641,26 +641,49 @@ export function mountPanel(): PanelHandle {
 
       /* Adventures Manager DB Explorer Categories styles */
       details.local-category-details {
-        border: 1px solid rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--border-color);
+        border-left: 2.5px solid var(--text-secondary);
         border-radius: 6px;
-        background: rgba(0, 0, 0, 0.1);
-        padding: 6px;
-        margin-top: 4px;
+        margin: 4px 0;
+        background: rgba(255, 255, 255, 0.01);
         transition: all 0.2s ease;
       }
       details.local-category-details[open] {
-        background: rgba(0, 0, 0, 0.2);
+        background: rgba(0, 0, 0, 0.1);
         border-color: rgba(255, 255, 255, 0.08);
       }
-      details.local-category-details .toggle-indicator::after {
-        content: "▶";
-        display: inline-block;
-        margin-left: 4px;
-        font-size: 8px;
-        transition: transform 0.2s ease;
+      details.local-category-details > summary {
+        cursor: pointer;
+        padding: 6px 10px;
+        font-weight: 600;
+        font-size: 11px;
+        color: var(--text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        user-select: none;
+        outline: none;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        transition: all 0.2s;
+        width: 100%;
+        box-sizing: border-box;
       }
-      details.local-category-details[open] .toggle-indicator::after {
-        content: "▼";
+      details.local-category-details > summary:hover {
+        background: rgba(255, 255, 255, 0.02);
+      }
+      details.local-category-details > summary::after {
+        content: "▾";
+        color: var(--text-secondary);
+        font-size: 9px;
+        transition: transform 0.2s;
+        display: inline-block;
+        margin-left: auto;
+        flex-shrink: 0;
+        padding-left: 6px;
+      }
+      details.local-category-details[open] > summary::after {
+        transform: rotate(-180deg);
       }
 
       /* Premium Scrollable Container Constraints */
@@ -1830,23 +1853,23 @@ export function mountPanel(): PanelHandle {
                   </svg>
                 </button>
               </div>
-              <div class="note" style="margin-bottom:4px; font-size:11px;">Manage your Global Asset library and explore locally stored adventure data.</div>
+              <div class="note" style="margin-bottom:4px; font-size:11px;">Manage your Favorites library and explore locally stored adventure data.</div>
               
               <!-- Sub Tab Navigation -->
               <div class="manager-subtab-nav" style="display:flex;border-bottom:1px solid var(--border-color);padding-bottom:4px;margin-bottom:6px;gap:2px;">
-                <button id="btn-subtab-global" class="manager-subtab-btn active" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--theme-text-color);border-bottom:2px solid var(--theme-text-color);font-weight:700;cursor:pointer;">Global Bucket</button>
+                <button id="btn-subtab-global" class="manager-subtab-btn active" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--theme-text-color);border-bottom:2px solid var(--theme-text-color);font-weight:700;cursor:pointer;">Favorites</button>
                 <button id="btn-subtab-explorer" class="manager-subtab-btn" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--text-secondary);border-bottom:2px solid transparent;cursor:pointer;">Local DB Explorer</button>
               </div>
 
               <!-- Main Manager Container -->
               <div id="manager-panels" style="display:flex; flex-direction:column; gap:8px; flex:1; overflow-y:auto; padding-right:4px; min-height:0;">
-                <!-- Subpane: Global Assets -->
+                <!-- Subpane: Favorites -->
                 <div id="subpane-global" style="display:flex; flex-direction:column; gap:8px;">
-                  <button id="btn-show-add-global" style="width:100%;margin:0;background:linear-gradient(135deg, var(--accent-color), var(--accent-border));color:#fff;font-weight:600;padding:6px;border-radius:6px;border:none;cursor:pointer;font-size:11px;">+ Add New Global Asset</button>
+                  <button id="btn-show-add-global" style="width:100%;margin:0;background:linear-gradient(135deg, var(--accent-color), var(--accent-border));color:#fff;font-weight:600;padding:6px;border-radius:6px;border:none;cursor:pointer;font-size:11px;">+ Add New Favorite</button>
                   
-                  <!-- Form: Add Global Asset (hidden by default) -->
+                  <!-- Form: Add Favorite (hidden by default) -->
                   <div id="form-add-global" style="display:none; flex-direction:column; gap:6px; background:rgba(0,0,0,0.25); border:1px solid var(--border-color); border-radius:8px; padding:10px; box-sizing:border-box;">
-                    <div style="font-weight:600; font-size:11px; color:var(--theme-text-color); margin-bottom:4px;">New Global Asset</div>
+                    <div style="font-weight:600; font-size:11px; color:var(--theme-text-color); margin-bottom:4px;">New Favorite</div>
                     <label style="font-size:10px; text-transform:uppercase; color:var(--text-secondary);">Asset Type</label>
                     <select id="global-type" style="margin:2px 0 6px 0; font-size:11.5px; padding:4px;">
                       <option value="ain">AI Instructions (AIN)</option>
@@ -1886,7 +1909,7 @@ export function mountPanel(): PanelHandle {
                     </div>
                   </div>
 
-                  <!-- Global Assets Categorized Lists -->
+                  <!-- Favorites Categorized Lists -->
                   <div id="global-assets-list" style="display:flex; flex-direction:column; gap:8px;"></div>
                 </div>
 
@@ -3054,7 +3077,7 @@ export function mountPanel(): PanelHandle {
         if (res?.error) {
           showToast(`Failed to create: ${res.error}`, true);
         } else {
-          showToast(`Created global asset '${title}'!`);
+          showToast(`Created favorite '${title}'!`);
           const form = root.getElementById("form-add-global");
           const showBtn = root.getElementById("btn-show-add-global");
           if (form && showBtn) {
@@ -3245,12 +3268,54 @@ export function mountPanel(): PanelHandle {
     const listExplorer = root.getElementById("db-explorer-list");
     if (!listGlobal || !listExplorer) return;
 
-    // 1. Render Global Bucket
+    // Collect open details state before rendering to prevent collapsing
+    const openIds = new Set<string>();
+    listExplorer.querySelectorAll("details[open]").forEach(el => {
+      const oid = el.getAttribute("data-open-id");
+      if (oid) openIds.add(oid);
+    });
+
+    const openGlobalIds = new Set<string>();
+    listGlobal.querySelectorAll("details[open]").forEach(el => {
+      const oid = el.getAttribute("data-open-id");
+      if (oid) openGlobalIds.add(oid);
+    });
+
+    const isOpen = (id: string) => openIds.has(id) ? " open" : "";
+    const isGlobalOpen = (id: string) => openGlobalIds.has(id) ? " open" : "";
+
+    const SC_LABEL_ORDER = ["Characters", "Classes", "Races", "Locations", "Factions", "Custom"];
+    
+    function getCardTypeLabel(cardType: string | undefined): string {
+      if (!cardType) return "Custom";
+      const lower = cardType.toLowerCase();
+      const TYPE_LABELS: Record<string, string> = {
+        character: "Characters",
+        class: "Classes",
+        race: "Races",
+        location: "Locations",
+        faction: "Factions",
+        custom: "Custom"
+      };
+      if (TYPE_LABELS[lower]) return TYPE_LABELS[lower];
+      return cardType.charAt(0).toUpperCase() + cardType.slice(1);
+    }
+
+    const isAssetFavorited = (type: string, title: string, value: string, keys?: string): boolean => {
+      return globalAssets.some(a => 
+        a.type === type && 
+        a.title === title && 
+        a.value === value && 
+        (a.keys || "") === (keys || "")
+      );
+    };
+
+    // 1. Render Favorites
     const globalAssets = state.globalAssets || [];
     if (globalAssets.length === 0) {
-      setSafeHTML(listGlobal, `<div style="text-align:center;color:var(--text-secondary);padding:20px 0;font-size:11.5px;">No global assets stored yet. Add some below or favorite them from local adventures!</div>`);
+      setSafeHTML(listGlobal, `<div style="text-align:center;color:var(--text-secondary);padding:20px 0;font-size:11.5px;">No favorites stored yet. Add some below or favorite them from local adventures!</div>`);
     } else {
-      // Group global assets by type
+      // Group favorites by type
       const groups: Record<string, GlobalAsset[]> = { ain: [], an: [], pe: [], sc: [] };
       for (const a of globalAssets) {
         const group = groups[a.type];
@@ -3267,34 +3332,77 @@ export function mountPanel(): PanelHandle {
       let html = "";
       for (const [type, items] of Object.entries(groups)) {
         if (items.length === 0) continue;
-        html += `<div style="margin-top:8px;">` +
-          `<div style="font-weight:700;font-size:10px;text-transform:uppercase;color:var(--theme-text-color);letter-spacing:0.05em;margin-bottom:4px;">${typeTitles[type as keyof typeof typeTitles]}</div>` +
-          `<div style="display:flex;flex-direction:column;gap:6px;">`;
         
-        for (const item of items) {
-          const escVal = esc(item.value);
-          const isSc = item.type === "sc";
-          const scMeta = isSc ? `<div style="font-size:10px;color:var(--text-secondary);margin-bottom:2px;"><strong>Keys:</strong> ${esc(item.keys || "")}</div>` : "";
-          
-          html += `
-            <div class="global-asset-card" data-id="${item.id}" style="background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:8px;padding:8px;box-sizing:border-box;">
-              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:4px;">
-                <div style="font-weight:600;font-size:11.5px;color:var(--text-primary);word-break:break-all;">${esc(item.title)}</div>
-                <div style="display:flex;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;">
-                  ${!state.isManagerOnly ? `<button class="btn-import-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Import</button>` : ""}
-                  <button class="btn-edit-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(59,130,246,0.1);color:#60a5fa;border:1px solid rgba(59,130,246,0.2);border-radius:4px;cursor:pointer;">Edit</button>
-                  <button class="btn-delete-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Remove From Favorites</button>
+        if (type === "sc") {
+          // Group Story Cards by cardType
+          const scGroups: Record<string, GlobalAsset[]> = {};
+          for (const item of items) {
+            const lbl = getCardTypeLabel(item.cardType);
+            if (!scGroups[lbl]) scGroups[lbl] = [];
+            scGroups[lbl].push(item);
+          }
+          const rank = (l: string) => {
+            const idx = SC_LABEL_ORDER.indexOf(l);
+            return idx === -1 ? 1000 : idx;
+          };
+          const sortedLabels = Object.keys(scGroups).sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+
+          for (const lbl of sortedLabels) {
+            const subItems = scGroups[lbl] || [];
+            const subKey = `sc-${lbl.toLowerCase().replace(/\s+/g, "-")}`;
+            html += `<details class="group-header" data-open-id="global-cat-${subKey}"${isGlobalOpen(`global-cat-${subKey}`)}>` +
+              `<summary><span>${esc(lbl)} (${subItems.length})</span></summary>` +
+              `<div style="padding:4px 8px 8px; display:flex; flex-direction:column; gap:6px;">`;
+            for (const item of subItems) {
+              const escVal = esc(item.value);
+              const scMeta = `<div style="font-size:10px;color:var(--text-secondary);margin-bottom:2px;"><strong>Keys:</strong> ${esc(item.keys || "")}</div>`;
+              
+              html += `
+                <div class="global-asset-card" data-id="${item.id}" style="background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:8px;padding:8px;box-sizing:border-box;">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:4px;">
+                    <div style="font-weight:600;font-size:11.5px;color:var(--text-primary);word-break:break-all;">${esc(item.title)}</div>
+                    <div style="display:flex;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;">
+                      ${!state.isManagerOnly ? `<button class="btn-import-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Import</button>` : ""}
+                      <button class="btn-edit-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(59,130,246,0.1);color:#60a5fa;border:1px solid rgba(59,130,246,0.2);border-radius:4px;cursor:pointer;">Edit</button>
+                      <button class="btn-delete-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Remove From Favorites</button>
+                    </div>
+                  </div>
+                  ${scMeta}
+                  <details style="cursor:pointer;" data-open-id="global-val-${item.id}"${isGlobalOpen(`global-val-${item.id}`)}>
+                    <summary style="font-size:10.5px;color:var(--text-secondary);list-style:none;">Show value</summary>
+                    <div style="margin-top:4px;padding:6px;background:rgba(0,0,0,0.2);border-radius:4px;font-size:10.5px;color:var(--text-primary);white-space:pre-wrap;word-break:break-all;font-family:SFMono-Regular,Consolas,monospace;cursor:text;" class="selectable-text">${escVal}</div>
+                  </details>
                 </div>
+              `;
+            }
+            html += `</div></details>`;
+          }
+        } else {
+          html += `<details class="group-header" data-open-id="global-cat-${type}"${isGlobalOpen(`global-cat-${type}`)}>` +
+            `<summary><span>${typeTitles[type as keyof typeof typeTitles]} (${items.length})</span></summary>` +
+            `<div style="padding:4px 8px 8px; display:flex; flex-direction:column; gap:6px;">`;
+          for (const item of items) {
+            const escVal = esc(item.value);
+            
+            html += `
+              <div class="global-asset-card" data-id="${item.id}" style="background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:8px;padding:8px;box-sizing:border-box;">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:4px;">
+                  <div style="font-weight:600;font-size:11.5px;color:var(--text-primary);word-break:break-all;">${esc(item.title)}</div>
+                  <div style="display:flex;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;">
+                    ${!state.isManagerOnly ? `<button class="btn-import-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Import</button>` : ""}
+                    <button class="btn-edit-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(59,130,246,0.1);color:#60a5fa;border:1px solid rgba(59,130,246,0.2);border-radius:4px;cursor:pointer;">Edit</button>
+                    <button class="btn-delete-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Remove From Favorites</button>
+                  </div>
+                </div>
+                <details style="cursor:pointer;" data-open-id="global-val-${item.id}"${isGlobalOpen(`global-val-${item.id}`)}>
+                  <summary style="font-size:10.5px;color:var(--text-secondary);list-style:none;">Show value</summary>
+                  <div style="margin-top:4px;padding:6px;background:rgba(0,0,0,0.2);border-radius:4px;font-size:10.5px;color:var(--text-primary);white-space:pre-wrap;word-break:break-all;font-family:SFMono-Regular,Consolas,monospace;cursor:text;" class="selectable-text">${escVal}</div>
+                </details>
               </div>
-              ${scMeta}
-              <details style="cursor:pointer;">
-                <summary style="font-size:10.5px;color:var(--text-secondary);list-style:none;">Show value</summary>
-                <div style="margin-top:4px;padding:6px;background:rgba(0,0,0,0.2);border-radius:4px;font-size:10.5px;color:var(--text-primary);white-space:pre-wrap;word-break:break-all;font-family:SFMono-Regular,Consolas,monospace;cursor:text;" class="selectable-text">${escVal}</div>
-              </details>
-            </div>
-          `;
+            `;
+          }
+          html += `</div></details>`;
         }
-        html += `</div></div>`;
       }
       setSafeHTML(listGlobal, html);
 
@@ -3324,7 +3432,7 @@ export function mountPanel(): PanelHandle {
           const card = btn.closest(".global-asset-card");
           const assetId = card?.getAttribute("data-id") || "";
           if (assetId && deleteGlobalAssetCb) {
-            if (confirm("Are you sure you want to remove this global asset from your favorites?")) {
+            if (confirm("Are you sure you want to remove this from your favorites?")) {
               const res = await deleteGlobalAssetCb(assetId);
               if (res?.error) {
                 showToast(`Remove failed: ${res.error}`, true);
@@ -3347,24 +3455,97 @@ export function mountPanel(): PanelHandle {
           if (!asset) return;
 
           // Replace card contents with editable form
-          const isSc = asset.type === "sc";
+          let currentType = asset.type;
+
+          const getFormValues = () => {
+            const scTypeSelect = card.querySelector(".edit-sc-type") as HTMLSelectElement;
+            const customTypeInput = card.querySelector(".edit-sc-custom-type") as HTMLInputElement;
+            const titleInput = card.querySelector(".edit-asset-title") as HTMLInputElement;
+            const valueTextarea = card.querySelector(".edit-asset-value") as HTMLTextAreaElement;
+            const keysInput = card.querySelector(".edit-asset-keys") as HTMLInputElement;
+            const descInput = card.querySelector(".edit-asset-desc") as HTMLInputElement;
+
+            const standardTypes = ["character", "location", "faction", "class", "race"];
+            let cardType: string | undefined = undefined;
+            if (scTypeSelect) {
+              if (scTypeSelect.value === "custom") {
+                cardType = customTypeInput ? customTypeInput.value.trim() : "custom";
+                if (!cardType) cardType = "custom";
+              } else {
+                cardType = scTypeSelect.value;
+              }
+            }
+
+            return {
+              title: titleInput ? titleInput.value : asset.title,
+              value: valueTextarea ? valueTextarea.value : asset.value,
+              keys: keysInput ? keysInput.value : asset.keys,
+              description: descInput ? descInput.value : asset.description,
+              cardType: cardType ?? asset.cardType
+            };
+          };
+
+          const renderDynamicFields = (type: string, vals: { title: string; value: string; keys?: string; description?: string; cardType?: string }) => {
+            if (type === "sc") {
+              const standardTypes = ["character", "location", "faction", "class", "race"];
+              const currentCardType = vals.cardType || "custom";
+              const isStandard = standardTypes.includes(currentCardType.toLowerCase());
+              const scType = isStandard ? currentCardType.toLowerCase() : "custom";
+              const customTypeValue = !isStandard && currentCardType.toLowerCase() !== "custom" ? currentCardType : "";
+
+              return `
+                <label style="font-size:9.5px;font-weight:600;margin:0;">Story Card Type</label>
+                <select class="edit-sc-type" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;">
+                  <option value="character" ${scType === "character" ? "selected" : ""}>Character</option>
+                  <option value="location" ${scType === "location" ? "selected" : ""}>Location</option>
+                  <option value="faction" ${scType === "faction" ? "selected" : ""}>Faction</option>
+                  <option value="class" ${scType === "class" ? "selected" : ""}>Class</option>
+                  <option value="race" ${scType === "race" ? "selected" : ""}>Race</option>
+                  <option value="custom" ${scType === "custom" ? "selected" : ""}>Custom</option>
+                </select>
+
+                <div class="edit-sc-custom-type-container" style="display:${scType === "custom" ? "flex" : "none"};flex-direction:column;gap:6px;">
+                  <label style="font-size:9.5px;font-weight:600;margin:0;">Custom Type</label>
+                  <input class="edit-sc-custom-type" type="text" value="${esc(customTypeValue)}" placeholder="Enter custom type..." style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+                </div>
+
+                <label style="font-size:9.5px;font-weight:600;margin:0;">Name</label>
+                <input class="edit-asset-title" type="text" value="${esc(vals.title)}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+
+                <label style="font-size:9.5px;font-weight:600;margin:0;">Entry</label>
+                <textarea class="edit-asset-value" rows="6" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(vals.value)}</textarea>
+
+                <label style="font-size:9.5px;font-weight:600;margin:0;">Triggers</label>
+                <input class="edit-asset-keys" type="text" value="${esc(vals.keys || "")}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+
+                <label style="font-size:9.5px;font-weight:600;margin:0;">Notes</label>
+                <input class="edit-asset-desc" type="text" value="${esc(vals.description || "")}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+              `;
+            } else {
+              return `
+                <label style="font-size:9.5px;font-weight:600;margin:0;">Title</label>
+                <input class="edit-asset-title" type="text" value="${esc(vals.title)}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+
+                <label style="font-size:9.5px;font-weight:600;margin:0;">Value</label>
+                <textarea class="edit-asset-value" rows="6" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(vals.value)}</textarea>
+              `;
+            }
+          };
+
           setSafeHTML(card, `
             <div style="display:flex;flex-direction:column;gap:6px;">
-              <div style="font-weight:700;font-size:10px;text-transform:uppercase;color:var(--text-secondary);">Edit Asset</div>
+              <div style="font-weight:700;font-size:10px;text-transform:uppercase;color:var(--text-secondary);">Edit Favorite</div>
               
-              <label style="font-size:9.5px;font-weight:600;margin:0;">Title</label>
-              <input class="edit-asset-title" type="text" value="${esc(asset.title)}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
-              
-              ${isSc ? `
-                <label style="font-size:9.5px;font-weight:600;margin:0;">Keys</label>
-                <input class="edit-asset-keys" type="text" value="${esc(asset.keys || "")}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
-                
-                <label style="font-size:9.5px;font-weight:600;margin:0;">Description</label>
-                <input class="edit-asset-desc" type="text" value="${esc(asset.description || "")}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
-              ` : ""}
-              
-              <label style="font-size:9.5px;font-weight:600;margin:0;">Value</label>
-              <textarea class="edit-asset-value" rows="6" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(asset.value)}</textarea>
+              <label style="font-size:9.5px;font-weight:600;margin:0;">Asset Type</label>
+              <select class="edit-asset-type" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;">
+                <option value="ain" ${currentType === "ain" ? "selected" : ""}>AI Instructions (AIN)</option>
+                <option value="an" ${currentType === "an" ? "selected" : ""}>Author's Note (AN)</option>
+                <option value="pe" ${currentType === "pe" ? "selected" : ""}>Character Description (PE)</option>
+                <option value="sc" ${currentType === "sc" ? "selected" : ""}>Story Card (SC)</option>
+              </select>
+
+              <div class="dynamic-edit-fields" style="display:flex;flex-direction:column;gap:6px;">
+              </div>
               
               <div style="display:flex;gap:4px;justify-content:flex-end;margin-top:4px;">
                 <button class="btn-save-edit" style="margin:0;padding:2px 8px;font-size:10px;background:rgba(16,185,129,0.2);color:#34d399;border:1px solid rgba(16,185,129,0.3);border-radius:4px;cursor:pointer;">Save</button>
@@ -3373,31 +3554,69 @@ export function mountPanel(): PanelHandle {
             </div>
           `);
 
+          const dynamicContainer = card.querySelector(".dynamic-edit-fields") as HTMLElement;
+          const initialVals = {
+            title: asset.title,
+            value: asset.value,
+            keys: asset.keys,
+            description: asset.description,
+            cardType: asset.cardType
+          };
+
+          const bindDynamicFieldsListeners = () => {
+            const scTypeSelect = card.querySelector(".edit-sc-type") as HTMLSelectElement;
+            scTypeSelect?.addEventListener("change", (e) => {
+              const scType = (e.target as HTMLSelectElement).value;
+              const customTypeContainer = card.querySelector(".edit-sc-custom-type-container") as HTMLElement;
+              if (customTypeContainer) {
+                customTypeContainer.style.display = scType === "custom" ? "flex" : "none";
+              }
+            });
+          };
+
+          // Initial render of dynamic fields
+          if (dynamicContainer) {
+            setSafeHTML(dynamicContainer, renderDynamicFields(currentType, initialVals));
+            bindDynamicFieldsListeners();
+          }
+
+          // Handle Asset Type changes
+          card.querySelector(".edit-asset-type")?.addEventListener("change", (e) => {
+            const newType = (e.target as HTMLSelectElement).value as "ain" | "an" | "pe" | "sc";
+            const currentVals = getFormValues();
+            currentType = newType;
+            if (dynamicContainer) {
+              setSafeHTML(dynamicContainer, renderDynamicFields(newType, currentVals));
+              bindDynamicFieldsListeners();
+            }
+          });
+
           // Bind cancel
           card.querySelector(".btn-cancel-edit")?.addEventListener("click", () => {
-            triggerRefresh(); // Just refresh the list to restore original HTML
+            triggerRefresh();
           });
 
           // Bind save
           card.querySelector(".btn-save-edit")?.addEventListener("click", async () => {
-            const titleInput = card.querySelector(".edit-asset-title") as HTMLInputElement;
-            const valueTextarea = card.querySelector(".edit-asset-value") as HTMLTextAreaElement;
-            const keysInput = card.querySelector(".edit-asset-keys") as HTMLInputElement | null;
-            const descInput = card.querySelector(".edit-asset-desc") as HTMLInputElement | null;
+            const typeSelect = card.querySelector(".edit-asset-type") as HTMLSelectElement;
+            const vals = getFormValues();
 
             if (saveGlobalAssetCb) {
+              const newType = typeSelect.value as "ain" | "an" | "pe" | "sc";
               const updatedAsset: GlobalAsset = {
                 ...asset,
-                title: titleInput.value,
-                value: valueTextarea.value,
-                keys: keysInput ? keysInput.value : asset.keys,
-                description: descInput ? descInput.value : asset.description
+                type: newType,
+                title: vals.title,
+                value: vals.value,
+                keys: newType === "sc" ? vals.keys : undefined,
+                description: newType === "sc" ? vals.description : undefined,
+                cardType: newType === "sc" ? vals.cardType : undefined
               };
               const res = await saveGlobalAssetCb(updatedAsset);
               if (res?.error) {
                 showToast(`Save failed: ${res.error}`, true);
               } else {
-                showToast("Global asset updated.");
+                showToast("Favorite updated.");
                 triggerRefresh();
               }
             }
@@ -3416,15 +3635,17 @@ export function mountPanel(): PanelHandle {
       for (const adv of adventures) {
         const advCards = allCards.filter(c => c.shortId === adv.shortId && !c.deletedAt);
         const plotBlocks = parsePlotEssentials(adv.memory || "");
+        const restOfPE = getRestOfPlotEssentials(adv.memory || "");
         
         let assetsCount = 0;
         if (adv.instructions) assetsCount++;
         if (adv.authorsNote) assetsCount++;
         assetsCount += plotBlocks.length;
+        if (plotBlocks.length === 0 && restOfPE) assetsCount++;
         assetsCount += advCards.length;
 
         explorerHtml += `
-          <details class="adv-explorer-card" style="background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:8px;margin-bottom:6px;box-sizing:border-box;" data-shortid="${adv.shortId}">
+          <details class="adv-explorer-card" style="background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:8px;margin-bottom:6px;box-sizing:border-box;" data-shortid="${adv.shortId}" data-open-id="adv-${adv.shortId}"${isOpen(`adv-${adv.shortId}`)}>
             <summary style="padding:8px;font-weight:600;font-size:11.5px;color:var(--text-primary);cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;">
               <span style="flex:1;word-break:break-all;font-size:11.5px;text-align:left;">📁 ${esc(adv.title || "Untitled Adventure")} <span style="font-weight:normal;font-size:9.5px;color:var(--text-secondary);">(${esc(adv.shortId)})</span></span>
               <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
@@ -3433,85 +3654,137 @@ export function mountPanel(): PanelHandle {
               </div>
             </summary>
             <div style="padding:0 8px 8px 8px;border-top:1px solid var(--border-color);margin-top:4px;display:flex;flex-direction:column;gap:8px;">
-              ${adv.instructions ? `
-                <details class="local-category-details" style="margin-top:6px;cursor:pointer;">
-                  <summary style="font-weight:700;font-size:10px;text-transform:uppercase;color:var(--text-secondary);list-style:none;outline:none;user-select:none;display:flex;justify-content:space-between;align-items:center;">
-                    <span>⚙️ AI Instructions</span>
-                    <span class="toggle-indicator" style="font-size:9px;color:var(--text-muted);font-weight:normal;"></span>
-                  </summary>
-                  <div class="local-asset-row" style="margin-top:4px;background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;cursor:default;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                      <span style="font-size:10px;color:var(--text-secondary);">Instruction Content</span>
-                      <button class="btn-favorite-local" data-type="ain" data-title="AIN from ${esc(adv.title || "Adventure")}" data-value="${esc(adv.instructions)}" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;padding:2px;font-size:14px;" title="Favorite to Global Bucket">☆</button>
+              ${adv.instructions ? (() => {
+                const isFav = isAssetFavorited("ain", `AIN from ${adv.title || "Adventure"}`, adv.instructions);
+                const starChar = isFav ? "★" : "☆";
+                const starColor = isFav ? "var(--theme-text-color)" : "var(--text-secondary)";
+                return `
+                  <details class="group-header" data-open-id="cat-${adv.shortId}-ain"${isOpen(`cat-${adv.shortId}-ain`)}>
+                    <summary><span>⚙️ AI Instructions</span></summary>
+                    <div style="padding:4px 8px 8px; display:flex; flex-direction:column; gap:6px;">
+                      <div class="local-asset-row" style="background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;cursor:default;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                          <span style="font-size:10px;color:var(--text-secondary);">Instruction Content</span>
+                          <button class="btn-favorite-local" data-type="ain" data-title="AIN from ${esc(adv.title || "Adventure")}" data-value="${esc(adv.instructions)}" style="background:none;border:none;color:${starColor};cursor:pointer;padding:2px;font-size:14px;" title="Toggle Favorite">${starChar}</button>
+                        </div>
+                        <div style="font-size:10.5px;color:var(--text-primary);font-family:SFMono-Regular,Consolas,monospace;white-space:pre-wrap;max-height:120px;overflow-y:auto;word-break:break-all;margin-top:2px;" class="selectable-text">${esc(adv.instructions)}</div>
+                      </div>
                     </div>
-                    <div style="font-size:10.5px;color:var(--text-primary);font-family:SFMono-Regular,Consolas,monospace;white-space:pre-wrap;max-height:120px;overflow-y:auto;word-break:break-all;margin-top:2px;" class="selectable-text">${esc(adv.instructions)}</div>
-                  </div>
-                </details>
-              ` : ""}
+                  </details>
+                `;
+              })() : ""}
               
-              ${adv.authorsNote ? `
-                <details class="local-category-details" style="margin-top:4px;cursor:pointer;">
-                  <summary style="font-weight:700;font-size:10px;text-transform:uppercase;color:var(--text-secondary);list-style:none;outline:none;user-select:none;display:flex;justify-content:space-between;align-items:center;">
-                    <span>📝 Author's Note</span>
-                    <span class="toggle-indicator" style="font-size:9px;color:var(--text-muted);font-weight:normal;"></span>
-                  </summary>
-                  <div class="local-asset-row" style="margin-top:4px;background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;cursor:default;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                      <span style="font-size:10px;color:var(--text-secondary);">Author's Note Content</span>
-                      <button class="btn-favorite-local" data-type="an" data-title="AN from ${esc(adv.title || "Adventure")}" data-value="${esc(adv.authorsNote)}" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;padding:2px;font-size:14px;" title="Favorite to Global Bucket">☆</button>
+              ${(plotBlocks.length > 0 || restOfPE) ? (() => {
+                const countText = plotBlocks.length > 0 ? ` (${plotBlocks.length})` : "";
+                return `
+                  <details class="group-header" data-open-id="cat-${adv.shortId}-pe"${isOpen(`cat-${adv.shortId}-pe`)}>
+                    <summary><span>👥 Plot Essentials${countText}</span></summary>
+                    <div style="padding:4px 8px 8px; display:flex; flex-direction:column; gap:6px;">
+                      ${plotBlocks.map(b => {
+                        const isFav = isAssetFavorited("pe", b.name, b.text);
+                        const starChar = isFav ? "★" : "☆";
+                        const starColor = isFav ? "var(--theme-text-color)" : "var(--text-secondary)";
+                        return `
+                          <div class="local-asset-row" style="background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                              <span style="font-weight:600;font-size:11px;color:var(--text-primary);">${esc(b.name)}</span>
+                              <button class="btn-favorite-local" data-type="pe" data-title="${esc(b.name)}" data-value="${esc(b.text)}" style="background:none;border:none;color:${starColor};cursor:pointer;padding:2px;font-size:14px;" title="Toggle Favorite">${starChar}</button>
+                            </div>
+                            <details style="cursor:pointer;margin-top:2px;" data-open-id="char-${adv.shortId}-${esc(b.name)}"${isOpen(`char-${adv.shortId}-${esc(b.name)}`)}>
+                              <summary style="font-size:10px;color:var(--text-secondary);list-style:none;outline:none;user-select:none;">Show description...</summary>
+                              <div style="font-size:10.5px;color:var(--text-secondary);white-space:pre-wrap;margin-top:2px;cursor:text;" class="selectable-text">${esc(b.text)}</div>
+                            </details>
+                          </div>
+                        `;
+                      }).join("")}
+                      
+                      ${restOfPE ? `
+                        <details class="local-category-details" style="margin-top:4px;" data-open-id="cat-${adv.shortId}-pe-full"${isOpen(`cat-${adv.shortId}-pe-full`)}>
+                          <summary><span>📄 See Full Plot Essentials</span></summary>
+                          <div style="padding:4px 8px 8px; display:flex; flex-direction:column; gap:6px;">
+                            <div class="local-asset-row" style="background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;cursor:default;">
+                              <div style="font-size:10.5px;color:var(--text-primary);font-family:SFMono-Regular,Consolas,monospace;white-space:pre-wrap;max-height:200px;overflow-y:auto;word-break:break-all;margin-top:2px;" class="selectable-text">${esc(restOfPE)}</div>
+                            </div>
+                          </div>
+                        </details>
+                      ` : ""}
                     </div>
-                    <div style="font-size:10.5px;color:var(--text-primary);font-family:SFMono-Regular,Consolas,monospace;white-space:pre-wrap;max-height:120px;overflow-y:auto;word-break:break-all;margin-top:2px;" class="selectable-text">${esc(adv.authorsNote)}</div>
-                  </div>
-                </details>
-              ` : ""}
-
-              ${plotBlocks.length > 0 ? `
-                <details class="local-category-details" style="margin-top:4px;cursor:pointer;">
-                  <summary style="font-weight:700;font-size:10px;text-transform:uppercase;color:var(--text-secondary);list-style:none;outline:none;user-select:none;display:flex;justify-content:space-between;align-items:center;">
-                    <span>👥 Characters (${plotBlocks.length})</span>
-                    <span class="toggle-indicator" style="font-size:9px;color:var(--text-muted);font-weight:normal;"></span>
-                  </summary>
-                  <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;cursor:default;">
-                    ${plotBlocks.map(b => `
-                      <div class="local-asset-row" style="background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;">
+                  </details>
+                `;
+              })() : ""}
+              
+              ${adv.authorsNote ? (() => {
+                const isFav = isAssetFavorited("an", `AN from ${adv.title || "Adventure"}`, adv.authorsNote);
+                const starChar = isFav ? "★" : "☆";
+                const starColor = isFav ? "var(--theme-text-color)" : "var(--text-secondary)";
+                return `
+                  <details class="group-header" data-open-id="cat-${adv.shortId}-an"${isOpen(`cat-${adv.shortId}-an`)}>
+                    <summary><span>📝 Author's Note</span></summary>
+                    <div style="padding:4px 8px 8px; display:flex; flex-direction:column; gap:6px;">
+                      <div class="local-asset-row" style="background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;cursor:default;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
-                          <span style="font-weight:600;font-size:11px;color:var(--text-primary);">${esc(b.name)}</span>
-                          <button class="btn-favorite-local" data-type="pe" data-title="${esc(b.name)}" data-value="${esc(b.text)}" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;padding:2px;font-size:14px;" title="Favorite to Global Bucket">☆</button>
+                          <span style="font-size:10px;color:var(--text-secondary);">Author's Note Content</span>
+                          <button class="btn-favorite-local" data-type="an" data-title="AN from ${esc(adv.title || "Adventure")}" data-value="${esc(adv.authorsNote)}" style="background:none;border:none;color:${starColor};cursor:pointer;padding:2px;font-size:14px;" title="Toggle Favorite">${starChar}</button>
                         </div>
-                        <details style="cursor:pointer;margin-top:2px;">
-                          <summary style="font-size:10px;color:var(--text-secondary);list-style:none;outline:none;user-select:none;">Show description...</summary>
-                          <div style="font-size:10.5px;color:var(--text-secondary);white-space:pre-wrap;margin-top:2px;cursor:text;" class="selectable-text">${esc(b.text)}</div>
-                        </details>
+                        <div style="font-size:10.5px;color:var(--text-primary);font-family:SFMono-Regular,Consolas,monospace;white-space:pre-wrap;max-height:120px;overflow-y:auto;word-break:break-all;margin-top:2px;" class="selectable-text">${esc(adv.authorsNote)}</div>
                       </div>
-                    `).join("")}
-                  </div>
-                </details>
-              ` : ""}
+                    </div>
+                  </details>
+                `;
+              })() : ""}
 
-              ${advCards.length > 0 ? `
-                <details class="local-category-details" style="margin-top:4px;cursor:pointer;">
-                  <summary style="font-weight:700;font-size:10px;text-transform:uppercase;color:var(--text-secondary);list-style:none;outline:none;user-select:none;display:flex;justify-content:space-between;align-items:center;">
-                    <span>🗂️ Story Cards (${advCards.length})</span>
-                    <span class="toggle-indicator" style="font-size:9px;color:var(--text-muted);font-weight:normal;"></span>
-                  </summary>
-                  <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;cursor:default;">
-                    ${advCards.map(c => `
-                      <div class="local-asset-row" style="background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                          <span style="font-weight:600;font-size:11px;color:var(--text-primary);">${esc(c.title || c.keys || "Untitled")} <span style="font-weight:normal;font-size:9.5px;color:var(--text-secondary);">(${esc(c.type)})</span></span>
-                          <button class="btn-favorite-local" data-type="sc" data-title="${esc(c.title || "")}" data-keys="${esc(c.keys || "")}" data-value="${esc(c.value)}" data-description="${esc(c.description || "")}" data-cardtype="${esc(c.type)}" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;padding:2px;font-size:14px;" title="Favorite to Global Bucket">☆</button>
-                        </div>
-                        <div style="font-size:10px;color:var(--text-secondary);margin-top:2px;"><strong>Keys:</strong> ${esc(c.keys || "")}</div>
-                        <details style="cursor:pointer;margin-top:2px;">
-                          <summary style="font-size:10px;color:var(--text-secondary);list-style:none;outline:none;user-select:none;">Show entry...</summary>
-                          <div style="font-size:10.5px;color:var(--text-secondary);white-space:pre-wrap;margin-top:2px;cursor:text;" class="selectable-text">${esc(c.value)}</div>
-                          ${c.description ? `<div style="font-size:9.5px;color:var(--text-muted);border-top:1px solid rgba(255,255,255,0.05);margin-top:4px;padding-top:4px;cursor:text;" class="selectable-text">${esc(c.description)}</div>` : ""}
-                        </details>
-                      </div>
-                    `).join("")}
-                  </div>
-                </details>
-              ` : ""}
+              ${advCards.length > 0 ? (() => {
+                // Group advCards by card type
+                const scGroups: Record<string, CardRow[]> = {};
+                for (const c of advCards) {
+                  const lbl = getCardTypeLabel(c.type);
+                  if (!scGroups[lbl]) scGroups[lbl] = [];
+                  scGroups[lbl].push(c);
+                }
+                const rank = (l: string) => {
+                  const idx = SC_LABEL_ORDER.indexOf(l);
+                  return idx === -1 ? 1000 : idx;
+                };
+                const sortedLabels = Object.keys(scGroups).sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+
+                return `
+                  <details class="group-header" data-open-id="cat-${adv.shortId}-sc"${isOpen(`cat-${adv.shortId}-sc`)}>
+                    <summary><span>🗂️ Story Cards (${advCards.length})</span></summary>
+                    <div style="padding:4px 8px 8px; display:flex; flex-direction:column; gap:6px;">
+                      ${sortedLabels.map(lbl => {
+                        const subCards = scGroups[lbl] || [];
+                        const subKey = `sc-${lbl.toLowerCase().replace(/\s+/g, "-")}`;
+                        return `
+                          <details class="local-category-details" data-open-id="cat-${adv.shortId}-${subKey}"${isOpen(`cat-${adv.shortId}-${subKey}`)}>
+                            <summary><span>${esc(lbl)} (${subCards.length})</span></summary>
+                            <div style="padding:4px 8px 8px; display:flex; flex-direction:column; gap:6px;">
+                              ${subCards.map(c => {
+                                const isFav = isAssetFavorited("sc", c.title || "", c.value, c.keys);
+                                const starChar = isFav ? "★" : "☆";
+                                const starColor = isFav ? "var(--theme-text-color)" : "var(--text-secondary)";
+                                return `
+                                  <div class="local-asset-row" style="background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;">
+                                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                                      <span style="font-weight:600;font-size:11px;color:var(--text-primary);">${esc(c.title || c.keys || "Untitled")}</span>
+                                      <button class="btn-favorite-local" data-type="sc" data-title="${esc(c.title || "")}" data-keys="${esc(c.keys || "")}" data-value="${esc(c.value)}" data-description="${esc(c.description || "")}" data-cardtype="${esc(c.type)}" style="background:none;border:none;color:${starColor};cursor:pointer;padding:2px;font-size:14px;" title="Toggle Favorite">${starChar}</button>
+                                    </div>
+                                    <div style="font-size:10px;color:var(--text-secondary);margin-top:2px;"><strong>Keys:</strong> ${esc(c.keys || "")}</div>
+                                    <details style="cursor:pointer;margin-top:2px;" data-open-id="sc-${adv.shortId}-${c.id}"${isOpen(`sc-${adv.shortId}-${c.id}`)}>
+                                      <summary style="font-size:10px;color:var(--text-secondary);list-style:none;outline:none;user-select:none;">Show entry...</summary>
+                                      <div style="font-size:10.5px;color:var(--text-secondary);white-space:pre-wrap;margin-top:2px;cursor:text;" class="selectable-text">${esc(c.value)}</div>
+                                      ${c.description ? `<div style="font-size:9.5px;color:var(--text-muted);border-top:1px solid rgba(255,255,255,0.05);margin-top:4px;padding-top:4px;cursor:text;" class="selectable-text">${esc(c.description)}</div>` : ""}
+                                    </details>
+                                  </div>
+                                `;
+                              }).join("")}
+                            </div>
+                          </details>
+                        `;
+                      }).join("")}
+                    </div>
+                  </details>
+                `;
+              })() : ""}
             </div>
           </details>
         `;
@@ -3529,27 +3802,50 @@ export function mountPanel(): PanelHandle {
           const description = btn.getAttribute("data-description") || "";
           const cardType = btn.getAttribute("data-cardtype") || "";
           
-          if (saveGlobalAssetCb) {
-            btn.textContent = "★";
-            btn.style.color = "var(--theme-text-color)";
-            const asset: GlobalAsset = {
-              id: Math.floor(Math.random() * 1e9).toString() + "-" + Date.now(),
-              type: type as any,
-              title,
-              keys: keys || undefined,
-              value,
-              description: description || undefined,
-              createdAt: new Date().toISOString(),
-              cardType: cardType || undefined
-            };
-            const res = await saveGlobalAssetCb(asset);
-            if (res?.error) {
-              showToast(`Failed to favorite: ${res.error}`, true);
+          const existing = globalAssets.find(a => 
+            a.type === type && 
+            a.title === title && 
+            a.value === value && 
+            (a.keys || "") === (keys || "")
+          );
+
+          if (existing) {
+            if (deleteGlobalAssetCb) {
               btn.textContent = "☆";
               btn.style.color = "var(--text-secondary)";
-            } else {
-              showToast(`Added '${title}' to Global Bucket!`);
-              triggerRefresh();
+              const res = await deleteGlobalAssetCb(existing.id);
+              if (res?.error) {
+                showToast(`Failed to remove favorite: ${res.error}`, true);
+                btn.textContent = "★";
+                btn.style.color = "var(--theme-text-color)";
+              } else {
+                showToast(`Removed '${title}' from favorites.`);
+                triggerRefresh();
+              }
+            }
+          } else {
+            if (saveGlobalAssetCb) {
+              btn.textContent = "★";
+              btn.style.color = "var(--theme-text-color)";
+              const asset: GlobalAsset = {
+                id: Math.floor(Math.random() * 1e9).toString() + "-" + Date.now(),
+                type: type as any,
+                title,
+                keys: keys || undefined,
+                value,
+                description: description || undefined,
+                createdAt: new Date().toISOString(),
+                cardType: cardType || undefined
+              };
+              const res = await saveGlobalAssetCb(asset);
+              if (res?.error) {
+                showToast(`Failed to favorite: ${res.error}`, true);
+                btn.textContent = "☆";
+                btn.style.color = "var(--text-secondary)";
+              } else {
+                showToast(`Added '${title}' to favorites.`);
+                triggerRefresh();
+              }
             }
           }
         });

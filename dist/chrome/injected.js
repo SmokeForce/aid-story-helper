@@ -938,6 +938,10 @@
         if (updateAdv) {
           adv = updateAdv;
         }
+        const updateStateAdv = item?.data?.updateAdventureState?.adventure || item?.data?.updateAdventureState;
+        if (updateStateAdv) {
+          adv = updateStateAdv;
+        }
         if (adv) {
           let shortId = adv.shortId;
           if (!shortId && reqBatch[i]) {

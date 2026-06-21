@@ -30,6 +30,24 @@ export function parsePlotEssentials(memory: string | undefined): PlotBlock[] {
   return blocks;
 }
 
+export function getRestOfPlotEssentials(memory: string | undefined): string {
+  if (!memory) return "";
+  const re = /\[([^\]]+)\]|\{([^\}]+)\}/g;
+  let lastIndex = 0;
+  let result = "";
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(memory)) !== null) {
+    const content = m[1] !== undefined ? m[1] : m[2]!;
+    const info = blockName(content);
+    if (info) {
+      result += memory.slice(lastIndex, m.index);
+      lastIndex = re.lastIndex;
+    }
+  }
+  result += memory.slice(lastIndex);
+  return result.trim();
+}
+
 export function parseMemories(memory: string | undefined): string | null {
   if (!memory) return null;
   const re = /\[\s*(Memories\s*\(newest\s*to\s*oldest\):[\s\S]*?)\]/gi;

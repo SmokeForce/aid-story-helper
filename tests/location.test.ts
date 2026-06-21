@@ -7,6 +7,10 @@ import { describe, it, expect, vi } from "vitest";
       get: vi.fn().mockResolvedValue({}),
       set: vi.fn().mockResolvedValue(undefined),
     },
+    local: {
+      get: vi.fn().mockResolvedValue({}),
+      set: vi.fn().mockResolvedValue(undefined),
+    },
   },
   runtime: {
     onMessage: {
@@ -340,6 +344,30 @@ describe("runProperNounAutoDetection", () => {
     await repo.upsertAdventure({ shortId: "adv-off", title: "T", properNounLogs: [], locationSuggestions: [] });
     await runProperNounAutoDetection("adv-off", [{ id: "1", text: "They entered the Obsidian Keep.", type: "do" }]);
     adv = await repo.getAdventure("adv-off");
+    expect((adv?.locationSuggestions || []).length).toBe(0);
+  });
+
+  it("migrates a persisted legacy enableLocationDetection flag to enableProperNounDetection (preserving an explicit opt-out)", async () => {
+    const { IDBFactory } = await import("fake-indexeddb");
+    const { __resetDbForTests } = await import("../src/storage/db");
+    const { Repo } = await import("../src/storage/repo");
+    const { runProperNounAutoDetection } = await import("../src/background/background");
+
+    (globalThis as any).indexedDB = new IDBFactory();
+    __resetDbForTests();
+    const repo = new Repo();
+    // Persist ONLY the legacy key (as a pre-rename install would have).
+    await repo.setSettings({ provider: "openai", analyzeWindow: 20, enableLocationDetection: false } as any);
+
+    // getSettings migrates: new key adopts the old value, stale key is dropped.
+    const migrated = await repo.getSettings();
+    expect(migrated?.enableProperNounDetection).toBe(false);
+    expect((migrated as any)?.enableLocationDetection).toBeUndefined();
+
+    // And the disabled preference is honored end-to-end (detection stays off).
+    await repo.upsertAdventure({ shortId: "adv-mig", title: "T", properNounLogs: [], locationSuggestions: [] });
+    await runProperNounAutoDetection("adv-mig", [{ id: "1", text: "They entered the Obsidian Keep.", type: "do" }]);
+    const adv = await repo.getAdventure("adv-mig");
     expect((adv?.locationSuggestions || []).length).toBe(0);
   });
 

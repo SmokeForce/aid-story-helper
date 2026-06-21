@@ -21742,7 +21742,8 @@ ${e2.text}` : e2.text;
     return out2;
   }
   function detectProperNouns(text, knownNames, lexiconNames = []) {
-    text = deStutter(text);
+    let cleanedText = text.replace(/\[[\s\S]*?\]/g, " ").replace(/\{[\s\S]*?\}/g, " ").replace(/\([\s\S]*?\)/g, " ").replace(/\/\S+/g, " ");
+    cleanedText = deStutter(cleanedText);
     const lexicon4 = {};
     const allLexicon = /* @__PURE__ */ new Set();
     for (const name of knownNames) {
@@ -21759,7 +21760,7 @@ ${e2.text}` : e2.text;
         }
       }
     }
-    const doc = three_default(text, lexicon4);
+    const doc = three_default(cleanedText, lexicon4);
     const ignoreList = /* @__PURE__ */ new Set([
       "i",
       "me",
@@ -22055,7 +22056,151 @@ ${e2.text}` : e2.text;
       "law",
       "one",
       "theory",
-      "string"
+      "string",
+      // Added common words / noise from logs
+      "like",
+      "right",
+      "truly",
+      "besides",
+      "success",
+      "forcing",
+      "force",
+      "wait",
+      "perhaps",
+      "sure",
+      "actually",
+      "basically",
+      "honestly",
+      "really",
+      "simply",
+      "very",
+      "quite",
+      "already",
+      "still",
+      "even",
+      "also",
+      "always",
+      "never",
+      "often",
+      "sometimes",
+      "usually",
+      "finally",
+      "suddenly",
+      "meanwhile",
+      "next",
+      "then",
+      "now",
+      "first",
+      "second",
+      "third",
+      "last",
+      "again",
+      "pat",
+      "grace",
+      "yang",
+      "gale",
+      "spike",
+      "skip",
+      "let",
+      "mark",
+      "box",
+      "boxes",
+      "mystery",
+      "mysteries",
+      "hello",
+      "hi",
+      "hey",
+      "bye",
+      "goodbye",
+      // Metadata & UI terms
+      "block",
+      "page",
+      "chapter",
+      "part",
+      "scene",
+      "turn",
+      "action",
+      "status",
+      "error",
+      "warning",
+      "info",
+      "debug",
+      "config",
+      "configure",
+      "setting",
+      "settings",
+      "option",
+      "options",
+      "mode",
+      "modes",
+      "value",
+      "values",
+      "key",
+      "keys",
+      "title",
+      "description",
+      "note",
+      "notes",
+      "intake",
+      "thought",
+      "thoughts",
+      "character",
+      "characters",
+      "location",
+      "locations",
+      "card",
+      "cards",
+      "story",
+      "storycard",
+      "storycards",
+      "helper",
+      "system",
+      "tool",
+      "version",
+      "database",
+      "explorer",
+      "bucket",
+      "favorite",
+      "favorites",
+      "global",
+      "local",
+      "item",
+      "items",
+      "type",
+      "types",
+      "class",
+      "faction",
+      "event",
+      "events",
+      "command",
+      "commands",
+      "prompt",
+      "prompts",
+      "guide",
+      "guides",
+      "user",
+      "player",
+      "protagonist",
+      "vocals",
+      "intro",
+      "outro",
+      "chorus",
+      "verse",
+      "solo",
+      "guitar",
+      "drum",
+      "drums",
+      "bass",
+      "piano",
+      "melody",
+      "rhythm",
+      "lyrics",
+      "tempo",
+      "breakdown",
+      "transition",
+      "transitions",
+      "climax",
+      "continuation"
     ]);
     const knownLower = new Set(knownNames.map((n3) => n3.toLowerCase().trim()));
     const candidates = [];
@@ -22064,37 +22209,52 @@ ${e2.text}` : e2.text;
     doc.match("#ProperNoun+ (of|the|a|an)* #ProperNoun+").out("array").forEach((s3) => rawTerms.push(s3));
     doc.match("#ProperNoun+").out("array").forEach((s3) => rawTerms.push(s3));
     for (const raw of rawTerms) {
-      let cleaned = raw.replace(/^[“"']+|[.”"';,!?]+$/g, "").trim();
-      if (cleaned.length < 3) continue;
-      if (cleaned === cleaned.toUpperCase() && cleaned.length > 4) continue;
-      let words = cleaned.split(/\s+/);
-      if (words.length > 1 && words[words.length - 1] === "I") {
-        words.pop();
-        cleaned = words.join(" ");
-        words = cleaned.split(/\s+/);
-      }
-      const dm = new RegExp(`\\b${escapeRe(cleaned)}\\s+([A-Z]\\d{0,2}|\\d{1,3}[A-Z]?)(?![A-Za-z0-9])`).exec(text);
-      if (dm && dm[1] !== "I") {
-        cleaned = `${cleaned} ${dm[1]}`;
-        words = cleaned.split(/\s+/);
-      }
-      const lower = cleaned.toLowerCase();
-      if (ignoreList.has(lower) || knownLower.has(lower)) continue;
-      const firstWord = words[0].toLowerCase();
-      if (ignoreList.has(firstWord) && firstWord !== "the" && firstWord !== "a" && firstWord !== "an") {
-        continue;
-      }
-      let isSubName = false;
-      for (const known of knownNames) {
-        const kl = known.toLowerCase();
-        if (kl !== lower && (kl.startsWith(lower + " ") || kl.endsWith(" " + lower))) {
-          isSubName = true;
-          break;
+      let cleaned = raw.replace(/[’‘]/g, "'").replace(/[“”]/g, '"');
+      cleaned = cleaned.replace(/'s\b/gi, "").trim();
+      cleaned = cleaned.replace(/'(?=\s|$)/g, "").trim();
+      const delimiters = /[.,\/#!$%\^&\*;:{}=\_`~()\[\]\"—–?|<>]+/;
+      const parts = cleaned.split(delimiters).map((p5) => p5.replace(/^[-']+|[-']+$/g, "").trim()).filter((p5) => p5.length >= 3);
+      for (const part of parts) {
+        if (/^[a-z]/.test(part) && !allLexicon.has(part.toLowerCase())) continue;
+        if (part === part.toUpperCase() && part.length > 4) continue;
+        let cleanedPart = part;
+        let words = cleanedPart.split(/\s+/);
+        if (words.length > 1 && words[words.length - 1] === "I") {
+          words.pop();
+          cleanedPart = words.join(" ");
+          words = cleanedPart.split(/\s+/);
         }
-      }
-      if (isSubName) continue;
-      if (!candidates.includes(cleaned)) {
-        candidates.push(cleaned);
+        const dm = new RegExp(`\\b${escapeRe(cleanedPart)}\\s+([A-Z]\\d{0,2}|\\d{1,3}[A-Z]?)(?![A-Za-z0-9])`).exec(cleanedText);
+        if (dm && dm[1] !== "I") {
+          cleanedPart = `${cleanedPart} ${dm[1]}`;
+          words = cleanedPart.split(/\s+/);
+        }
+        const lower = cleanedPart.toLowerCase();
+        if (ignoreList.has(lower) || knownLower.has(lower)) continue;
+        const firstWord = words[0].toLowerCase();
+        if (ignoreList.has(firstWord) && firstWord !== "the" && firstWord !== "a" && firstWord !== "an") {
+          continue;
+        }
+        let isSubName = false;
+        for (const known of knownNames) {
+          const kl = known.toLowerCase();
+          if (kl !== lower && (kl.startsWith(lower + " ") || kl.endsWith(" " + lower))) {
+            isSubName = true;
+            break;
+          }
+        }
+        if (isSubName) continue;
+        if (words.length === 1) {
+          const docLower = three_default(lower);
+          if (!docLower.match("#ProperNoun").found) {
+            if (docLower.match("#Verb|#Adjective|#Adverb|#Pronoun|#Conjunction|#Preposition").found) {
+              continue;
+            }
+          }
+        }
+        if (!candidates.includes(cleanedPart)) {
+          candidates.push(cleanedPart);
+        }
       }
     }
     const filtered = [];
@@ -22634,12 +22794,21 @@ ${e2.text}` : e2.text;
       }
       for (const v2 of versions) {
         if (v2.source === "card" && !v2.cardId) {
-          let match2 = cards.find((c2) => c2.title && c2.title.trim().toLowerCase() === v2.characterName.trim().toLowerCase());
+          let match2 = cards.find((c2) => {
+            const titleMatch = c2.title && c2.title.trim().toLowerCase() === v2.characterName.trim().toLowerCase();
+            if (!titleMatch) return false;
+            return !v2.cardType || c2.type === v2.cardType;
+          });
           if (!match2) {
             match2 = cards.find((c2) => {
               const keysList = (c2.keys || "").split(/[,;]+/).map((k2) => k2.trim().toLowerCase()).filter(Boolean);
-              return keysList.includes(v2.characterName.trim().toLowerCase());
+              const keysMatch = keysList.includes(v2.characterName.trim().toLowerCase());
+              if (!keysMatch) return false;
+              return !v2.cardType || c2.type === v2.cardType;
             });
+          }
+          if (!match2) {
+            match2 = cards.find((c2) => c2.title && c2.title.trim().toLowerCase() === v2.characterName.trim().toLowerCase());
           }
           if (match2) {
             v2.cardId = match2.id;
@@ -22654,9 +22823,19 @@ ${e2.text}` : e2.text;
         const card = cards.find((c2) => c2.id === cid && c2.deletedAt == null);
         if (!card) continue;
         const currentName = card.title || card.keys;
+        const currentType = card.type || "character";
+        let dirty = false;
         if (currentName && v2.characterName !== currentName) {
           dlog(`[AID bg] Card ${cid} renamed: migrating version history "${v2.characterName}" -> "${currentName}".`);
           v2.characterName = currentName;
+          dirty = true;
+        }
+        if (v2.cardType !== currentType) {
+          dlog(`[AID bg] Card ${cid} type changed: migrating version history cardType "${v2.cardType}" -> "${currentType}".`);
+          v2.cardType = currentType;
+          dirty = true;
+        }
+        if (dirty) {
           await repo.putVersion(v2);
         }
       }
@@ -22695,10 +22874,11 @@ ${e2.text}` : e2.text;
         let isSeen = false;
         if (e2.cardId) {
           isSeen = seenKeys.has(`id:${e2.cardId}`);
-        } else if (e2.type && seenKeys.has(`name-type:${e2.name.trim().toLowerCase()}:${e2.type.toLowerCase()}`)) {
-          isSeen = true;
-        } else if (seenKeys.has(`name:${e2.name.trim().toLowerCase()}`)) {
-          isSeen = true;
+          if (!isSeen && e2.type) {
+            isSeen = seenKeys.has(`name-type:${e2.name.trim().toLowerCase()}:${e2.type.toLowerCase()}`);
+          }
+        } else {
+          isSeen = seenKeys.has(`name:${e2.name.trim().toLowerCase()}`);
         }
         if (!isSeen) {
           const nv = {
@@ -24718,7 +24898,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
             const currentAIN = currentInstructions.custom || "";
             const adv = await repo.getAdventure(shortId);
             const protagonist = adv?.protagonistName && adv.protagonistName.trim() || parseProtagonistName(currentPE) || "the player character";
-            const processedText = text.replace(/\$\{character\.name\}/g, protagonist).replace(/\{protagonist\}/g, protagonist);
+            const processedText = text.replace(/\$\{character\.name\}/g, protagonist).replace(/\{protagonist\}/gi, protagonist);
             let toAppend = processedText;
             if (itemType === "bullet") {
               toAppend = `- ${processedText}`;
@@ -24877,6 +25057,14 @@ ${toAppend}` : toAppend;
               if (shortId && memory) {
                 dlog("[AID bg] Automatically captured memory from UpdateAdventurePlot for shortId:", shortId);
                 await repo.upsertAdventure({ shortId, memory });
+              }
+            }
+            if (op.operationName === "UpdateAdventureState") {
+              const shortId = vars?.input?.shortId;
+              const instructions = vars?.input?.state?.instructions?.custom;
+              if (shortId && typeof instructions === "string") {
+                dlog("[AID bg] Automatically captured instructions from UpdateAdventureState for shortId:", shortId);
+                await repo.upsertAdventure({ shortId, instructions });
               }
             }
           }

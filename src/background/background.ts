@@ -107,7 +107,19 @@ export function deStutter(text: string): string {
 }
 
 export function detectProperNouns(text: string, knownNames: string[], lexiconNames: string[] = []): string[] {
-  text = deStutter(text);
+  // Preprocess text to strip metadata/commands:
+  // 1. Remove bracketed text [...]
+  // 2. Remove braced text {...}
+  // 3. Remove parenthesized text (...)
+  // 4. Remove slash commands and tokens starting with /
+  let cleanedText = text
+    .replace(/\[[\s\S]*?\]/g, ' ')
+    .replace(/\{[\s\S]*?\}/g, ' ')
+    .replace(/\([\s\S]*?\)/g, ' ')
+    .replace(/\/\S+/g, ' ');
+
+  cleanedText = deStutter(cleanedText);
+
   const lexicon: Record<string, string> = {};
   const allLexicon = new Set<string>();
   for (const name of knownNames) {
@@ -126,7 +138,7 @@ export function detectProperNouns(text: string, knownNames: string[], lexiconNam
     }
   }
 
-  const doc = nlp(text, lexicon);
+  const doc = nlp(cleanedText, lexicon);
   const ignoreList = new Set([
     "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours", "yourself", "yourselves",
     "he", "him", "his", "himself", "she", "her", "hers", "herself", "it", "its", "itself", "they", "them", "their",
@@ -148,7 +160,25 @@ export function detectProperNouns(text: string, knownNames: string[], lexiconNam
     
     // Common noise
     "egyptian", "mayan", "millennials", "millennial", "generation", "generations", "soul", "souls", "audi",
-    "truth", "divine", "creator", "light", "sanctuary", "shepherd", "solar", "threshold", "materials", "group", "collective", "empire", "council", "path", "logos", "adversary", "inner", "circle", "law", "one", "theory", "string"
+    "truth", "divine", "creator", "light", "sanctuary", "shepherd", "solar", "threshold", "materials", "group", "collective", "empire", "council", "path", "logos", "adversary", "inner", "circle", "law", "one", "theory", "string",
+
+    // Added common words / noise from logs
+    "like", "right", "truly", "besides", "success", "forcing", "force", "wait", "perhaps", "sure", "actually",
+    "basically", "honestly", "really", "simply", "very", "quite", "already", "still", "even", "also", "always",
+    "never", "often", "sometimes", "usually", "finally", "suddenly", "meanwhile", "next", "then", "now", "first",
+    "second", "third", "last", "again", "pat", "grace", "yang", "gale", "spike", "skip", "let", "mark",
+    "box", "boxes", "mystery", "mysteries", "hello", "hi", "hey", "bye", "goodbye",
+
+    // Metadata & UI terms
+    "block", "page", "chapter", "part", "scene", "turn", "action", "status", "error", "warning", "info", "debug",
+    "config", "configure", "setting", "settings", "option", "options", "mode", "modes", "value", "values", "key",
+    "keys", "title", "description", "note", "notes", "intake", "thought", "thoughts", "character", "characters",
+    "location", "locations", "card", "cards", "story", "storycard", "storycards", "helper", "system", "tool",
+    "version", "database", "explorer", "bucket", "favorite", "favorites", "global", "local", "item", "items",
+    "type", "types", "class", "faction", "event", "events", "command", "commands", "prompt", "prompts", "guide",
+    "guides", "user", "player", "protagonist", "vocals", "intro", "outro", "chorus", "verse", "solo", "guitar",
+    "drum", "drums", "bass", "piano", "melody", "rhythm", "lyrics", "tempo", "breakdown", "transition",
+    "transitions", "climax", "continuation"
   ]);
 
   const knownLower = new Set(knownNames.map(n => n.toLowerCase().trim()));
@@ -156,60 +186,80 @@ export function detectProperNouns(text: string, knownNames: string[], lexiconNam
   const rawTerms: string[] = [];
   const escapeRe = (s: string) => s.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
 
-  // Custom match pattern for proper nouns with optional prepositions/determiners
   doc.match('#ProperNoun+ (of|the|a|an)* #ProperNoun+').out('array').forEach((s: string) => rawTerms.push(s));
   doc.match('#ProperNoun+').out('array').forEach((s: string) => rawTerms.push(s));
 
   for (const raw of rawTerms) {
-    let cleaned = raw.replace(/^[“"']+|[.”"';,!?]+$/g, '').trim();
-    if (cleaned.length < 3) continue;
+    // 1. Normalize curly quotes/apostrophes
+    let cleaned = raw.replace(/[’‘]/g, "'").replace(/[“”]/g, '"');
 
-    // Ignore if it's all uppercase and length > 4 (usually acronyms or headers like "SCENE I")
-    if (cleaned === cleaned.toUpperCase() && cleaned.length > 4) continue;
+    // 2. Strip possessives
+    cleaned = cleaned.replace(/'s\b/gi, '').trim();
+    cleaned = cleaned.replace(/'(?=\s|$)/g, '').trim();
 
-    // Strip trailing pronoun "I" (e.g., "Bigfoot I" -> "Bigfoot", "Everything I" -> "Everything")
-    let words = cleaned.split(/\s+/);
-    if (words.length > 1 && words[words.length - 1] === "I") {
-      words.pop();
-      cleaned = words.join(" ");
-      words = cleaned.split(/\s+/);
-    }
+    // 3. Split on punctuation/symbol boundaries (excluding hyphens and internal apostrophes)
+    const delimiters = /[.,\/#!$%\^&\*;:{}=\_`~()\[\]\"—–?|<>]+/;
+    const parts = cleaned.split(delimiters)
+      .map(p => p.replace(/^[-']+|[-']+$/g, '').trim())
+      .filter(p => p.length >= 3);
 
-    // Extend designations BEFORE the known-name/sub-name filters: the NLP truncates "Building J",
-    // "Unit B", "Apartment 4C" to the bare noun (it won't tag a trailing lone letter/number). If
-    // the noun is immediately followed by a standalone designator token (single uppercase letter
-    // ±2 digits, or 1-3 digits ±a letter — J, B, A1, 4C), re-attach it. Doing this BEFORE the
-    // filters matters: a bare "Building" would otherwise be dropped as a known key / sub-name of
-    // "Slimey's Apartment Building", so "Building J" would never form. The negative lookahead keeps
-    // "Building Justin" (a name) from extending; a bare "I" is the pronoun, not a designator.
-    const dm = new RegExp(`\\b${escapeRe(cleaned)}\\s+([A-Z]\\d{0,2}|\\d{1,3}[A-Z]?)(?![A-Za-z0-9])`).exec(text);
-    if (dm && dm[1] !== "I") {
-      cleaned = `${cleaned} ${dm[1]}`;
-      words = cleaned.split(/\s+/);
-    }
+    for (const part of parts) {
+      // Ignore if it starts with a lowercase letter (proper nouns must be capitalized) unless defined in the lexicon
+      if (/^[a-z]/.test(part) && !allLexicon.has(part.toLowerCase())) continue;
 
-    // Exclude if the entire term or its first word is in our ignore list
-    const lower = cleaned.toLowerCase();
-    if (ignoreList.has(lower) || knownLower.has(lower)) continue;
+      // Ignore if it's all uppercase and length > 4 (acronyms or headers like "SCENE I")
+      if (part === part.toUpperCase() && part.length > 4) continue;
 
-    const firstWord = words[0]!.toLowerCase();
-    if (ignoreList.has(firstWord) && firstWord !== "the" && firstWord !== "a" && firstWord !== "an") {
-      continue;
-    }
+      let cleanedPart = part;
+      let words = cleanedPart.split(/\s+/);
 
-    // Check sub-names of known names (e.g. ignore "Blake" if "Nathaniel Blake" is known)
-    let isSubName = false;
-    for (const known of knownNames) {
-      const kl = known.toLowerCase();
-      if (kl !== lower && (kl.startsWith(lower + " ") || kl.endsWith(" " + lower))) {
-        isSubName = true;
-        break;
+      // Strip trailing pronoun "I"
+      if (words.length > 1 && words[words.length - 1] === "I") {
+        words.pop();
+        cleanedPart = words.join(" ");
+        words = cleanedPart.split(/\s+/);
       }
-    }
-    if (isSubName) continue;
 
-    if (!candidates.includes(cleaned)) {
-      candidates.push(cleaned);
+      // Extend designations
+      const dm = new RegExp(`\\b${escapeRe(cleanedPart)}\\s+([A-Z]\\d{0,2}|\\d{1,3}[A-Z]?)(?![A-Za-z0-9])`).exec(cleanedText);
+      if (dm && dm[1] !== "I") {
+        cleanedPart = `${cleanedPart} ${dm[1]}`;
+        words = cleanedPart.split(/\s+/);
+      }
+
+      const lower = cleanedPart.toLowerCase();
+      if (ignoreList.has(lower) || knownLower.has(lower)) continue;
+
+      const firstWord = words[0]!.toLowerCase();
+      if (ignoreList.has(firstWord) && firstWord !== "the" && firstWord !== "a" && firstWord !== "an") {
+        continue;
+      }
+
+      // Check sub-names of known names
+      let isSubName = false;
+      for (const known of knownNames) {
+        const kl = known.toLowerCase();
+        if (kl !== lower && (kl.startsWith(lower + " ") || kl.endsWith(" " + lower))) {
+          isSubName = true;
+          break;
+        }
+      }
+      if (isSubName) continue;
+
+      // POS-tag Filter for single-word candidates: if it's a verb/adjective/adverb/etc. in lowercase form
+      // and not considered a proper noun by compromise.js, filter it out.
+      if (words.length === 1) {
+        const docLower = nlp(lower);
+        if (!docLower.match('#ProperNoun').found) {
+          if (docLower.match('#Verb|#Adjective|#Adverb|#Pronoun|#Conjunction|#Preposition').found) {
+            continue;
+          }
+        }
+      }
+
+      if (!candidates.includes(cleanedPart)) {
+        candidates.push(cleanedPart);
+      }
     }
   }
 
@@ -828,12 +878,21 @@ async function seedBaselines(
   // Backfill cardId and cardType for older version records in IndexedDB
   for (const v of versions) {
     if (v.source === "card" && !(v as any).cardId) {
-      let match = cards.find(c => c.title && c.title.trim().toLowerCase() === v.characterName.trim().toLowerCase());
+      let match = cards.find(c => {
+        const titleMatch = c.title && c.title.trim().toLowerCase() === v.characterName.trim().toLowerCase();
+        if (!titleMatch) return false;
+        return !(v as any).cardType || c.type === (v as any).cardType;
+      });
       if (!match) {
         match = cards.find(c => {
           const keysList = (c.keys || "").split(/[,;]+/).map(k => k.trim().toLowerCase()).filter(Boolean);
-          return keysList.includes(v.characterName.trim().toLowerCase());
+          const keysMatch = keysList.includes(v.characterName.trim().toLowerCase());
+          if (!keysMatch) return false;
+          return !(v as any).cardType || c.type === (v as any).cardType;
         });
+      }
+      if (!match) {
+        match = cards.find(c => c.title && c.title.trim().toLowerCase() === v.characterName.trim().toLowerCase());
       }
       if (match) {
         (v as any).cardId = match.id;
@@ -843,20 +902,30 @@ async function seedBaselines(
     }
   }
 
-  // Follow card RENAMES: versions are keyed by characterName, so renaming a card in AID
+  // Follow card RENAMES and TYPE CHANGES: versions are keyed by characterName, so renaming a card in AID
   // orphans its history under the old title (a "ghost" roster entry stuck at its old action
   // count) AND resets the auto-update due-predicate for the new title (past updates stop
   // counting, so the card re-triggers every turn). Versions carry cardId — re-point them
-  // at the card's CURRENT title so history merges and the ghost disappears.
+  // at the card's CURRENT title and type so history merges and the ghost disappears.
   for (const v of versions) {
     const cid = (v as any).cardId;
     if (!cid || v.source !== "card") continue;
     const card = cards.find((c) => c.id === cid && c.deletedAt == null);
     if (!card) continue; // deleted cards keep their historical name (Archived view)
     const currentName = card.title || card.keys;
+    const currentType = card.type || "character";
+    let dirty = false;
     if (currentName && v.characterName !== currentName) {
       dlog(`[AID bg] Card ${cid} renamed: migrating version history "${v.characterName}" -> "${currentName}".`);
       v.characterName = currentName;
+      dirty = true;
+    }
+    if ((v as any).cardType !== currentType) {
+      dlog(`[AID bg] Card ${cid} type changed: migrating version history cardType "${(v as any).cardType}" -> "${currentType}".`);
+      (v as any).cardType = currentType;
+      dirty = true;
+    }
+    if (dirty) {
       await repo.putVersion(v);
     }
   }
@@ -902,12 +971,11 @@ async function seedBaselines(
       // across categories (e.g. a Character "Adrian" and a Plan "Adrian"); each must get its own
       // baseline. Never fall through to the bare-name check for a card that carries a cardId.
       isSeen = seenKeys.has(`id:${e.cardId}`);
-    } else if (e.type && seenKeys.has(`name-type:${e.name.trim().toLowerCase()}:${e.type.toLowerCase()}`)) {
-      isSeen = true;
-    } else if (seenKeys.has(`name:${e.name.trim().toLowerCase()}`)) {
-      // Cardless entries (Plot Essentials blocks) still collapse by name so a person tracked as
-      // both a Plot block and a Story Card is not double-seeded.
-      isSeen = true;
+      if (!isSeen && e.type) {
+        isSeen = seenKeys.has(`name-type:${e.name.trim().toLowerCase()}:${e.type.toLowerCase()}`);
+      }
+    } else {
+      isSeen = seenKeys.has(`name:${e.name.trim().toLowerCase()}`);
     }
 
     if (!isSeen) {
@@ -3295,7 +3363,7 @@ async function handleMessage(msg: BgMessage): Promise<any> {
 
           const processedText = text
             .replace(/\$\{character\.name\}/g, protagonist)
-            .replace(/\{protagonist\}/g, protagonist);
+            .replace(/\{protagonist\}/gi, protagonist);
           let toAppend = processedText;
           if (itemType === "bullet") {
             toAppend = `- ${processedText}`;
@@ -3467,6 +3535,14 @@ async function handleMessage(msg: BgMessage): Promise<any> {
             if (shortId && memory) {
               dlog("[AID bg] Automatically captured memory from UpdateAdventurePlot for shortId:", shortId);
               await repo.upsertAdventure({ shortId, memory });
+            }
+          }
+          if (op.operationName === "UpdateAdventureState") {
+            const shortId = vars?.input?.shortId;
+            const instructions = vars?.input?.state?.instructions?.custom;
+            if (shortId && typeof instructions === "string") {
+              dlog("[AID bg] Automatically captured instructions from UpdateAdventureState for shortId:", shortId);
+              await repo.upsertAdventure({ shortId, instructions });
             }
           }
         }

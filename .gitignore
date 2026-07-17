@@ -16,6 +16,10 @@ skills/
 docs/
 /C
 
+# IDE / editor
+.idea/
+.vscode/
+
 # OS cruft
 .DS_Store
 Thumbs.db

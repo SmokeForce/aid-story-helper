@@ -249,7 +249,7 @@ import { pickActiveField } from "./gui-edit";
     return null;
   }
 
-  const pendingActionResolvers = new Map<string, (val: string[]) => void>();
+  const pendingActionResolvers = new Map<string, (val: { updatedNames: string[]; injectText: string }) => void>();
   const adventureIdMap = new Map<string, string>();
 
   function getShortIdFromAdventureId(advId: string): string {
@@ -782,6 +782,42 @@ import { pickActiveField } from "./gui-edit";
     }
 
     if (ev.data?.source !== "aid-extension-host") return;
+    if (ev.data?.kind === "fillSetupInput" && typeof ev.data.value === "string") {
+      let typeHereInput = document.querySelector('input[placeholder*="Type here"], textarea[placeholder*="Type here"]') as HTMLInputElement | HTMLTextAreaElement | null;
+      if (!typeHereInput) {
+        // Fallback: find any visible text input or textarea in the main document
+        const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea')) as (HTMLInputElement | HTMLTextAreaElement)[];
+        typeHereInput = inputs.find(el => {
+          if (el.getRootNode() !== document) return false;
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return false;
+          const id = (el.id || "").toLowerCase();
+          const cls = (el.className || "").toLowerCase();
+          const placeholder = (el.getAttribute("placeholder") || "").toLowerCase();
+          if (id.includes("search") || cls.includes("search") || placeholder.includes("search")) return false;
+          return true;
+        }) || null;
+      }
+      if (typeHereInput) {
+        const current = typeHereInput.value || "";
+        let newValue = ev.data.value;
+        const trimmed = current.trim();
+        if (trimmed) {
+          let separator = ", ";
+          if (trimmed.endsWith(",")) {
+            separator = " ";
+          }
+          // If the new value starts with a bullet point "-" or the current value contains list items/newlines, use a newline separator
+          if (newValue.startsWith("-") || trimmed.includes("\n") || trimmed.startsWith("-")) {
+            separator = "\n";
+          }
+          newValue = trimmed + separator + newValue;
+        }
+        setReactInputValue(typeHereInput, newValue);
+        dlog("[AID injected] Programmatically filled setup input via postMessage (additive):", newValue);
+      }
+      return;
+    }
     if (ev.data?.kind === "seedApprovedCards" && Array.isArray(ev.data.cards)) {
       try {
         let client = getApolloClient();
@@ -990,7 +1026,7 @@ import { pickActiveField } from "./gui-edit";
       const resolve = pendingActionResolvers.get(ev.data.requestId);
       if (resolve) {
         pendingActionResolvers.delete(ev.data.requestId);
-        resolve(ev.data.updatedNames || []);
+        resolve({ updatedNames: ev.data.updatedNames || [], injectText: ev.data.injectText || "" });
       }
     }
     if (ev.data?.kind === "settingsUpdate") {
@@ -1057,9 +1093,9 @@ import { pickActiveField } from "./gui-edit";
     }
   }
 
-  async function maybeInterceptAction(batch: any[]): Promise<string[]> {
+  async function maybeInterceptAction(batch: any[]): Promise<{ updatedNames: string[]; injected: boolean }> {
     const actionReq = batch.find((item: any) => item.operationName === "ActionRequest");
-    if (!actionReq) return [];
+    if (!actionReq) return { updatedNames: [], injected: false };
 
     const actionInput = actionReq.variables?.input;
     const actionText = actionInput?.text;
@@ -1099,7 +1135,7 @@ import { pickActiveField } from "./gui-edit";
       setPlaceholderText("[MemorAID] Character is reflecting...");
 
       var requestId = Math.random().toString(36).substring(7);
-      var promise = new Promise<string[]>((resolve) => {
+      var promise = new Promise<{ updatedNames: string[]; injectText: string }>((resolve) => {
         pendingActionResolvers.set(requestId, resolve);
       });
 
@@ -1119,11 +1155,22 @@ import { pickActiveField } from "./gui-edit";
           pendingActionResolvers.delete(requestId);
           timedOut = true;
           restorePlaceholder();
-          resolve([]);
+          resolve({ updatedNames: [], injectText: "" });
         }
       }, interceptTimeoutMs);
 
-      const updatedNames = await promise;
+      const { updatedNames, injectText } = await promise;
+
+      // Append the Living Characters directive to the outgoing action text. Mutating actionInput is
+      // enough for the fetch path (the caller re-serializes init.body when injected); the XHR/WebSocket
+      // paths re-send the raw body, so injection applies on the fetch transport only.
+      let injected = false;
+      if (injectText && actionInput && typeof actionInput.text === "string") {
+        actionInput.text = `${actionInput.text} ${injectText}`.trim();
+        injected = true;
+        dlog("[AID injected] Appended Living Characters directive to outgoing action.");
+      }
+
       if (!timedOut) {
         clearTimeout(timeoutId);
         dlog(`[AID injected] Interception approved after ${Date.now() - startTime}ms. updatedNames:`, updatedNames);
@@ -1133,9 +1180,9 @@ import { pickActiveField } from "./gui-edit";
           restorePlaceholder();
         }
       }
-      return updatedNames;
+      return { updatedNames, injected };
     }
-    return [];
+    return { updatedNames: [], injected: false };
   }
 
   // --- fetch ---
@@ -1156,9 +1203,12 @@ import { pickActiveField } from "./gui-edit";
         const batch = Array.isArray(bodyObj) ? bodyObj : [bodyObj];
 
         // 1. Intercept player action (ActionRequest) for MemorAID pre-run thought generation
+        //    and Living Characters prompt-injection directive append.
+        let actionInjected = false;
         const actionReq = batch.find((item: any) => item.operationName === "ActionRequest");
         if (actionReq) {
-          await maybeInterceptAction(batch);
+          const r = await maybeInterceptAction(batch);
+          actionInjected = r.injected;
         }
 
         // 2. Perform client-side GraphQL Deduplication & Debouncing
@@ -1287,9 +1337,10 @@ import { pickActiveField } from "./gui-edit";
           }
         }
 
-        // A rewritten Plot Essentials payload must be re-serialized for the non-stripped send
-        // path (the stripped path rebuilds its body from itemsToSend refs and picks it up).
-        if (plotRewritten) {
+        // A rewritten Plot Essentials payload (or an injected action) must be re-serialized for the
+        // non-stripped send path (the stripped path rebuilds its body from itemsToSend refs and picks
+        // it up).
+        if (plotRewritten || actionInjected) {
           init.body = JSON.stringify(bodyObj);
         }
 

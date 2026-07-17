@@ -165,9 +165,36 @@ describe("Repo settings migration", () => {
 
     const s = await repo.getSettings();
     expect(s?.cardCommands?.memoraid).not.toBe(oldTemplate);
-    // Markers of the current default template (exemplified Intake/Thought/Action format).
+    // Markers of the current default: the two-bullet Intake/Thought lens with the OFFSTAGE presence gate.
     expect(s?.cardCommands?.memoraid).toContain("- Intake:");
-    expect(s?.cardCommands?.memoraid).toContain("NOT a character profile");
+    expect(s?.cardCommands?.memoraid).toContain("output exactly OFFSTAGE");
+    expect(s?.cardCommands?.memoraid).not.toContain("- Action:");
+  });
+
+  it("migrates the legacy manualMode toggle to enableAutomaticUpdates (positive polarity)", async () => {
+    const repo = new Repo();
+    // A user who UNchecked manual mode wanted automatic updates → enableAutomaticUpdates true.
+    await repo.setSettings({ provider: "claude", manualMode: false } as any);
+    const s1 = await repo.getSettings();
+    expect(s1?.enableAutomaticUpdates).toBe(true);
+    expect((s1 as any)?.manualMode).toBeUndefined();
+  });
+
+  it("migrates manualMode=true (was suppressing updates) to enableAutomaticUpdates=false", async () => {
+    const repo = new Repo();
+    await repo.setSettings({ provider: "claude", manualMode: true } as any);
+    const s = await repo.getSettings();
+    expect(s?.enableAutomaticUpdates).toBe(false);
+    expect((s as any)?.manualMode).toBeUndefined();
+  });
+
+  it("does not override an already-set enableAutomaticUpdates during manualMode migration", async () => {
+    const repo = new Repo();
+    // User explicitly unchecked "Enable Automatic Updates" (false) but a stale manualMode lingers.
+    await repo.setSettings({ provider: "claude", manualMode: false, enableAutomaticUpdates: false } as any);
+    const s = await repo.getSettings();
+    expect(s?.enableAutomaticUpdates).toBe(false); // explicit choice wins; not clobbered to true
+    expect((s as any)?.manualMode).toBeUndefined();
   });
 
   it("automatically migrates the historical location default to the hierarchy-aware template", async () => {

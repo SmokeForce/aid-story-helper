@@ -21,6 +21,7 @@ await build({
   bundle: true,
   format: "iife",
   target: "firefox115",
+  legalComments: "inline", // preserve @license/@preserve notices (e.g. the MIT-licensed Living Characters engine) in the bundle
   logLevel: "info",
 });
 
@@ -31,6 +32,7 @@ await build({
   bundle: true,
   format: "iife",
   target: "firefox115",
+  legalComments: "inline", // preserve @license/@preserve notices (e.g. the MIT-licensed Living Characters engine) in the bundle
   logLevel: "info",
 });
 

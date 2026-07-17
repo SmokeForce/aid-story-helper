@@ -693,6 +693,40 @@
         return;
       }
       if (ev.data?.source !== "aid-extension-host") return;
+      if (ev.data?.kind === "fillSetupInput" && typeof ev.data.value === "string") {
+        let typeHereInput = document.querySelector('input[placeholder*="Type here"], textarea[placeholder*="Type here"]');
+        if (!typeHereInput) {
+          const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea'));
+          typeHereInput = inputs.find((el) => {
+            if (el.getRootNode() !== document) return false;
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return false;
+            const id = (el.id || "").toLowerCase();
+            const cls = (el.className || "").toLowerCase();
+            const placeholder = (el.getAttribute("placeholder") || "").toLowerCase();
+            if (id.includes("search") || cls.includes("search") || placeholder.includes("search")) return false;
+            return true;
+          }) || null;
+        }
+        if (typeHereInput) {
+          const current = typeHereInput.value || "";
+          let newValue = ev.data.value;
+          const trimmed = current.trim();
+          if (trimmed) {
+            let separator = ", ";
+            if (trimmed.endsWith(",")) {
+              separator = " ";
+            }
+            if (newValue.startsWith("-") || trimmed.includes("\n") || trimmed.startsWith("-")) {
+              separator = "\n";
+            }
+            newValue = trimmed + separator + newValue;
+          }
+          setReactInputValue(typeHereInput, newValue);
+          dlog("[AID injected] Programmatically filled setup input via postMessage (additive):", newValue);
+        }
+        return;
+      }
       if (ev.data?.kind === "seedApprovedCards" && Array.isArray(ev.data.cards)) {
         try {
           let client = getApolloClient();
@@ -908,7 +942,7 @@
         const resolve = pendingActionResolvers.get(ev.data.requestId);
         if (resolve) {
           pendingActionResolvers.delete(ev.data.requestId);
-          resolve(ev.data.updatedNames || []);
+          resolve({ updatedNames: ev.data.updatedNames || [], injectText: ev.data.injectText || "" });
         }
       }
       if (ev.data?.kind === "settingsUpdate") {
@@ -969,7 +1003,7 @@
     }
     async function maybeInterceptAction(batch) {
       const actionReq = batch.find((item) => item.operationName === "ActionRequest");
-      if (!actionReq) return [];
+      if (!actionReq) return { updatedNames: [], injected: false };
       const actionInput = actionReq.variables?.input;
       const actionText = actionInput?.text;
       const actionType = actionInput?.type;
@@ -1018,10 +1052,16 @@
             pendingActionResolvers.delete(requestId);
             timedOut = true;
             restorePlaceholder();
-            resolve([]);
+            resolve({ updatedNames: [], injectText: "" });
           }
         }, interceptTimeoutMs);
-        const updatedNames = await promise;
+        const { updatedNames, injectText } = await promise;
+        let injected = false;
+        if (injectText && actionInput && typeof actionInput.text === "string") {
+          actionInput.text = `${actionInput.text} ${injectText}`.trim();
+          injected = true;
+          dlog("[AID injected] Appended Living Characters directive to outgoing action.");
+        }
         if (!timedOut) {
           clearTimeout(timeoutId);
           dlog(`[AID injected] Interception approved after ${Date.now() - startTime}ms. updatedNames:`, updatedNames);
@@ -1031,9 +1071,9 @@
             restorePlaceholder();
           }
         }
-        return updatedNames;
+        return { updatedNames, injected };
       }
-      return [];
+      return { updatedNames: [], injected: false };
     }
     const _fetch = window.fetch;
     window.fetch = async function(input, init) {
@@ -1047,9 +1087,11 @@
         try {
           const bodyObj = JSON.parse(init.body);
           const batch = Array.isArray(bodyObj) ? bodyObj : [bodyObj];
+          let actionInjected = false;
           const actionReq = batch.find((item) => item.operationName === "ActionRequest");
           if (actionReq) {
-            await maybeInterceptAction(batch);
+            const r = await maybeInterceptAction(batch);
+            actionInjected = r.injected;
           }
           if (lastSentWrites.size > 200) {
             const threshold = Date.now() - WRITE_DEBOUNCE_MS * 2;
@@ -1147,7 +1189,7 @@
               itemsToSend.push(item);
             }
           }
-          if (plotRewritten) {
+          if (plotRewritten || actionInjected) {
             init.body = JSON.stringify(bodyObj);
           }
           if (hasCardWrites && itemsToSend.length < batch.length) {

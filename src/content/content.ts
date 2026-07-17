@@ -1,30 +1,138 @@
+import { browser } from "./browser-helper";
 import { mountPanel } from "./panel";
 import type { ActionUpdatePayload } from "../shared/types";
-import type { BgMessage } from "../background/orchestrator";
-import { browser } from "./browser-helper";
+import type { BgMessage, BgResult } from "../background/orchestrator";
 
 // The interceptor runs as a separate MAIN-world content script (manifest), so it installs
 // before the page's app boots and beats the page CSP. This script only bridges its
 // window.postMessage events to the background.
 
+function isContextValid(): boolean {
+  try {
+    if (typeof browser === "undefined" || !browser.runtime) {
+      return false;
+    }
+    browser.runtime.getManifest();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 let activeShortId: string | null = null;
+let lastKnownActionCount: number | null = null;
 const autoBackfillsInFlight = new Set<string>();
+
+function detectSetupQuestion(actionCount?: number) {
+  // If the game has already initialized actions, setup is complete.
+  if (actionCount != null && actionCount > 0) return null;
+
+  // Text question input check (Type here... input active; case-insensitive placeholder check)
+  let typeHereInput = document.querySelector('input[placeholder*="Type here" i], textarea[placeholder*="Type here" i]') as HTMLInputElement | HTMLTextAreaElement | null;
+  if (!typeHereInput) {
+    // Fallback: find any visible text input or textarea in the main document
+    const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea')) as (HTMLInputElement | HTMLTextAreaElement)[];
+    typeHereInput = inputs.find(el => {
+      // Ensure it is in the main document (not inside any Shadow DOM like our side panel)
+      if (el.getRootNode() !== document) return false;
+      // Ensure it is visible
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return false;
+      // Skip if it's a search input or something similar
+      const id = (el.id || "").toLowerCase();
+      const cls = (el.className || "").toLowerCase();
+      const placeholder = (el.getAttribute("placeholder") || "").toLowerCase();
+      if (id.includes("search") || cls.includes("search") || placeholder.includes("search")) return false;
+      return true;
+    }) || null;
+  }
+
+  if (typeHereInput) {
+    let questionText = "";
+    const parentContainer = typeHereInput.closest('div');
+    if (parentContainer) {
+      const texts = Array.from(parentContainer.querySelectorAll('p, span, h1, h2, h3, h4, div'))
+        .map(el => el.textContent?.trim() || "")
+        .filter(t => t && t.length > 5 && !t.toLowerCase().includes('type here') && !t.includes('NEXT') && !t.includes('FINISH'));
+      if (texts.length > 0) {
+        questionText = texts[0] || "";
+      }
+    }
+    return {
+      type: "text" as const,
+      question: questionText || "Enter setup placeholder",
+      inputEl: typeHereInput
+    };
+  }
+
+  // Multiple Choice check (Numbered option buttons active)
+  // Scans a broad set of elements and filters out parent wrappers to isolate the leaf choice button elements
+  const candidates = Array.from(document.querySelectorAll('div, button, a, [role="button"], li, span'));
+  const choiceButtons = candidates.filter(btn => {
+    const text = btn.textContent?.trim() || "";
+    if (text.length > 80) return false;
+    
+    // Support relaxed digit format for concatenated text contents (like "1Inner Monologue")
+    const isChoiceFormat = /^\d+\s*[\s\.\:\)\-]?\s*[A-Za-z]/.test(text) || 
+                           /^\(\d+\)/.test(text) ||
+                           /^\d+$/.test(text);
+    if (!isChoiceFormat) return false;
+    
+    // Skip parent wrappers by checking if any child element is also a choice option
+    const children = Array.from(btn.querySelectorAll('div, button, a, li, span'));
+    const hasChildChoice = children.some(child => {
+      const childText = child.textContent?.trim() || "";
+      return childText.length <= 80 && (
+        /^\d+\s*[\s\.\:\)\-]?\s*[A-Za-z]/.test(childText) || 
+        /^\(\d+\)/.test(childText) ||
+        /^\d+$/.test(childText)
+      );
+    });
+    
+    if (hasChildChoice) return false;
+    
+    return true;
+  }) as HTMLElement[];
+
+  if (choiceButtons.length > 0) {
+    let questionText = "";
+    const firstBtn = choiceButtons[0];
+    if (firstBtn) {
+      const parent = firstBtn.parentElement;
+      if (parent) {
+        const texts = Array.from(parent.querySelectorAll('h1, h2, h3, h4, p, span, div'))
+          .map(el => el.textContent?.trim() || "")
+          .filter(t => t && t.length > 5 && !choiceButtons.some(btn => (btn.textContent || "").includes(t)));
+        if (texts.length > 0) {
+          questionText = texts[0] || "";
+        }
+      }
+    }
+    return {
+      type: "choice" as const,
+      question: questionText || "Select setup choice",
+      buttons: choiceButtons
+    };
+  }
+
+  return null;
+}
 
 function checkIsPlayUrl(): boolean {
   // NOTE: `/scenario/...` is a published-scenario PREVIEW (Discover), NOT an active adventure —
   // playing a scenario creates a NEW adventure at `/play?adventureId=...`. Treating `/scenario/`
   // as a play page rendered the play tracker on preview pages and registered the scenario id as an
   // empty "Untitled Adventure". Excluded here so preview pages render manager-only and create nothing.
-  return location.pathname === "/play" || 
-         location.pathname.endsWith("/play") || 
-         location.pathname.startsWith("/play/") || 
+  return location.pathname === "/play" ||
+         location.pathname.endsWith("/play") ||
+         location.pathname.startsWith("/play/") ||
          location.pathname.startsWith("/adventure/");
 }
 
 // shortId from /adventure/{shortId}/... or /play/{shortId} (NOT /scenario/ — that's a preview id).
 function currentShortId(): string | null {
   const isPlayUrl = checkIsPlayUrl();
-  const m = location.pathname.match(/\/play\/([^/]+)/) || 
+  const m = location.pathname.match(/\/play\/([^/]+)/) ||
             location.pathname.match(/\/adventure\/([^/]+)/);
   if (m) return m[1]!;
 
@@ -41,6 +149,12 @@ function currentShortId(): string | null {
 }
 
 const panel = mountPanel();
+
+/** Typed round-trip for mutation-style background messages (validates the request against
+ *  BgMessage and gives the standard BgResult response shape instead of `any`). */
+function sendBg(msg: BgMessage): Promise<BgResult> {
+  return browser.runtime.sendMessage(msg) as Promise<BgResult>;
+}
 
 async function decompressSettings(payload: string): Promise<any> {
   if (payload.startsWith("gz:")) {
@@ -74,6 +188,7 @@ async function decompressSettings(payload: string): Promise<any> {
 }
 
 async function checkAndImportQrSettings() {
+  if (!isContextValid()) return;
   try {
     const urlParams = new URLSearchParams(window.location.search);
     const importPayload = urlParams.get("importSettings");
@@ -102,30 +217,20 @@ async function checkAndImportQrSettings() {
 }
 
 checkAndImportQrSettings();
-
 panel.onRefresh(() => {
   dlog("[AID content] Direct refresh requested by panel callback");
   refresh();
 });
-
-panel.onBackupAll(async () => {
-  return browser.runtime.sendMessage({ kind: "exportAll" });
-});
-
-panel.onRestoreAll(async (data) => {
-  const res = await browser.runtime.sendMessage({ kind: "importAll", data });
-  refresh();
-  return res;
-});
-
-panel.onSaveCardValue(async (cardId, value) => {
-  const sid = currentShortId();
-  if (!sid) return { error: "No active adventure." };
-  const res = await browser.runtime.sendMessage({ kind: "saveCardValue", shortId: sid, cardId, value });
-  refresh();
-  return res;
-});
 let count = 0;
+
+// Self-heal: an empty local DB usually means the extension's IndexedDB was wiped (e.g. swapping the
+// signed XPI for a test build changes the moz-extension origin). Prompt to restore from a backup file.
+(async () => {
+  try {
+    const res: any = await browser.runtime.sendMessage({ kind: "isDbEmpty" } satisfies BgMessage);
+    if (res?.empty) panel.showSelfHealBanner();
+  } catch { /* ignore */ }
+})();
 
 // Debug-gated logging: verbose info traces only print when "Show debug" is enabled (synced in
 // refresh() from state.settings.showDebug). warn/error stay ungated.
@@ -134,6 +239,7 @@ const _log = console.log.bind(console);
 function dlog(...args: unknown[]) { if (debugEnabled) _log(...args); }
 
 function send(msg: BgMessage) {
+  if (!isContextValid()) return;
   browser.runtime.sendMessage(msg).catch(() => {});
 }
 
@@ -153,6 +259,7 @@ function bufferActionUpdate(sid: string, payload: any) {
   }
   
   actionUpdateTimeout = setTimeout(() => {
+    if (!isContextValid()) return;
     if (accumulatedActions.length > 0 && lastActionPayload) {
       dlog(`[AID content] Sending debounced actionUpdate with ${accumulatedActions.length} actions.`);
       send({
@@ -168,8 +275,10 @@ function bufferActionUpdate(sid: string, payload: any) {
       // Surgical action count update instead of full refresh()
       browser.runtime.sendMessage({ kind: "getState", shortId: sid }).then((state: any) => {
         if (state) {
+          const actionCountVal = state.actionCount ?? state.actionsCount ?? 0;
+          lastKnownActionCount = actionCountVal;
           panel.updateActionCount(
-            state.actionCount ?? state.actionsCount ?? 0,
+            actionCountVal,
             state.lastAnalysisAction ?? null
           );
         }
@@ -189,9 +298,10 @@ function bufferMemoriesUpdate(sid: string, memories: any[]) {
   }
   
   memoriesUpdateTimeout = setTimeout(() => {
-    dlog(`[AID content] Sending debounced memoryBankUpdate with ${latestMemories.length} memories.`);
+    if (!isContextValid()) return;
+    dlog(`[AID content] Sending debounced adventureMemories with ${latestMemories.length} memories.`);
     send({
-      kind: "memoryBankUpdate",
+      kind: "adventureMemories",
       shortId: sid,
       memories: latestMemories
     });
@@ -201,21 +311,46 @@ function bufferMemoriesUpdate(sid: string, memories: any[]) {
 }
 
 async function refreshModels(current?: string) {
-  const res: any = await browser.runtime.sendMessage({ kind: "listModels" });
+  const res: any = await browser.runtime.sendMessage({ kind: "listModels" } satisfies BgMessage);
   panel.setModels(res?.models ?? [], current);
 }
 
 async function refresh() {
+  if (!isContextValid()) return;
   const sid = currentShortId();
   const isPlayUrl = checkIsPlayUrl();
-  
-  if (sid && isPlayUrl) {
-    const state: any = await browser.runtime.sendMessage({ kind: "getState", shortId: sid });
+  // Detect setup questions only on play pages — never on a /scenario/<id> Discover preview,
+  // which checkIsPlayUrl excludes (that page's like/bookmark badges and reaction shortcodes
+  // like `w_thumbsup` otherwise scrape as bogus questions/choices). The "no actions yet"
+  // requirement is enforced post-load below via the fresh actionCountVal, NOT a pre-gate on
+  // lastKnownActionCount (which can be stale from a previous adventure and wrongly suppress
+  // a genuine scenario-start question).
+  let activeQuestion = isPlayUrl ? detectSetupQuestion() : null;
+
+  if (activeQuestion || (sid && isPlayUrl)) {
+    const targetSid = sid || activeShortId;
+    let state: any = null;
+    if (targetSid) {
+      state = await browser.runtime.sendMessage({ kind: "getState", shortId: targetSid });
+    } else {
+      state = await browser.runtime.sendMessage({ kind: "getManagerData" });
+    }
+    
     if (state) {
       debugEnabled = !!state.settings?.showDebug; // keep verbose logging in sync with the user's setting
+      
+      // If the adventure already has actions, then setup phase is complete
+      const actionCountVal = state.actionCount ?? state.actionsCount ?? 0;
+      lastKnownActionCount = actionCountVal;
+      if (actionCountVal > 0) {
+        activeQuestion = null;
+      }
+      
       panel.render({
-        shortId: state.shortId || sid,
+        shortId: state.shortId || targetSid || undefined,
         protagonist: state.protagonist,
+        memoraidCharacters: state.memoraidCharacters ?? [],
+        livingConfig: state.livingConfig ?? {},
         scenario: state.scenario ?? null,
         settings: state.settings,
         versions: state.versions ?? [],
@@ -227,22 +362,32 @@ async function refresh() {
         actionsCount: state.actionsCount,
         actionCount: state.actionCount,
         lastAnalysisAction: state.lastAnalysisAction,
-        memoryBankEntries: state.memoryBankEntries ?? [],
+        // getState emits the Memory Bank list as `memoryBankEntries` (renamed from `aidMemories`);
+        // the panel prop is still `aidMemories`, so map it here. Reading state.aidMemories directly
+        // resolved to undefined -> [] and blanked the list on every full refresh() (e.g. after a
+        // "Regenerate Latest"), until the next live memory update repopulated it via updateMemories.
+        aidMemories: state.memoryBankEntries ?? state.aidMemories ?? [],
         ops: state.ops ?? [],
         activeLocationId: state.activeLocationId ?? null,
         locationSuggestions: state.locationSuggestions ?? [],
         properNounLogs: state.properNounLogs ?? [],
-        isManagerOnly: false
+        isManagerOnly: false,
+        activeSetupQuestion: activeQuestion ? {
+          type: activeQuestion.type,
+          question: activeQuestion.question
+        } : null
       } as any);
       refreshModels(state.settings?.model);
       
-      // Post settings update to injected script
-      window.postMessage({
-        source: "aid-extension-host",
-        kind: "settingsUpdate",
-        interceptTimeout: state.settings?.interceptTimeout ?? 10,
-        debug: !!state.settings?.showDebug
-      }, location.origin);
+      if (state.settings) {
+        // Post settings update to injected script
+        window.postMessage({
+          source: "aid-extension-host",
+          kind: "settingsUpdate",
+          interceptTimeout: state.settings?.interceptTimeout ?? 4,
+          debug: !!state.settings?.showDebug
+        }, location.origin);
+      }
     }
   } else {
     const state: any = await browser.runtime.sendMessage({ kind: "getManagerData" });
@@ -254,7 +399,8 @@ async function refresh() {
         globalAssets: state.globalAssets,
         settings: state.settings,
         versions: [],
-        protagonist: null
+        protagonist: null,
+        activeSetupQuestion: null
       } as any);
     }
   }
@@ -263,22 +409,43 @@ async function refresh() {
 let lastShortId: string | null = null;
 let lastPath: string | null = null;
 let lastDocTitle: string | null = null;
-let checkNavigationInterval: any = null;
+let lastActiveQuestionStr = "";
+
 function checkNavigation() {
-  if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.id) {
-    if (checkNavigationInterval) {
-      clearInterval(checkNavigationInterval);
-    }
-    return;
-  }
+  if (!isContextValid()) return;
   const sid = currentShortId();
   const path = location.pathname;
   const docTitle = document.title;
+  const isPlayUrl = checkIsPlayUrl();
+
+  // Reset activeShortId when transitioning to a new scenario page or setup page to prevent carrying over
+  // the previous adventure's ID.
+  if (path !== lastPath) {
+    const hasIdInUrl = /\/(play|adventure)\/([^/]+)/.test(path) || 
+                       new URLSearchParams(location.search).has("adventureId") || 
+                       new URLSearchParams(location.search).has("adventure") || 
+                       new URLSearchParams(location.search).has("id");
+    if (path.includes("/scenario/") || (!hasIdInUrl && (path === "/play" || path.endsWith("/play")))) {
+      activeShortId = null;
+    }
+  }
 
   const isNavChanged = sid !== lastShortId || path !== lastPath;
   const isTitleChanged = docTitle !== lastDocTitle;
+  let shouldRefresh = isNavChanged || isTitleChanged;
 
-  if (isNavChanged || isTitleChanged) {
+  // On play pages, poll the DOM for setup question changes to dynamically toggle or update
+  // the Setup Helper widget. detectSetupQuestion(actionCount) self-suppresses once actions exist.
+  if (isPlayUrl) {
+    const activeQuestion = detectSetupQuestion(lastKnownActionCount ?? undefined);
+    const activeQuestionStr = activeQuestion ? JSON.stringify({ type: activeQuestion.type, question: activeQuestion.question }) : "";
+    if (activeQuestionStr !== lastActiveQuestionStr) {
+      lastActiveQuestionStr = activeQuestionStr;
+      shouldRefresh = true;
+    }
+  }
+
+  if (shouldRefresh) {
     lastShortId = sid;
     lastPath = path;
     lastDocTitle = docTitle;
@@ -309,12 +476,12 @@ function checkNavigation() {
     refresh();
   }
 }
-checkNavigationInterval = setInterval(checkNavigation, 1000);
+setInterval(checkNavigation, 1000);
 checkNavigation();
 
 // 3) Relay page -> background.
 window.addEventListener("message", (ev) => {
-  if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.id) return;
+  if (!isContextValid()) return;
   if (ev.source !== window || (ev.data as any)?.source !== "aid-tracker") return;
   const detail = (ev.data as any).detail;
 
@@ -324,16 +491,19 @@ window.addEventListener("message", (ev) => {
 
     // Sync all currently saved cards in local DB with injected.ts approvedCards cache on load
     browser.runtime.sendMessage({ kind: "getState", shortId }).then((state: any) => {
-      if (state && Array.isArray(state.cards)) {
-        window.postMessage({
-          source: "aid-extension-host",
-          kind: "seedApprovedCards",
-          cards: state.cards.map((card: any) => ({
-            id: card.id,
-            value: card.value,
-            description: card.description || ""
-          }))
-        }, location.origin);
+      if (state) {
+        lastKnownActionCount = state.actionCount ?? state.actionsCount ?? 0;
+        if (Array.isArray(state.cards)) {
+          window.postMessage({
+            source: "aid-extension-host",
+            kind: "seedApprovedCards",
+            cards: state.cards.map((card: any) => ({
+              id: card.id,
+              value: card.value,
+              description: card.description || ""
+            }))
+          }, location.origin);
+        }
       }
 
       const hasAdventure = state && Array.isArray(state.adventures) && state.adventures.some((a: any) => a.shortId === shortId);
@@ -368,7 +538,7 @@ window.addEventListener("message", (ev) => {
         description: c.description || "",
         deletedAt: c.deletedAt ?? null
       }));
-      send({ kind: "cardsUpdate", shortId, cards });
+      send({ kind: "cardsUpdate", shortId, cards, isFullList: true });
     }
     if (memory) {
       const m = memory.match(/(?:your name|player name)\s*:\s*([^\n\]]+)/i);
@@ -392,7 +562,8 @@ window.addEventListener("message", (ev) => {
         source: "aid-extension-host",
         kind: "actionApproved",
         requestId: detail.requestId,
-        updatedNames: res?.updatedNames || []
+        updatedNames: res?.updatedNames || [],
+        injectText: res?.injectText || ""
       }, location.origin);
     }).catch((err: any) => {
       console.error("[AID content] Error processing intercepted action:", err);
@@ -442,8 +613,14 @@ window.addEventListener("message", (ev) => {
     const raw = detail.data?.adventureStoryCardsUpdate?.storyCards;
     if (Array.isArray(raw)) {
       const cards = raw.map((c: any) => ({ shortId: sid, id: c.id, type: c.type, title: c.title, keys: c.keys, value: c.value, description: c.description || "", deletedAt: c.deletedAt ?? null }));
-      send({ kind: "cardsUpdate", shortId: sid, cards });
+      send({ kind: "cardsUpdate", shortId: sid, cards, isFullList: true });
     }
+    return;
+  }
+  if (detail?.transport === "authorsNoteUpdate" && detail.shortId) {
+    // The user edited their Author's Note in AID — keep our cached copy fresh (stores even "" so a
+    // cleared note is captured too).
+    send({ kind: "setAuthorsNote", shortId: detail.shortId, authorsNote: detail.authorsNote || "" });
     return;
   }
   // Card saves intercepted from the page's own fetches (GUI edits / autosaves). Beta does not
@@ -464,7 +641,17 @@ window.addEventListener("message", (ev) => {
       }));
     if (cards.length) {
       dlog("[AID content] Captured page card writes:", cards.map((c: any) => c.title || c.id).join(", "));
-      send({ kind: "cardsUpdate", shortId: sid, cards });
+      send({ kind: "cardsUpdate", shortId: sid, cards, isFullList: false });
+    }
+    return;
+  }
+  // Native card deletion (UseDeleteStoryCard) observed on the page → soft-delete locally so it
+  // drops out of the roster/Living Characters tab without a page reload.
+  if (detail?.transport === "cardDeletes" && Array.isArray(detail.ids)) {
+    const ids = detail.ids.map((x: any) => String(x)).filter(Boolean);
+    if (ids.length) {
+      dlog("[AID content] Captured page card deletions:", ids.join(", "));
+      browser.runtime.sendMessage({ kind: "cardsDeleted", shortId: sid, cardIds: ids }).then(() => refresh()).catch(() => {});
     }
     return;
   }
@@ -477,10 +664,15 @@ window.addEventListener("message", (ev) => {
     return;
   }
   if (detail?.transport === "ws" && detail.operationName === "AdventureMemoriesUpdate") {
-    const memories = detail.data?.memoryBankUpdateUpdate?.memories;
-    if (Array.isArray(memories)) {
+    const memories = detail.data?.adventureMemoriesUpdate?.memories;
+    // Ignore EMPTY frames: on beta the per-turn WS payload is small/partial and the authoritative
+    // full memory window arrives via fetch responses, so mid-turn AID emits an empty memories frame.
+    // Persisting it wiped the stored Memory Bank, which blanked the panel every turn while the turn
+    // was processing (the list only returned once the next non-empty frame landed). A real full-clear
+    // is rare for auto-generated memories; keeping the last non-empty list is the safe default.
+    if (Array.isArray(memories) && memories.length > 0) {
       dlog("[AID content] Captured real-time adventure memories update. count:", memories.length);
-      bufferMemoriesUpdate(sid, memories || []);
+      bufferMemoriesUpdate(sid, memories);
     }
     return;
   }
@@ -509,8 +701,10 @@ panel.onExport(async (type) => {
     blob = new Blob([memory], { type: "text/plain" });
     filename = `aid-pe-${sid}.txt`;
   } else if (type === "aidmemories") {
-    const memoryBankEntries = backup.adventure?.memoryBankEntries || [];
-    blob = new Blob([JSON.stringify(memoryBankEntries, null, 2)], { type: "application/json" });
+    // Same rename as above: the adventure stores the list as `memoryBankEntries` now (legacy blobs
+    // may still carry `aidMemories`), so read the new field first or the export is silently empty.
+    const aidMemories = backup.adventure?.memoryBankEntries || backup.adventure?.aidMemories || [];
+    blob = new Blob([JSON.stringify(aidMemories, null, 2)], { type: "application/json" });
     filename = `aid-memories-${sid}.json`;
   } else if (type === "propernouns") {
     const logs = backup.adventure?.properNounLogs || [];
@@ -530,13 +724,56 @@ panel.onExport(async (type) => {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 });
 
+// Full DB backup -> download every store as one JSON (survives the moz-extension UUID change
+// that wipes IndexedDB when swapping the signed XPI for a test build).
+panel.onBackupAll(async () => {
+  try {
+    const dump: any = await browser.runtime.sendMessage({ kind: "exportAll" });
+    if (!dump || dump.error || !dump.__aidBackup) { panel.showToast(dump?.error || "Backup failed", true); return; }
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    const blob = new Blob([JSON.stringify(dump, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `aid-story-helper-backup-${stamp}.json`;
+    a.click();
+    const total = Object.values(dump.stores || {}).reduce((n: number, r: any) => n + (Array.isArray(r) ? r.length : 0), 0);
+    panel.showToast(`Backed up ${total} records. Keep this file private — it contains your settings/API keys.`);
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (err: any) {
+    panel.showToast(err?.message || String(err), true);
+  }
+});
+
+// Full DB restore <- read a backup JSON file and repopulate every store (upsert; never wipes).
+panel.onRestoreAll(async () => {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "application/json,.json";
+  input.addEventListener("change", async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const res: any = await browser.runtime.sendMessage({ kind: "importAll", data } satisfies BgMessage);
+      if (res?.error) { panel.showToast(res.error, true); return; }
+      const total = Object.values(res?.counts || {}).reduce((n: number, c: any) => n + (Number(c) || 0), 0);
+      panel.showToast(`Restored ${total} records. Reloading…`);
+      setTimeout(() => location.reload(), 1200);
+    } catch (err: any) {
+      panel.showToast(`Restore failed: ${err?.message || String(err)}`, true);
+    }
+  }, { once: true });
+  input.click();
+});
+
 // 5) Backfill button -> ask background to fetch full history.
 panel.onBackfill(async () => {
   const sid = currentShortId();
   if (!sid) return;
   panel.setStatus(`Backfilling story…`);
   try {
-    const res: any = await browser.runtime.sendMessage({ kind: "backfillRequest", shortId: sid });
+    const res: any = await browser.runtime.sendMessage({ kind: "backfillRequest", shortId: sid } satisfies BgMessage);
     if (res && typeof res.loaded === "number") {
       panel.setStatus(`Backfilled ${res.loaded} actions`);
       panel.showToast("Backfill complete!");
@@ -552,77 +789,37 @@ panel.onBackfill(async () => {
   refresh();
 });
 
-panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow, showDebug, theme, s1, s2, s3, s4, cardCommands, useMemories, formattingMode, memoraidLookback, memoraidThoughtLookback, memoraidPresenceLookback, autoRegenerateMemoryBankEntry, interceptTimeout, useSinglePassGeneration, locationMode, enableProperNounDetection, manualMode, logPlotEssentials, characterCardLimit, thoughtCardLimit) => {
-  const sid = currentShortId();
-  const settings: any = {
-    provider,
-    model: model || undefined,
-    analyzeWindow,
-    showDebug,
-    theme,
-    customPromptSection1: s1,
-    customPromptSection2: s2,
-    customPromptSection3: s3,
-    customPromptSection4: s4,
-    cardCommands,
-    formattingMode,
-    useMemories,
-    memoraidLookback,
-    memoraidThoughtLookback,
-    memoraidPresenceLookback,
-    autoRegenerateMemoryBankEntry,
-    interceptTimeout,
-    useSinglePassGeneration,
-    locationMode,
-    enableProperNounDetection,
-    manualMode,
-    logPlotEssentials,
-    characterCardLimit,
-    thoughtCardLimit
-  };
-  if (apiKey) settings.apiKeys = { [provider]: apiKey };
+panel.onSaveSettings(async (settings, protagonist) => {
   await browser.runtime.sendMessage({ kind: "setSettings", settings });
-  if (sid && protagonist) await browser.runtime.sendMessage({ kind: "setProtagonist", shortId: sid, name: protagonist });
+  
+  const sid = currentShortId();
+  if (sid && protagonist) {
+    await browser.runtime.sendMessage({ kind: "setProtagonist", shortId: sid, name: protagonist });
+  }
   
   // Post settings update to injected script
   window.postMessage({
     source: "aid-extension-host",
     kind: "settingsUpdate",
-    interceptTimeout,
-    debug: !!showDebug
+    interceptTimeout: settings.interceptTimeout,
+    debug: !!settings.showDebug
   }, location.origin);
 
   panel.showToast("Settings saved!");
-  refreshModels(model || undefined);
+  refreshModels(settings.model || undefined);
   refresh();
 });
 
 // 6b) Theme change -> auto-save immediately to persist cosmetics
-panel.onThemeChange(async (theme) => {
+panel.on("themeChange", async (theme) => {
   const settings = { theme };
   await browser.runtime.sendMessage({ kind: "setSettings", settings });
 });
 
-panel.onDismissMemoraidBanner(async () => {
-  await browser.runtime.sendMessage({ kind: "setSettings", settings: { memoraidBannerDismissed: true } });
-  refresh();
-});
-
-// 6c) Provider change -> refresh models dynamically for the newly selected provider
-panel.onProviderChange(async (provider, apiKey) => {
-  const res: any = await browser.runtime.sendMessage({
-    kind: "listModels",
-    provider,
-    apiKey: apiKey || undefined
-  });
-  const models = res?.models ?? [];
-  panel.setModels(models, models[0] || undefined);
-});
-
 // 7) Analyze button -> trigger inference in background.
-panel.onAnalyze(async () => {
+panel.on("analyze", async () => {
   const sid = currentShortId(); if (!sid) return;
-  const res: any = await browser.runtime.sendMessage({ kind: "analyzeRequest", shortId: sid });
+  const res: any = await browser.runtime.sendMessage({ kind: "analyzeRequest", shortId: sid } satisfies BgMessage);
   panel.showAnalyzeResult(res);
   if (res?.error) panel.showToast("Update failed!", true);
   await refresh();
@@ -630,12 +827,91 @@ panel.onAnalyze(async () => {
 });
 
 // 7b) Generate (AID): replay AI Dungeon's native Story Card Command for one card.
-panel.onGenerateCard(async (cardId) => {
+panel.on("generateCard", async (cardId) => {
   const sid = currentShortId(); if (!sid) return;
   panel.showToast("Generating via AI Dungeon…");
-  const res: any = await browser.runtime.sendMessage({ kind: "generateCard", shortId: sid, cardId });
+  const res: any = await browser.runtime.sendMessage({ kind: "generateCard", shortId: sid, cardId } satisfies BgMessage);
   if (res?.error) panel.showToast(`Generate failed: ${res.error}`, true);
   else if (res?.id) panel.showToast(`Proposal ready for ${res.characterName} — review & approve.`);
+  await refresh();
+});
+
+panel.on("generateCompactCard", async (cardId) => {
+  const sid = currentShortId(); if (!sid) return;
+  panel.showToast("Generating compact description via AI Dungeon…");
+  const res: any = await browser.runtime.sendMessage({ kind: "generateCompactCard", shortId: sid, cardId } satisfies BgMessage);
+  if (res?.error) panel.showToast(`Compact generate failed: ${res.error}`, true);
+  else if (res?.id) panel.showToast(`Compact proposal ready for ${res.characterName} — review & approve.`);
+  await refresh();
+});
+
+panel.on("rerollAppearance", async (cardId) => {
+  const sid = currentShortId(); if (!sid) return;
+  panel.showToast("Re-rolling body via AI Dungeon…");
+  const res: any = await browser.runtime.sendMessage({ kind: "rerollAppearance", shortId: sid, cardId } satisfies BgMessage);
+  if (res?.error) panel.showToast(`Re-roll failed: ${res.error}`, true);
+  else if (res?.id) panel.showToast(`Re-rolled body ready for ${res.characterName} — review & approve.`);
+  await refresh();
+});
+
+panel.on("distillCrystallized", async (cardId: string, charName: string) => {
+  const sid = currentShortId(); if (!sid) return;
+  panel.showToast(`Distilling long-term memory for ${charName}...`);
+  const res = await sendBg({ kind: "distillCrystallized", shortId: sid, cardId, name: charName });
+  if (res?.error) panel.showToast(`Distillation failed: ${res.error}`, true);
+  else panel.showToast(`Distillation complete for ${charName}!`);
+  // Distill-now rewrites Knows in IndexedDB out from under the Knows-editor — drop the cached
+  // schema so the next render refetches instead of showing the pre-distill snapshot (Finding 3).
+  panel.clearCrystallizedSchemaCache(cardId);
+  await refresh();
+});
+
+panel.on("backfillNpcMemories", async (charName: string) => {
+  const sid = currentShortId(); if (!sid) return;
+  panel.showToast(`Backfilling ${charName}'s memories from native memory blocks...`);
+  // Fire-and-forget: per-block `npcMemoryProgress` broadcasts (and a final `done`) drive the UI and
+  // button reset. We do NOT await the whole backfill for the reset — a long run can outlive the MV3
+  // worker/response channel, which would otherwise hang the button forever. Surface errors only.
+  sendBg({ kind: "backfillNpcMemories", shortId: sid, characterTitle: charName })
+    .then((res: any) => { if (res?.error) panel.showToast(`Backfill failed: ${res.error}`, true); })
+    .catch(() => {});
+});
+
+panel.on("getNpcMemoryBank", async (charName: string) => {
+  const sid = currentShortId(); if (!sid) return { blocks: [] };
+  return await sendBg({ kind: "getNpcMemoryBank", shortId: sid, characterTitle: charName });
+});
+
+panel.on("saveNpcMemoryBlock", async (charName: string, blockId: string, povText: string) => {
+  const sid = currentShortId(); if (!sid) return { error: "No adventure." };
+  const res = await sendBg({ kind: "saveNpcMemoryBlock", shortId: sid, characterTitle: charName, blockId, povText });
+  if (res?.error) panel.showToast(`Save failed: ${res.error}`, true); else panel.showToast("Memory saved.");
+  return res;
+});
+
+panel.on("deleteNpcMemoryBlock", async (charName: string, blockId: string) => {
+  const sid = currentShortId(); if (!sid) return { error: "No adventure." };
+  const res = await sendBg({ kind: "deleteNpcMemoryBlock", shortId: sid, characterTitle: charName, blockId });
+  if (res?.error) panel.showToast(`Delete failed: ${res.error}`, true);
+  return res;
+});
+
+panel.on("regenerateNpcMemoryBlock", async (charName: string, blockId: string) => {
+  const sid = currentShortId(); if (!sid) return { error: "No adventure." };
+  const res = await sendBg({ kind: "regenerateNpcMemoryBlock", shortId: sid, characterTitle: charName, blockId });
+  if (res?.error) panel.showToast(`Regenerate failed: ${res.error}`, true);
+  return res;
+});
+
+panel.on("consolidateOutlook", async (charName: string) => {
+  const sid = currentShortId(); if (!sid) return;
+  panel.showToast(`Consolidating ${charName}'s Outlook into their card...`);
+  const res = await sendBg({ kind: "consolidateOutlook", shortId: sid, characterTitle: charName });
+  if (res?.error) panel.showToast(`Consolidation failed: ${res.error}`, true);
+  else {
+    const n = (res as any)?.incorporated ?? 0;
+    panel.showToast(n > 0 ? `Proposed a card revision folding in ${n} belief${n === 1 ? "" : "s"} — review & approve.` : `No settled beliefs to consolidate for ${charName}.`);
+  }
   await refresh();
 });
 
@@ -643,7 +919,7 @@ panel.onGenerateCard(async (cardId) => {
 async function handleSuccessfulPush(res: any) {
   // Note: value may legitimately be "" for freshly created (still-empty) memory cards —
   // the sync must still reach the injected script so the page refetches and shows the new card.
-  if (res?.ok && res.source === "card" && res.cardId && typeof res.value === "string") {
+  if (res?.ok && res.source === "card" && res.cardId && (typeof res.value === "string" || res.deletedAt)) {
     dlog("[AID content] Successful card push detected. Notifying injected script to sync Apollo cache...");
     // 1. Post message to injected.ts to update Apollo Client and trigger refetch
     window.postMessage({
@@ -653,7 +929,9 @@ async function handleSuccessfulPush(res: any) {
       value: res.value,
       description: res.description,
       keys: res.keys,
-      prevKeys: res.prevKeys
+      prevKeys: res.prevKeys,
+      deletedAt: res.deletedAt,
+      blockAutosave: res.blockAutosave
     }, location.origin);
   } else if (res?.ok && res.source === "plot" && typeof res.memory === "string") {
     dlog("[AID content] Successful plot push detected. Notifying injected script to sync Apollo cache...");
@@ -671,9 +949,9 @@ async function handleSuccessfulPush(res: any) {
 
 // 8) Accept/Reject proposal decision -> update version status in background.
 // Approving auto-pushes to AI Dungeon; surface the push result as a toast.
-panel.onProposalDecision(async (id, status) => {
+panel.on("proposalDecision", async (id, status) => {
   try {
-    const res: any = await browser.runtime.sendMessage({ kind: "setVersionStatus", id, status });
+    const res = await sendBg({ kind: "setVersionStatus", id, status });
     if (status === "applied") {
       if (res?.ok) {
         panel.showToast("Approved & pushed to AI Dungeon!");
@@ -689,11 +967,11 @@ panel.onProposalDecision(async (id, status) => {
 });
 
 // 9) Push version decision -> send to background, show status, and refresh.
-panel.onPushVersion(async (id) => {
+panel.on("pushVersion", async (id) => {
   dlog("[AID content] onPushVersion handler triggered for id:", id);
   panel.setStatus("Pushing update to AI Dungeon…");
   try {
-    const res: any = await browser.runtime.sendMessage({ kind: "applyToAid", id });
+    const res = await sendBg({ kind: "applyToAid", id });
     dlog("[AID content] applyToAid response received:", res);
     if (res?.ok) {
       panel.setStatus("Push successful!");
@@ -711,36 +989,46 @@ panel.onPushVersion(async (id) => {
   refresh();
 });
 
-// 10) AID Memories Tab Event Hooks
-panel.onUpdateMemoryBank(async (memories) => {
+// 10) Memory Bank Tab Event Hooks
+panel.on("updateAidMemories", async (memories) => {
   const sid = currentShortId(); if (!sid) return;
-  await browser.runtime.sendMessage({ kind: "updateMemoryBank", shortId: sid, memories });
+  await browser.runtime.sendMessage({ kind: "updateAidMemories", shortId: sid, memories });
   refresh();
 });
 
-panel.onCreateConfigCard(async () => {
+panel.on("setMemoraidCharacters", async (characters) => {
   const sid = currentShortId();
-  if (!sid) return;
-  panel.setStatus("Creating Configure MemorAID card...");
+  if (!sid) return { error: "No active adventure shortId found" };
   try {
-    const res: any = await browser.runtime.sendMessage({ kind: "createConfigCard", shortId: sid });
-    if (res?.ok) {
-      panel.showToast("Configure MemorAID card created! Refreshing...");
-    } else {
-      panel.showToast(`Creation failed: ${res?.error || "unknown error"}`, true);
-    }
+    const res = await sendBg({ kind: "setMemoraidCharacters", shortId: sid, characters });
+    refresh();
+    if (res?.ok) return { ok: true };
+    return { error: res?.error || "unknown error" };
   } catch (err: any) {
-    panel.showToast(`Creation error: ${err?.message || err}`, true);
+    return { error: err?.message || String(err) };
   }
-  refresh();
 });
 
-panel.onCreateStoryCard(async (card) => {
+panel.on("setLivingConfig", async (config, protagonistName) => {
+  const sid = currentShortId();
+  if (!sid) return { error: "No active adventure shortId found" };
+  try {
+    const res = await sendBg({ kind: "setLivingConfig", shortId: sid, config });
+    if (protagonistName) await browser.runtime.sendMessage({ kind: "setProtagonist", shortId: sid, name: protagonistName });
+    refresh();
+    if (res?.ok) return { ok: true };
+    return { error: res?.error || "unknown error" };
+  } catch (err: any) {
+    return { error: err?.message || String(err) };
+  }
+});
+
+panel.on("createStoryCard", async (card) => {
   const sid = currentShortId();
   if (!sid) return { error: "No active adventure shortId found" };
   panel.setStatus("Creating story card...");
   try {
-    const res: any = await browser.runtime.sendMessage({ kind: "createStoryCard", shortId: sid, card });
+    const res = await sendBg({ kind: "createStoryCard", shortId: sid, card });
     refresh();
     if (res?.ok) {
       return { ok: true };
@@ -752,18 +1040,126 @@ panel.onCreateStoryCard(async (card) => {
   }
 });
 
-panel.onSaveCardKeys(async (cardId, keys) => {
+panel.on("saveCardKeys", async (cardId, keys) => {
   const sid = currentShortId();
   if (!sid) return { error: "No active adventure shortId found" };
   panel.setStatus("Saving card triggers...");
   try {
-    const res: any = await browser.runtime.sendMessage({ kind: "saveCardKeys", shortId: sid, cardId, keys });
+    const res = await sendBg({ kind: "saveCardKeys", shortId: sid, cardId, keys });
     refresh();
     if (res?.ok) {
       return { ok: true };
     } else {
       return { error: res?.error || "unknown error" };
     }
+  } catch (err: any) {
+    return { error: err?.message || String(err) };
+  }
+});
+
+panel.on("saveCardValue", async (cardId, value) => {
+  const sid = currentShortId();
+  if (!sid) return { error: "No active adventure shortId found" };
+  panel.setStatus("Saving card entry...");
+  try {
+    const res = await sendBg({ kind: "saveCardValue", shortId: sid, cardId, value });
+    refresh();
+    if (res?.ok) {
+      return { ok: true };
+    } else {
+      return { error: res?.error || "unknown error" };
+    }
+  } catch (err: any) {
+    return { error: err?.message || String(err) };
+  }
+});
+
+panel.on("saveCrystallizedSchema", async (cardId, schema) => {
+  const sid = currentShortId();
+  if (!sid) return { error: "No active adventure shortId found" };
+  try {
+    const res = await sendBg({ kind: "saveCrystallizedSchema", shortId: sid, cardId, schema });
+    refresh();
+    if (res?.ok) { panel.showToast("Knows updated."); }
+    return res || { error: "No response" };
+  } catch (e: any) {
+    return { error: e?.message || String(e) };
+  }
+});
+
+panel.on("savePreferences", async (cardId, prefs) => {
+  const sid = currentShortId();
+  if (!sid) return { error: "No active adventure shortId found" };
+  try {
+    const res = await sendBg({ kind: "savePreferences", shortId: sid, cardId, prefs });
+    refresh();
+    if (res?.ok) { panel.showToast("Preferences updated."); }
+    return res || { error: "No response" };
+  } catch (e: any) {
+    return { error: e?.message || String(e) };
+  }
+});
+
+panel.on("consolidateCrystallized", async (cardId) => {
+  const sid = currentShortId();
+  if (!sid) return { error: "No active adventure shortId found" };
+  try {
+    const res = await sendBg({ kind: "consolidateCrystallizedSchema", shortId: sid, cardId });
+    refresh();
+    if (res?.ok) { panel.showToast("Schema consolidated."); }
+    return res || { error: "No response" };
+  } catch (e: any) {
+    return { error: e?.message || String(e) };
+  }
+});
+
+panel.on("getCrystallizedSchema", async (cardId) => {
+  const sid = currentShortId();
+  if (!sid) return { error: "No active adventure shortId found" };
+  try {
+    const res = await sendBg({ kind: "getCrystallizedState", shortId: sid, cardId });
+    return res || { error: "No response" };
+  } catch (e: any) {
+    return { error: e?.message || String(e) };
+  }
+});
+
+panel.on("deleteStoryCard", async (cardId) => {
+  const sid = currentShortId();
+  if (!sid) return { error: "No active adventure shortId found" };
+  panel.setStatus("Deleting story card...");
+  try {
+    const res = await sendBg({ kind: "deleteStoryCard", shortId: sid, cardId });
+    refresh();
+    if (res?.ok) {
+      return { ok: true };
+    } else {
+      return { error: res?.error || "unknown error" };
+    }
+  } catch (err: any) {
+    return { error: err?.message || String(err) };
+  }
+});
+
+panel.on("setLifeCardStatus", async (cardId, status) => {
+  const sid = currentShortId();
+  if (!sid) return { error: "No active adventure shortId found" };
+  panel.setStatus(status === "resolved" ? "Resolving relationship..." : `Setting relationship ${status}...`);
+  try {
+    const res = await sendBg({ kind: "setLifeCardStatus", shortId: sid, cardId, status });
+    refresh();
+    if (res?.ok) return { ok: true };
+    return { error: res?.error || "unknown error" };
+  } catch (err: any) {
+    return { error: err?.message || String(err) };
+  }
+});
+
+panel.on("enqueueLifeInjection", async (owner, target, pressure, momentum) => {
+  const sid = currentShortId();
+  if (!sid) return { error: "No active adventure shortId found" };
+  try {
+    return await sendBg({ kind: "enqueueLifeInjection", shortId: sid, owner, target, pressure, momentum }) || { error: "No response" };
   } catch (err: any) {
     return { error: err?.message || String(err) };
   }
@@ -772,9 +1168,9 @@ panel.onSaveCardKeys(async (cardId, keys) => {
 panel.onRefineMemoryBlock(async (index) => {
   const sid = currentShortId();
   if (!sid) return;
-  panel.setStatus(`Refining memory block #${index + 1}...`);
+  panel.setStatus(`Regenerating memory block #${index + 1}...`);
   try {
-    const res: any = await browser.runtime.sendMessage({ kind: "refineMemoryBlock", shortId: sid, index });
+    const res = await sendBg({ kind: "refineMemoryBlock", shortId: sid, index });
     if (res?.ok) {
       panel.showToast(`Memory block #${index + 1} regenerated and pushed to AID!`);
     } else {
@@ -802,11 +1198,11 @@ panel.onGrantPermissions(() => {
 });
 
 // Location manager: active location selection + detection suggestion responses.
-panel.onSetActiveLocation(async (cardId) => {
+panel.on("setActiveLocation", async (cardId) => {
   const sid = currentShortId();
   if (!sid) return;
   try {
-    const res: any = await browser.runtime.sendMessage({ kind: "setActiveLocation", shortId: sid, cardId });
+    const res = await sendBg({ kind: "setActiveLocation", shortId: sid, cardId });
     if (res?.error) {
       panel.showToast(`Failed to set location: ${res.error}`, true);
     } else {
@@ -818,11 +1214,11 @@ panel.onSetActiveLocation(async (cardId) => {
   refresh();
 });
 
-panel.onRespondToProperNounSuggestion(async (properNoun, accept, type) => {
+panel.on("respondToProperNounSuggestion", async (properNoun, accept, type) => {
   const sid = currentShortId();
   if (!sid) return;
   try {
-    const res: any = await browser.runtime.sendMessage({ kind: "respondToProperNounSuggestion", shortId: sid, properNoun, accept, type });
+    const res = await sendBg({ kind: "respondToProperNounSuggestion", shortId: sid, properNoun, accept, type });
     if (res?.error) {
       panel.showToast(`Suggestion response failed: ${res.error}`, true);
     } else if (accept) {
@@ -835,7 +1231,7 @@ panel.onRespondToProperNounSuggestion(async (properNoun, accept, type) => {
 });
 
 // Proper noun log editor (Debug tab).
-panel.onUpdateProperNounLog(async (properNoun, type) => {
+panel.on("updateProperNounLog", async (properNoun, type) => {
   const sid = currentShortId();
   if (!sid) return;
   try {
@@ -844,11 +1240,11 @@ panel.onUpdateProperNounLog(async (properNoun, type) => {
   refresh();
 });
 
-panel.onLinkProperNounToCard(async (properNoun, cardId) => {
+panel.on("linkProperNounToCard", async (properNoun, cardId) => {
   const sid = currentShortId();
   if (!sid) return;
   try {
-    const res: any = await browser.runtime.sendMessage({ kind: "linkProperNounToCard", shortId: sid, properNoun, cardId });
+    const res = await sendBg({ kind: "linkProperNounToCard", shortId: sid, properNoun, cardId });
     if (res?.error) {
       panel.showToast(`Link failed: ${res.error}`, true);
     } else {
@@ -860,7 +1256,7 @@ panel.onLinkProperNounToCard(async (properNoun, cardId) => {
   refresh();
 });
 
-panel.onDeleteProperNounLog(async (properNoun) => {
+panel.on("deleteProperNounLog", async (properNoun) => {
   const sid = currentShortId();
   if (!sid) return;
   try {
@@ -869,7 +1265,7 @@ panel.onDeleteProperNounLog(async (properNoun) => {
   refresh();
 });
 
-panel.onClearProperNounLogs(async () => {
+panel.on("clearProperNounLogs", async () => {
   const sid = currentShortId();
   if (!sid) return;
   try {
@@ -881,23 +1277,23 @@ panel.onClearProperNounLogs(async () => {
   refresh();
 });
 
-panel.onApplyInstruction(() => {
+panel.on("applyInstruction", () => {
   refresh();
 });
 
-panel.onSaveGlobalAsset(async (asset) => {
+panel.on("saveGlobalAsset", async (asset) => {
   const res = await browser.runtime.sendMessage({ kind: "saveGlobalAsset", asset });
   refresh();
   return res;
 });
 
-panel.onDeleteGlobalAsset(async (id) => {
+panel.on("deleteGlobalAsset", async (id) => {
   const res = await browser.runtime.sendMessage({ kind: "deleteGlobalAsset", id });
   refresh();
   return res;
 });
 
-panel.onImportGlobalAsset(async (assetId) => {
+panel.on("importGlobalAsset", async (assetId) => {
   const sid = currentShortId();
   if (!sid) return { error: "No active adventure." };
   const res = await browser.runtime.sendMessage({ kind: "importGlobalAsset", shortId: sid, assetId });
@@ -905,17 +1301,40 @@ panel.onImportGlobalAsset(async (assetId) => {
   return res;
 });
 
+panel.on("fillSetupValue", (value) => {
+  const activeQuestion = detectSetupQuestion();
+  if (!activeQuestion || activeQuestion.type !== "text" || !activeQuestion.inputEl) {
+    panel.showToast("No active text input question found to fill.", true);
+    return;
+  }
+
+  // Send message to injected.ts running in the MAIN world to safely fill the input element
+  window.postMessage({
+    source: "aid-extension-host",
+    kind: "fillSetupInput",
+    value: value
+  }, location.origin);
+
+  panel.showToast(`Filled "${value.length > 20 ? value.slice(0, 20) + '...' : value}"`);
+});
+
 
 
 browser.runtime.onMessage.addListener((msg: any) => {
+  if (!isContextValid()) return;
   if (msg && msg.kind === "approvedCardSync") {
     handleSuccessfulPush(msg.payload);
+    // A card refreshed from AID (e.g. auto-update proposal approved elsewhere) can rewrite Knows
+    // out from under the Knows-editor's cached schema — drop it so the next render refetches (Finding 3).
+    if (msg.payload?.cardId) panel.clearCrystallizedSchemaCache(msg.payload.cardId);
     refresh();
     return;
   }
   if (msg && msg.kind === "stateUpdated") {
     dlog(`[AID content] State updated received from background. Refreshing...`);
-    if (msg.type && msg.text) {
+    if (msg.type && typeof msg.text === "string") {
+      // Note: allow an empty string so a FULL removal (e.g. the last Active Social Dynamics pressure
+      // resolving to an empty note) still syncs the cleared value into AID's Apollo cache + editor.
       window.postMessage({
         source: "aid-extension-host",
         kind: "approvedState",
@@ -945,9 +1364,9 @@ browser.runtime.onMessage.addListener((msg: any) => {
     refresh();
     return;
   }
-  if (msg && msg.kind === "memoraidTiming") {
-    // Surgical update of the MemorAID timing readout under Action Intercept Timeout — no full refresh.
-    panel.updateMemoraidTiming(msg.payload);
+  if (msg && msg.kind === "npcMemoryProgress") {
+    // Live incremental splice as the backfill generates each NPC-POV block; `done` resets the button.
+    panel.refreshNpcMemory(msg.characterTitle, msg.generated, msg.remaining, msg.done, msg.block);
     return;
   }
   if (msg && msg.kind === "relayFetch") {
@@ -974,193 +1393,7 @@ browser.runtime.onMessage.addListener((msg: any) => {
 });
 
 window.addEventListener("aid-refresh-panel", () => {
-  if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.id) return;
   dlog("[AID content] Direct refresh requested by panel");
   refresh();
 });
-
-/**
- * Simulate a high-fidelity user click by dispatching pointer events,
- * mouse events, setting focus, and triggering the click.
- * This guarantees React synthetic events and custom frameworks capture the interaction perfectly.
- */
-function simulateFullClick(element: HTMLElement) {
-  dlog("[AID content] Simulating high-fidelity click on:", element.tagName, element.textContent?.trim());
-  
-  try {
-    element.scrollIntoView?.({ block: "nearest", inline: "nearest" });
-  } catch (e) {}
-
-  // 1. Pointer Down & Mouse Down
-  element.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, isPrimary: true, view: window }));
-  element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
-  
-  // 2. Focus
-  try {
-    element.focus?.();
-  } catch (e) {}
-
-  // 3. Pointer Up & Mouse Up
-  element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true, isPrimary: true, view: window }));
-  element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
-  
-  // 4. Click
-  element.click();
-}
-
-/**
- * Automate opening a Story Card in AI Dungeon's web GUI.
- * This forces the page's React state to fetch the new server-side truth, preventing subsequent autosave clobber.
- */
-async function openStoryCardInGui(cardTitle: string) {
-  dlog("[AID content] Programmatically opening Story Card in GUI:", cardTitle);
-  const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-  const normalizedTitle = cardTitle.trim().toLowerCase();
-
-  try {
-    // 0. If a card editor is already open in the page GUI, its React component is mounted and holds a stale local state.
-    // We detect active textareas and inputs inside any open drawer or panel container.
-    // If found, we locate and click the specific "Back" or "Close" or "Finish" button within that container to force a clean unmount.
-    const activeTextareas = Array.from(document.querySelectorAll("textarea"));
-    if (activeTextareas.length > 0) {
-      dlog("[AID content] Active card editor textareas detected. Finding back/close/finish button...");
-      let backBtn: HTMLElement | null = null;
-      
-      for (const ta of activeTextareas) {
-        const container = ta.closest("div[class*='drawer'], div[class*='panel'], div[class*='modal'], div[style*='position'], body > div");
-        if (container) {
-          backBtn = Array.from(container.querySelectorAll("button, [role='button'], div, span, svg")).find(el => {
-            const text = el.textContent?.trim().toLowerCase();
-            const label = el.getAttribute("aria-label")?.toLowerCase();
-            const cls = el.className && typeof el.className === "string" ? el.className.toLowerCase() : "";
-            return text === "back" || label === "back" || cls.includes("back") ||
-                   text === "close" || label === "close" || cls.includes("close") ||
-                   text === "finish" || label === "finish" || cls.includes("finish") ||
-                   label === "go back" || label === "back to list";
-          }) as HTMLElement | null;
-          if (backBtn) break;
-        }
-      }
-
-      // Fallback to global back/close/finish button only if none were found inside the container
-      if (!backBtn) {
-        backBtn = Array.from(document.querySelectorAll("button, [role='button'], div, span, svg")).find(el => {
-          const text = el.textContent?.trim().toLowerCase();
-          const label = el.getAttribute("aria-label")?.toLowerCase();
-          const cls = el.className && typeof el.className === "string" ? el.className.toLowerCase() : "";
-          return text === "back" || label === "back" || cls.includes("back") ||
-                 text === "close" || label === "close" || cls.includes("close") ||
-                 text === "finish" || label === "finish" || cls.includes("finish") ||
-                 label === "go back" || label === "back to list";
-        }) as HTMLElement | null;
-      }
-
-      if (backBtn) {
-        const clickTarget = backBtn.closest("button, [role='button']") as HTMLElement || backBtn;
-        dlog("[AID content] Clicking close/finish button to unmount stale React state:", clickTarget.textContent || clickTarget.getAttribute("aria-label"));
-        simulateFullClick(clickTarget);
-        
-        // Wait deterministically for the editor textareas to be fully unmounted from the DOM
-        const startTime = Date.now();
-        while (Date.now() - startTime < 1500) {
-          await wait(100);
-          const stillHasTextareas = document.querySelectorAll("textarea").length > 0;
-          if (!stillHasTextareas) {
-            dlog("[AID content] Card editor successfully unmounted.");
-            break;
-          }
-        }
-        await wait(1000); // extra cushion for React fiber rendering queue to fully settle
-      }
-    }
-
-    // 1. Check if the card list drawer is already open and the card is directly visible in the DOM.
-    // If it is already visible, we click it directly and skip clicking the sidebar toggle (which would close it!).
-    let cardItem = Array.from(document.querySelectorAll("div, span, p, a, li, button")).find(el => {
-      if (el.children.length > 2) return false; // ignore large layout elements
-      const text = el.textContent?.trim().toLowerCase();
-      return text === normalizedTitle || (text?.includes(normalizedTitle) && text.length < 60);
-    }) as HTMLElement | null;
-
-    if (cardItem) {
-      const clickTarget = cardItem.closest("button, a, li, [role='button']") as HTMLElement || cardItem;
-      dlog("[AID content] Story Cards list is already open. Clicking card directly in list:", clickTarget.textContent);
-      simulateFullClick(clickTarget);
-      await wait(1000); // wait for card details drawer to fully slide in and mount
-      panel.showToast(`Story Card '${cardTitle}' opened in AI Dungeon GUI!`);
-      return true;
-    }
-
-    // 2. Locate the sidebar panel toggle button. We check text, aria-labels, and titles aggressively.
-    let sidebarBtn = Array.from(document.querySelectorAll("button, [role='button'], div, span, a")).find(el => {
-      const text = el.textContent?.trim().toLowerCase();
-      const label = el.getAttribute("aria-label")?.toLowerCase();
-      const title = el.getAttribute("title")?.toLowerCase();
-      
-      return text === "story cards" || text === "plot" || text === "plot essentials" || 
-             label === "story cards" || label === "plot" || label === "plot essentials" ||
-             title === "story cards" || title === "plot" || title === "plot essentials" ||
-             text?.includes("story card") || label?.includes("story card") || title?.includes("story card") ||
-             text?.includes("plot") || label?.includes("plot") || title?.includes("plot");
-    }) as HTMLElement | null;
-
-    if (sidebarBtn) {
-      const clickTarget = sidebarBtn.closest("button, [role='button']") as HTMLElement || sidebarBtn;
-      dlog("[AID content] Found sidebar toggle button. Clicking to open:", clickTarget.textContent || clickTarget.getAttribute("aria-label") || clickTarget.getAttribute("title"));
-      simulateFullClick(clickTarget);
-      await wait(1000); // wait for side drawer animations and React list rendering to fully stabilize
-    }
-
-    // 3. Locate the specific card item in the opened sidebar list
-    cardItem = Array.from(document.querySelectorAll("div, span, p, a, li, button")).find(el => {
-      if (el.children.length > 2) return false;
-      const text = el.textContent?.trim().toLowerCase();
-      return text === normalizedTitle || (text?.includes(normalizedTitle) && text.length < 60);
-    }) as HTMLElement | null;
-
-    if (cardItem) {
-      const clickTarget = cardItem.closest("button, a, li, [role='button']") as HTMLElement || cardItem;
-      dlog("[AID content] Found card item in list, clicking to open details:", clickTarget.textContent);
-      simulateFullClick(clickTarget);
-      await wait(1000); // wait for details drawer to mount
-      panel.showToast(`Story Card '${cardTitle}' opened in AI Dungeon GUI!`);
-      return true;
-    }
-
-    // 4. Fallback: Check if there's a nested "Story Cards" or "Cards" sub-tab inside the opened panel
-    let subTab = Array.from(document.querySelectorAll("button, div, span")).find(el => {
-      const text = el.textContent?.trim().toLowerCase();
-      return text === "story cards" || text === "cards";
-    }) as HTMLElement | null;
-
-    if (subTab) {
-      dlog("[AID content] Found sub-tab in open panel, clicking:", subTab.textContent);
-      simulateFullClick(subTab);
-      await wait(1000);
-      
-      cardItem = Array.from(document.querySelectorAll("div, span, p, a, li, button")).find(el => {
-        if (el.children.length > 2) return false;
-        const text = el.textContent?.trim().toLowerCase();
-        return text === normalizedTitle || (text?.includes(normalizedTitle) && text.length < 60);
-      }) as HTMLElement | null;
-
-      if (cardItem) {
-        const clickTarget = cardItem.closest("button, a, li, [role='button']") as HTMLElement || cardItem;
-        dlog("[AID content] Found card item under sub-tab, clicking:", clickTarget.textContent);
-        simulateFullClick(clickTarget);
-        await wait(1000);
-        panel.showToast(`Story Card '${cardTitle}' opened in AI Dungeon GUI!`);
-        return true;
-      }
-    }
-
-    console.warn("[AID content] Could not locate Story Card item in GUI for:", cardTitle);
-    panel.showToast(`Pushed! Please open '${cardTitle}' once to sync the GUI.`, false);
-  } catch (err) {
-    console.error("[AID content] Error programmatically opening card in GUI:", err);
-  }
-  return false;
-}
-
-
 

@@ -147,6 +147,21 @@ describe("validateProposals", () => {
     const { warnings } = validateProposals({ proposals: [{ name: "Jessica Sterling", action: "update", newEntry: "x", changeSummary: "s", suggestedTriggers: "Jessica" }] }, chars);
     expect(warnings.filter((w) => /trigger/i.test(w))).toEqual([]);
   });
+
+  it("tolerates suggestedTriggers returned as an ARRAY (model sometimes ignores the comma-string format)", () => {
+    // Regression: crashed with "suggestedTriggers.split is not a function" during Update Plot Essentials.
+    const resp = { proposals: [{ name: "Jessica Sterling", action: "update", newEntry: "x", changeSummary: "s", suggestedTriggers: ["Jessica", "cat"] }] } as any;
+    let out: any;
+    expect(() => { out = validateProposals(resp, chars); }).not.toThrow();
+    // Normalized to a comma-string, and the short/common "cat" still trips the over-fire warning.
+    expect(out.proposals[0]!.suggestedTriggers).toBe("Jessica, cat");
+    expect(out.warnings.some((w: string) => /trigger/i.test(w))).toBe(true);
+  });
+
+  it("tolerates a non-string, non-array suggestedTriggers without crashing", () => {
+    const resp = { proposals: [{ name: "Jessica Sterling", action: "update", newEntry: "x", changeSummary: "s", suggestedTriggers: 42 }] } as any;
+    expect(() => validateProposals(resp, chars)).not.toThrow();
+  });
 });
 
 describe("analyze (golden fixture: Jessica Sterling)", () => {

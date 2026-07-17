@@ -52,7 +52,7 @@ graph TD
 
 ## 1.1 Data Models & Storage (IndexedDB Schema)
 
-All data is stored locally in IndexedDB under the database name `"aid-tracker"` (version `4`). The database schema (defined in `src/storage/db.ts`) contains the following stores:
+All data is stored locally in IndexedDB under the database name `"aid-tracker"` (version `10`). The database schema (defined in `src/storage/db.ts`) contains the following stores. (The v1.2.0 feature-engine stores — `crystallizedLog`, `injectionLog`, `crystallizedState`, `crystallizedArchive`, `phenotype`, `npcMemoryBank` — are documented in [§6.2](#62-storage-additions-srcstoragedbts).)
 
 ### 1. `adventures`
 - **Key Path**: `shortId` (string)
@@ -580,4 +580,76 @@ The extension captures and replays the following key AI Dungeon mutations:
   if (Test-Path aid-story-helper-source.zip) { Remove-Item aid-story-helper-source.zip -Force }
   tar -a -c -f aid-story-helper-source.zip src manifest.json package.json package-lock.json tsconfig.json build.mjs
   ```
+
+---
+
+## 6. v1.2.0 Feature Engines & the Provider Seam
+
+Every v1.2.0 feature that needs AI text (per-card ⚡ generate, MemorAID, NPC Memory Bank, Crystallized, character-card appearance) routes through **one** generation seam — `src/inference/native.ts` `generateCard()`, which builds a system/user prompt and calls `provider.complete(system, user)` against the user's own configured provider (Claude / OpenAI / Gemini / Ollama). There is no server-side "native generation": the `GenerateStoryCard` mutation is never replayed for output. It appears only in anti-exploit **guards** (`src/interceptor/injected.ts`, `src/background/op-registry.ts`, `gql-detect.ts`) that deliberately *refuse* to capture that operation — a security posture, not a capability. Feature modules do zero provider wiring themselves; they hand a card + command to `generateCard` and clean the raw completion.
+
+### 6.1 Provider Seam (`src/inference/native.ts`)
+
+- `generateCard(card: CardRow, command: string, _formattingMode: string, opts?: NativeGenOpts): Promise<NativeGenResult>` — resolves `{{title}}` in `command` to the card title, builds the prompt, returns `{ ok, value, message? }`. Never throws (failure ⇒ `{ ok:false }`); `value` is the RAW completion (code-fence stripped by `cleanCompletion`), callers do their own field cleaning.
+- `NativeGenOpts`: `temperature?`, `storyInformation?` (rendered as a `Narrative Context:` block ahead of the instruction), `includeStorySummary?` (default **true**). When true and `card.shortId` is set, folds the adventure's persistent story summary (`adv.memory` — Plot Essentials) in as a `Story summary:` block; bounded-context callers (NPC memory distillation) pass **false**.
+- `activeProvider()` — reads `settings.provider`/`settings.model`/`settings.apiKeys[provider]`, instantiates `ClaudeProvider` / `OpenAIProvider` / `GeminiProvider` / `OllamaProvider` (Ollama needs no key, defaults to `http://localhost:11434`), or returns `{ error }` if unconfigured. Because a BYO provider has no per-call output cap, callers that historically split a generation to fit a length ceiling fold it back into one call here.
+
+### 6.2 Storage additions (`src/storage/db.ts`)
+
+IndexedDB `"aid-tracker"` is at **version 10**. Six new object stores plus new `AdventureMeta` fields:
+
+| Store | Key | Value |
+|---|---|---|
+| `crystallizedLog` | `id` | `VividMemoryLogEntry` — append-only vivid-memory snapshots; idx `by-shortId`, `by-char` |
+| `injectionLog` | `id` | `InjectionLogEntry` — Living Characters directives that rode a turn (`provider: "living-characters"`) |
+| `crystallizedState` | `[shortId, characterKey]` | per-character `CrystallizedState` |
+| `crystallizedArchive` | `id` | `CrystallizedArchiveEntry` — forensic record of Vivid/Knows/Outlook/Preferences items dropped by distillation (`reason: "decay" | "incorporated"`) |
+| `phenotype` | `[shortId, characterKey]` | `PhenotypeRecord` |
+| `npcMemoryBank` | `[shortId, characterKey, blockId]` | `NpcMemoryBlock`; idx `by-shortId`, `by-char` |
+
+New `AdventureMeta` fields include `memoraidCharacters` / `memoraidOffstageCooldown`, `livingConfig` + the `lc*`/`cc*` simulation-bookkeeping maps (`lcLastSeedTurn`, `lcSeedCount`, `lcDormantSince`, `lcLastEventTurn`, `lcSeededTurn`, `lcArchived`, `lcResolvedAt`, `ccDriftPending`), the `crystallized*Cap` per-adventure overrides (`crystallizedKnowsCap`/`RecallsCap`/`VividCap`/`OutlookCap`/`PreferencesCap`/`NpcMemoryCap`, `crystallizedInterval`/`EntryMaxChars`/`NodeCap`), `lastDistilledThrough`, and `pendingInjections`.
+
+### 6.3 MemorAID rebuild (provider-seam) — what's new
+
+MemorAID's per-turn NPC thought generation (`bg-memoraid.ts`, helpers in `memoraid-notes.ts`) now runs through `generateCard`. Changes vs. the previously-documented engine:
+
+- **Config moved off a card**: the tracked list lives in `adv.memoraidCharacters` (via `parseImportantCharacters`/`serializeImportantCharacters`), replacing the "Configure MemorAID" card.
+- **Virtual characters**: `checkMemorAIDUpdates` synthesizes `virtual-<key>` `CardRow`s for tracked names with no real card, so `trackableCharacters` covers off-card NPCs.
+- **Offstage classification + cooldown**: `classifyMemoraidPresence` reads the presence-gated prompt's `OFFSTAGE` sentinel; `memoraidOffstageCooldown[name]` + `isOnOffstageCooldown` suppress regeneration while a character is mentioned-not-present; `buildEarsBurningThought` supplies an engine-owned (no-API) canned thought.
+- **Scene-novelty gate**: `isSceneNovel` (Jaccard over content tokens, threshold 0.9, zero-LLM) skips per-NPC generation when a Retry lands on an essentially-unchanged beat; snapshots held per-adventure in `lastProcessedSceneText`.
+- **Per-thought rendering**: `renderThoughtWindow`/`buildThoughtContext` render a rolling window of whole thoughts (each brace-wrapped, never split); `repairThoughtEntry` self-heals a card entry that lost its `[Name's Thoughts:]` wrapper. Scene text is passed in original case.
+
+### 6.4 NPC Memory Bank (`src/inference/npc-memory-bank.ts`, `bg-npc-memory.ts`)
+
+Per-NPC point-of-view recollections distilled from the adventure's native memory blocks, powering scene-aware **Recalls**. Gated on `enableCrystallized`.
+
+- Generation: `generateNpcBlock` → `generateCard(target, buildNpcMemoryCommand(name), fmt, { storyInformation, includeStorySummary: false })` over exactly one native block's actions (bounded, no context bleed); `storeNpcBlockFromPov` tags + upserts the `NpcMemoryBlock` (key `[shortId, characterKey, blockId]`, `blockId` via `deriveBlockId`). A presence guard (`charactersPresentInWindow` over ACTION text) runs before any LLM call so a sparsely-present NPC's bank stays proportional to presence.
+- **Combined pass**: the player-facing memory-block regeneration and every present NPC's POV are produced in **one** `provider.complete` call (`background.ts` — `===SUMMARY===` / `===POV:<name>===` delimited sections, parsed by `parseCombinedBlockResponse`); omitted NPCs fall back to a standalone `generateNpcBlock`.
+- Retrieval (pure NLP, no LLM at query time): `extractBlockTags`/`extractSceneSignal` split text into `entities` (matched against known subject tokens) vs. `keywords`; `scoreBlock` weights entity overlap (`RECALL_ENTITY_WEIGHT` 10) over keyword overlap (1), recency/salience only break ties; `selectRecalls` returns [] when nothing clears `DEFAULT_RECALL_THRESHOLD` (10).
+- Maintenance: `backfillNpcMemories` (on-demand, `BACKFILL_BATCH` 20, newest-first, throttled) and `generateNpcBlocksForNewNativeBlock` (forward-auto); `pruneToCap`/`enforceMemoryCap` hold each NPC to `crystallizedNpcMemoryCap ?? 400`.
+
+### 6.5 Crystallized long-term memory (`src/inference/crystallized.ts`, `bg-crystallized.ts`)
+
+A per-character long-term memory card. **Global system flag** `settings.enableCrystallized` — **OFF by default**; once enabled it persists. `bg-crystallized.ts` `checkCrystallizedUpdates` early-returns unless the flag is set and `adv.memoraidCharacters` is non-empty.
+
+- State (`CrystallizedState`, parsed/serialized from a card's Notes via `parseCrystallized`/`serializeCrystallized`): **Schema** = `SchemaItem[]` (Knows, subject+aliases+`retired`), **Nodes** = `MemoryNode[]` (Vivid Memories, `vibrancy` 3→0), **Outlook** = `OutlookBelief[]` (generalized first-person beliefs, decay), **Preferences** = `OutlookBelief[]` (concrete texture; **never decay**, refine-in-place only).
+- Distillation (`bg-crystallized.ts`): three provider passes (schema Knows, vivid-memory nodes, a dedicated Outlook/Preferences + drift micro-pass); `reinforceAndDecay` then `reconcile` merge output, with a **never-met gate** (`allowNewSubject` predicate) blocking brand-new Knows entries for characters the owner never shared a scene with. Duplicate-subject collapse via `schemaItemMatchKeys` (token/article/possessive/kinship/synonym equivalence).
+- Render: `renderCrystallizedEntryScene` builds the injected value (`Knows → Recalls → Vivid Memories → Preferences → Outlook`), present-cast-first, scene-relevance-ranked, per-layer caps from `effectiveCrystallizedCaps(adv, settings)` (defaults knows 2 / recalls 2 / vivid 4 / outlook 2 / preferences 4). Dropped items are archived to `crystallizedArchive`; vivid snapshots log to `crystallizedLog`.
+
+### 6.6 Living Characters / Life Cards (`src/inference/living-characters.ts`, `bg-life.ts`)
+
+Social simulation as **pure NLP/script — ZERO LLM calls**. `settings.enableLivingCharacters` is **ON by default**. Per-adventure config in `adv.livingConfig`.
+
+- Seeding: `shouldAttemptSeed` (interval + retry + slot cap + first-seed bootstrap) → `chooseSeedPair` (scene-gated `strict`/`off`, `selectPressurePool`, protagonist-involvement bias) with `rollMomentum` (65/28/7). Default pool `DEFAULT_LC_PRESSURES`.
+- Life Card value/notes: `buildLifeCardValue`, `buildSeededDescription` (bounded log, `LIFE_HISTORY_MAX_LINES` 12), `buildLifeHistoryLine`; the engine owns the `Status:` field (`setLifeCardStatusValue`).
+- Lifecycle (NLP-as-judge, LLM resolution judge retired): `shouldArchiveLifeCard` (resolved or dormant-timeout), `shouldFadeStale` (staleness), `shouldRetireByAge` (hard lifetime cap). Presence via `computeInScene`/`buildSceneText` (directives stripped by `stripInjectedDirectives`).
+- Injection: directives are **appended to the action text** (prompt-injection mode) and recorded in `injectionLog`. The **Author's Note injection mode was removed** from the live path — `formatLivingCharactersAuthorsNoteBlock`/`mergeAuthorsNoteBlock` remain in `injection.ts` but have no callers in `bg-life.ts`.
+
+### 6.7 Phenotype-grounded character generation (`src/inference/phenotype/`)
+
+An NLP-sampled body/appearance frame folded into character-card generation so the `Appearance:` field rests on a consistent, population-plausible build. Records persist in the `phenotype` store (key `[shortId, characterKey]`), `settings.phenotypePopulation` selects `western`/`global`.
+
+- `resolveGender(cardValue, cueText, name)` — explicit Gender field → gendered title in the name → pronoun tally over character-scoped cue text → null.
+- `buildPhenotypeInputs(args)` — pure orchestrator returning `{ record, appearanceGuidance, keyPairLine, quirks, rewriteAppearance }`. Four paths: re-inject a persisted record verbatim; **skip** body when gender is unresolved (story-only prose); **reverse-seed** a key-pair anchor while preserving established hand-authored prose; or **sample** a fresh frame (`sampleAnchors`/`sampleQuirks` off `classify(cueText, gender)`) when appearance is empty/thin. `appearanceGuidance` never emits explicit measurements/anatomy into prose.
+- Card-gen integration (`background.ts` `runGenerateCard`): computes cue text, calls `buildPhenotypeInputs`, `repo.putPhenotype(ph.record)`, and prepends `ph.appearanceGuidance` to the generation's `baseContext` (skipped for the compact `templateOverride` pass). The `Appearance:` prompt field carries the `{appearanceGuidance}` token (`core-character.ts`).
+- `runRerollAppearance(shortId, cardId)` — `rerollPhenotype` bumps the reroll nonce → new seed → fresh sample from the record's OWN stored cues (never re-reading the polluted card), persists via `putPhenotype`, and regenerates ONLY the Appearance field as a **pending proposal** carrying `phenotypeRollback` (a snapshot of the prior record so rejecting the proposal restores it).
 

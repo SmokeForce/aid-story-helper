@@ -127,9 +127,21 @@ export function buildPrompt(req: InferenceRequest): { system: string; user: stri
   return { system, user };
 }
 
+/** The model is asked for `suggestedTriggers` as a comma-string but occasionally returns an array (or
+ *  another JSON type). Coerce to the documented comma-string so downstream string ops never crash with
+ *  "suggestedTriggers.split is not a function". Returns undefined for null/empty. */
+function normalizeSuggestedTriggers(v: unknown): string | undefined {
+  if (v == null) return undefined;
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) return v.map((t) => String(t).trim()).filter(Boolean).join(", ");
+  return String(v);
+}
+
 function triggerWarning(p: Proposal): string | null {
-  if (!p.suggestedTriggers) return null;
-  const tokens = p.suggestedTriggers
+  // Defensive: normalize here too in case a Proposal reaches this from another path.
+  const triggers = normalizeSuggestedTriggers(p.suggestedTriggers as unknown);
+  if (!triggers) return null;
+  const tokens = triggers
     .split(",")
     .map((t) => t.trim().toLowerCase())
     .filter(Boolean);
@@ -173,8 +185,9 @@ export function validateProposals(
       continue;
     }
     const source = hit.source;
-    // Canonicalize the name so the version attaches to the right Story Card / Plot block.
-    const p: Proposal = { ...raw, name: hit.name, source };
+    // Canonicalize the name so the version attaches to the right Story Card / Plot block, and normalize
+    // suggestedTriggers to the documented comma-string (the model sometimes returns an array).
+    const p: Proposal = { ...raw, name: hit.name, source, suggestedTriggers: normalizeSuggestedTriggers((raw as { suggestedTriggers?: unknown }).suggestedTriggers) };
     const isProtagonist = protagonistName && p.name.trim().toLowerCase() === protagonistName.trim().toLowerCase();
     const limit = isProtagonist ? 3500 : 2000;
     if (p.newEntry.length > limit) {

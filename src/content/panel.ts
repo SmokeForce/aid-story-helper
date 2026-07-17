@@ -1,133 +1,164 @@
+import { browser } from "./browser-helper";
 import QrCreator from "qr-creator";
-import { parsePlotEssentials, getRestOfPlotEssentials } from "../inference/plot";
+import { buildPanelTemplate } from "./panel-template";
+import { isSetupPhase, visibleMainTabPane } from "./setup-phase";
+import { parsePlotEssentials, getRestOfPlotEssentials, extractDetailsFromText } from "../inference/plot";
 import {
-  DEFAULT_SYSTEM_PROMPT,
   DEFAULT_PROMPT_SECTION_1,
   DEFAULT_PROMPT_SECTION_2,
   DEFAULT_PROMPT_SECTION_3,
   DEFAULT_PROMPT_SECTION_4,
+  normalizeType,
 } from "../inference/engine";
 import { DEFAULT_CARD_COMMANDS, DEFAULT_FORMATTING_MODE } from "../inference/card-command";
-import type { GlobalAsset, CardRow } from "../shared/types";
-import { isLocalDbEmpty } from "../shared/types";
-import { browser } from "./browser-helper";
+import { buildLifeCardValue, keyName, parseLifeCardEntry, DEFAULT_LC_PRESSURES } from "../inference/living-characters";
+import { parseCrystallized } from "../inference/crystallized";
+import { searchPanelItems, pendingDecisionsCount, type PanelSearchItem } from "../inference/panel-search";
+import { renderHome } from "./panel-home";
+import type { GlobalAsset, CardRow, Settings, LivingConfig } from "../shared/types";
+import { computeDeletedNames, activeCardsMissingFromRoster, explicitTypeLabel } from "../shared/roster";
 
 const TYPE_KEYS = ["character", "class", "race", "location", "faction", "custom", "memoraid"] as const;
+
+function isContextValid(): boolean {
+  try {
+    if (typeof browser === "undefined" || !browser.runtime) {
+      return false;
+    }
+    browser.runtime.getManifest();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function safeCallback<T extends (...args: any[]) => any>(cb: T | null | undefined): T {
+  return (((...args: any[]) => {
+    if (!isContextValid()) {
+      console.warn("[AID panel] Extension context is invalidated. Ignoring action.");
+      return;
+    }
+    return cb?.(...args);
+  }) as unknown) as T;
+}
 
 export interface PanelStateVersion { id: string; characterName: string; entry: string; changeSummary: string; status: string; createdAt: string; pushedAt?: string; actionCount?: number; cardType?: string; cardId?: string; source?: "card" | "plot"; }
 export interface PanelState {
   shortId?: string;
   protagonist: string | null;
   scenario?: string | null;
-  settings: {
-    provider: string;
-    model?: string;
-    keyStatus?: Record<string, boolean>;
-    analyzeWindow?: number;
-    showDebug?: boolean;
-    theme?: string;
-    customPromptSection1?: string;
-    customPromptSection2?: string;
-    customPromptSection3?: string;
-    customPromptSection4?: string;
-    typeGuidance?: Record<string, string>;
-    cardCommands?: Record<string, string>;
-    formattingMode?: string;
-    useMemories?: boolean;
-    memoraidLookback?: number;
-    memoraidThoughtLookback?: number;
-    memoraidPresenceLookback?: number;
-    autoRegenerateMemoryBankEntry?: boolean;
-    interceptTimeout?: number;
-    locationMode?: "optionA" | "optionB";
-    enableProperNounDetection?: boolean;
-    useSinglePassGeneration?: boolean;
-    memoraidBannerDismissed?: boolean;
-    manualMode?: boolean;
-    logPlotEssentials?: boolean;
-    characterCardLimit?: number;
-    thoughtCardLimit?: number;
-  } | null;
+  settings: (Settings & { keyStatus?: Record<string, boolean> }) | null;
   versions: PanelStateVersion[];
   cards?: CardRow[];
   memory?: string | null;
   actionsCount?: number;
   actionCount?: number;
   lastAnalysisAction?: number | null;
-  memoryBankEntries?: { actionIds: string[]; text: string; lastRelevantActionId?: string }[] | null;
+  aidMemories?: { actionIds: string[]; text: string; lastRelevantActionId?: string }[] | null;
   lastAutoUpdatedCard?: string | null;
   ops?: { operationName: string; query: string; kind: string }[];
   actions?: { id: string; text: string; type?: string }[] | null;
+  livingConfig?: LivingConfig | null;
+  memoraidCharacters?: string[];
   activeLocationId?: string | null;
   locationSuggestions?: { properNoun: string; actionId: string; actionText: string; timestamp: string; status: "pending" | "approved" | "rejected"; askingCharacter?: boolean }[];
   properNounLogs?: { actionId: string; properNoun: string; actionText: string; timestamp: string; isLocation: boolean; isCharacter: boolean; type?: string; linkedCardId?: string; linkedCardTitle?: string }[];
   
-  // Session-scoped MemorAID intercept-path timing (last run + running average), shown under
-  // the Action Intercept Timeout setting. avgMs/lastMs are null until the first generation runs.
-  memoraidTiming?: { lastMs: number | null; avgMs: number | null; count: number };
-
   // Adventures Manager additions
   isManagerOnly?: boolean;
   adventures?: { shortId: string; title?: string; memory?: string; authorsNote?: string; instructions?: string; createdAt?: string }[];
   globalAssets?: GlobalAsset[];
   allCards?: CardRow[];
+  
+  // Setup helper additions
+  activeSetupQuestion?: {
+    type: "text" | "choice";
+    question: string;
+  } | null;
 }
+/** Pure-storage panel → host callbacks, registered generically via `panel.on(event, cb)`.
+ *  Setters that also wire DOM listeners (onExport, onBackfill, onSaveSettings, onRefineMemoryBlock,
+ *  onGrantPermissions, onRefresh, …) keep their dedicated methods on PanelHandle. */
+export type NpcMemBlock = { blockId: string; povText: string; entities: string[]; keywords: string[]; turnStart: number; turnEnd: number };
+
+export type PanelEvents = {
+  analyze: () => void;
+  themeChange: (theme: string) => void;
+  applyInstruction: () => void;
+  proposalDecision: (versionId: string, status: "applied" | "rejected") => void;
+  pushVersion: (versionId: string) => void;
+  generateCard: (cardId: string) => void;
+  generateCompactCard: (cardId: string) => void;
+  rerollAppearance: (cardId: string) => void;
+  distillCrystallized: (cardId: string, charName: string) => void;
+  backfillNpcMemories?: (charName: string) => void;
+  consolidateOutlook?: (charName: string) => void;
+  getNpcMemoryBank?: (charName: string) => Promise<{ blocks?: NpcMemBlock[]; cap?: number; error?: string }>;
+  saveNpcMemoryBlock?: (charName: string, blockId: string, povText: string) => Promise<{ ok?: boolean; error?: string }>;
+  deleteNpcMemoryBlock?: (charName: string, blockId: string) => Promise<{ ok?: boolean; error?: string }>;
+  regenerateNpcMemoryBlock?: (charName: string, blockId: string) => Promise<{ block?: NpcMemBlock; error?: string }>;
+  updateAidMemories: (memories: any[]) => void;
+  setMemoraidCharacters: (characters: string[]) => Promise<{ ok?: boolean; error?: string }>;
+  setLivingConfig: (config: LivingConfig, protagonistName: string) => Promise<{ ok?: boolean; error?: string }>;
+  createStoryCard: (card: { type: string; title: string; keys: string; value: string; description?: string }) => Promise<{ ok?: boolean; error?: string }>;
+  enqueueLifeInjection: (owner: string, target: string, pressure: string, momentum: string) => Promise<{ ok?: boolean; error?: string }>;
+  saveCardKeys: (cardId: string, keys: string) => Promise<{ ok?: boolean; error?: string }>;
+  saveCardValue: (cardId: string, value: string) => Promise<{ ok?: boolean; error?: string }>;
+  saveCrystallizedSchema: (cardId: string, schema: import("../inference/crystallized").SchemaItem[]) => Promise<{ ok?: boolean; error?: string }>;
+  savePreferences: (cardId: string, prefs: string[]) => Promise<{ ok?: boolean; error?: string }>;
+  getCrystallizedSchema: (cardId: string) => Promise<{ ok?: boolean; error?: string; state?: import("../inference/crystallized").CrystallizedState }>;
+  consolidateCrystallized: (cardId: string) => Promise<{ ok?: boolean; error?: string }>;
+  deleteStoryCard: (cardId: string) => Promise<{ ok?: boolean; error?: string }>;
+  setLifeCardStatus: (cardId: string, status: "active" | "dormant" | "resolved") => Promise<{ ok?: boolean; error?: string }>;
+  setActiveLocation: (cardId: string | null) => void;
+  respondToProperNounSuggestion: (properNoun: string, accept: boolean, type: string) => void;
+  updateProperNounLog: (properNoun: string, type: string) => void;
+  linkProperNounToCard: (properNoun: string, cardId: string) => void;
+  deleteProperNounLog: (properNoun: string) => void;
+  clearProperNounLogs: () => void;
+  saveGlobalAsset: (asset: GlobalAsset) => Promise<{ ok?: boolean; error?: string }>;
+  deleteGlobalAsset: (id: string) => Promise<{ ok?: boolean; error?: string }>;
+  importGlobalAsset: (assetId: string) => Promise<{ ok?: boolean; error?: string; message?: string }>;
+  fillSetupValue: (value: string) => void;
+};
+
 export interface PanelHandle {
   setStatus(text: string): void;
   showToast(text: string, isError?: boolean): void;
+  /** Register a callback for a pure-storage panel event (see PanelEvents). */
+  on<K extends keyof PanelEvents>(event: K, cb: PanelEvents[K]): void;
   onExport(cb: (type: "story" | "cards" | "pe" | "aidmemories" | "propernouns" | "all") => void): void;
+  onBackupAll(cb: () => void): void;
+  onRestoreAll(cb: () => void): void;
+  showSelfHealBanner(): void;
   onBackfill(cb: () => void): void;
-  onSaveSettings(cb: (provider: string, apiKey: string, protagonist: string, model: string, analyzeWindow: number, showDebug: boolean, theme: string, s1: string, s2: string, s3: string, s4: string, cardCommands: Record<string, string>, useMemories: boolean, formattingMode: string, memoraidLookback: number, memoraidThoughtLookback: number, memoraidPresenceLookback: number, autoRegenerateMemoryBankEntry: boolean, interceptTimeout: number, useSinglePassGeneration: boolean, locationMode: "optionA" | "optionB", enableProperNounDetection: boolean, manualMode: boolean, logPlotEssentials: boolean, characterCardLimit: number, thoughtCardLimit: number) => void): void;
-  onDismissMemoraidBanner(cb: () => void): void;
-  onThemeChange(cb: (theme: string) => void): void;
-  onAnalyze(cb: () => void): void;
-  onGenerateCard(cb: (cardId: string) => void): void;
-  onProposalDecision(cb: (versionId: string, status: "applied" | "rejected") => void): void;
-  onPushVersion(cb: (versionId: string) => void): void;
-  onUpdateMemoryBank(cb: (memories: any[]) => void): void;
-  onCreateConfigCard(cb: () => void): void;
-  onCreateStoryCard(cb: (card: { type: string; title: string; keys: string; value: string; description?: string }) => Promise<{ ok?: boolean; error?: string }>): void;
-  onSaveCardKeys(cb: (cardId: string, keys: string) => Promise<{ ok?: boolean; error?: string }>): void;
-  onSaveCardValue(cb: (cardId: string, value: string) => Promise<{ ok?: boolean; error?: string }>): void;
+  onSaveSettings(cb: (settings: Settings, protagonist: string) => void): void;
   onRefineMemoryBlock(cb: (index: number) => void): void;
   onGrantPermissions(cb: () => void): void;
-  onSetActiveLocation(cb: (cardId: string | null) => void): void;
-  onRespondToProperNounSuggestion(cb: (properNoun: string, accept: boolean, type: string) => void): void;
-  onUpdateProperNounLog(cb: (properNoun: string, type: string) => void): void;
-  onLinkProperNounToCard(cb: (properNoun: string, cardId: string) => void): void;
-  onDeleteProperNounLog(cb: (properNoun: string) => void): void;
-  onClearProperNounLogs(cb: () => void): void;
-  onApplyInstruction(cb: () => void): void;
   onRefresh(cb: () => void): void;
-  onProviderChange(cb: (provider: string, apiKey: string) => void): void;
-  onBackupAll(cb: () => Promise<any>): void;
-  onRestoreAll(cb: (data: any) => Promise<any>): void;
-
-  onSaveGlobalAsset(cb: (asset: GlobalAsset) => Promise<{ ok?: boolean; error?: string }>): void;
-  onDeleteGlobalAsset(cb: (id: string) => Promise<{ ok?: boolean; error?: string }>): void;
-  onImportGlobalAsset(cb: (assetId: string) => Promise<{ ok?: boolean; error?: string; message?: string }>): void;
 
   render(state: PanelState): void;
   /** Surgically update the Actions counter + "Since Last Update Check" stat without a full re-render. */
   updateActionCount(count: number, lastAnalysisAction?: number | null): void;
-  /** Surgically re-render the AID Memories list (and unread badge) without a full re-render. */
-  updateMemories(memories: PanelState["memoryBankEntries"]): void;
-  /** Surgically update the MemorAID intercept timing readout (last run + session average). */
-  updateMemoraidTiming(stats: PanelState["memoraidTiming"]): void;
+  /** Surgically re-render the Memory Bank list (and unread badge) without a full re-render. */
+  updateMemories(memories: PanelState["aidMemories"]): void;
   setModels(models: string[], current?: string): void;
   showDebug(debug: any): void;
   showAnalyzeResult(result: any): void;
+  /** Invalidate the Knows-editor schema cache for a card so the next render refetches from
+   *  IndexedDB instead of showing a possibly-stale first-fetch snapshot (see crystallizedSchemaCache). */
+  clearCrystallizedSchemaCache(cardId: string): void;
+  refreshNpcMemory(charName: string, generated?: number, remaining?: number, done?: boolean, block?: NpcMemBlock): void;
 }
 
-function setSafeHTML(el: HTMLElement, html: string) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(html, "text/html");
+/** Replace element contents via DOMParser to avoid direct innerHTML assignment (AMO lint).
+ *  The <template> wrapper preserves context-sensitive fragments (e.g. <tr>) the head/body parse would drop. */
+function setSafeHTML(el: Element | ShadowRoot, html: string): void {
+  const doc = new DOMParser().parseFromString(`<template>${html}</template>`, "text/html");
+  const tpl = doc.querySelector("template");
   el.textContent = "";
-  while (doc.head.firstChild) {
-    el.appendChild(doc.head.firstChild);
-  }
-  while (doc.body.firstChild) {
-    el.appendChild(doc.body.firstChild);
+  if (tpl) {
+    el.appendChild(document.adoptNode(tpl.content));
   }
 }
 
@@ -159,1968 +190,13 @@ export function mountPanel(): PanelHandle {
     return "0.2.5";
   };
   const version = getManifestVersion();
-  let setActiveLocationCb: ((cardId: string | null) => void) | null = null;
-  let respondToProperNounSuggestionCb: ((properNoun: string, accept: boolean, type: string) => void) | null = null;
-  let updateProperNounLogCb: ((properNoun: string, type: string) => void) | null = null;
-  let linkProperNounToCardCb: ((properNoun: string, cardId: string) => void) | null = null;
-  let deleteProperNounLogCb: ((properNoun: string) => void) | null = null;
-  let clearProperNounLogsCb: (() => void) | null = null;
-  let saveGlobalAssetCb: ((asset: GlobalAsset) => Promise<{ ok?: boolean; error?: string }>) | null = null;
-  let deleteGlobalAssetCb: ((id: string) => Promise<{ ok?: boolean; error?: string }>) | null = null;
-  let importGlobalAssetCb: ((assetId: string) => Promise<{ ok?: boolean; error?: string; message?: string }>) | null = null;
-  let providerChangeCb: ((provider: string, apiKey: string) => void) | null = null;
-  let backupAllCb: (() => Promise<any>) | null = null;
-  let restoreAllCb: ((data: any) => Promise<any>) | null = null;
-  let saveCardValueCb: ((cardId: string, value: string) => Promise<{ ok?: boolean; error?: string }>) | null = null;
-  // Session-scoped: once the user dismisses the empty-DB self-heal banner, keep it hidden for the
-  // life of this content script even if a later render still sees an empty DB.
-  let selfHealDismissed = false;
-  // Session-scoped flag to show settings (AI Provider & Debug) when in Adventures Manager mode.
-  let managerShowSettings = false;
-  let api: PanelHandle;
+  // Pure-storage callbacks registered via panel.on(event, cb) — see PanelEvents.
+  const cbs: Partial<PanelEvents> = {};
+  const registerPanelEvent = <K extends keyof PanelEvents>(event: K, cb: PanelEvents[K]): void => { cbs[event] = safeCallback(cb); };
   const host = document.createElement("div");
-  const savedLeft = localStorage.getItem("aid-tracker-pos-left");
-  const savedTop = localStorage.getItem("aid-tracker-pos-top");
-  if (savedLeft && savedTop) {
-    host.style.cssText = `position:fixed;z-index:2147483647;left:${savedLeft};top:${savedTop};bottom:auto;`;
-  } else {
-    host.style.cssText = "position:fixed;z-index:2147483647;bottom:12px;left:12px;";
-  }
+  host.style.cssText = "position:fixed;z-index:2147483647;";
   const root = host.attachShadow({ mode: "open" });
-  setSafeHTML(root as any, `
-    <style>
-      :host {
-        color-scheme: dark;
-        --bg-glass: rgba(18, 18, 22, 0.88);
-        --border-color: rgba(255, 255, 255, 0.08);
-        --text-primary: #f3f4f6;
-        --text-secondary: #9ca3af;
-        --accent-color: #10b981;
-        --accent-glow: rgba(16, 185, 129, 0.2);
-        --accent-border: #059669;
-        --theme-text-color: #34d399;
-        --bg-card: rgba(255, 255, 255, 0.02);
-        --btn-bg: rgba(255, 255, 255, 0.04);
-        --btn-hover: rgba(255, 255, 255, 0.1);
-        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-      }
-      :host(.dragging), :host(.dragging) .box {
-        transition: none !important;
-      }
-      
-      .theme-emerald, .box.theme-emerald {
-        --accent-color: #10b981;
-        --accent-glow: rgba(16, 185, 129, 0.2);
-        --accent-border: #059669;
-        --theme-text-color: #34d399;
-      }
-      .theme-synthwave, .box.theme-synthwave {
-        --accent-color: #d946ef;
-        --accent-glow: rgba(217, 70, 239, 0.2);
-        --accent-border: #c026d3;
-        --theme-text-color: #f472b6;
-        --bg-glass: rgba(20, 16, 32, 0.88);
-      }
-      .theme-amber, .box.theme-amber {
-        --accent-color: #f59e0b;
-        --accent-glow: rgba(245, 158, 11, 0.2);
-        --accent-border: #d97706;
-        --theme-text-color: #fbbf24;
-      }
-      .theme-sapphire, .box.theme-sapphire {
-        --accent-color: #06b6d4;
-        --accent-glow: rgba(6, 182, 212, 0.2);
-        --accent-border: #0891b2;
-        --theme-text-color: #22d3ee;
-        --bg-glass: rgba(15, 20, 32, 0.88);
-      }
-
-      .box {
-        position: relative;
-        background: var(--bg-glass);
-        backdrop-filter: blur(20px);
-        -webkit-backdrop-filter: blur(20px);
-        color: var(--text-primary);
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
-        font-size: 12.5px;
-        line-height: 1.6;
-        padding: 14px;
-        border: 1px solid var(--border-color);
-        border-radius: 14px;
-        width: 320px;
-        height: auto;
-        min-width: 240px;
-        min-height: 100px;
-        max-height: 85vh;
-        max-width: 90vw;
-        resize: both;
-        overflow: hidden;
-        display: flex;
-        flex-direction: column;
-        opacity: .99;
-        transition: opacity 0.2s ease, box-shadow 0.3s ease;
-        box-sizing: border-box;
-        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
-      }
-      /* Desktop minimized state: Text pill */
-      @media (min-width: 601px) {
-        .box.minimized {
-          width: 130px;
-          height: 32px;
-          min-width: 130px;
-          min-height: 32px;
-          border-radius: 16px;
-          overflow: hidden;
-          resize: none;
-          padding: 0 12px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
-          background: rgba(18, 18, 22, 0.95);
-          border-color: var(--accent-color);
-          transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-          cursor: pointer;
-        }
-        .box.minimized #drag-handle {
-          padding-bottom: 0;
-          border-bottom: none;
-          margin-bottom: 0;
-          justify-content: space-between;
-          align-items: center;
-          height: 100%;
-          width: 100%;
-        }
-        .box.minimized #min-toggle {
-          background: none;
-          border: none;
-          color: var(--accent-color);
-          cursor: pointer;
-          font-size: 13px;
-          padding: 0 4px;
-          margin: 0;
-          width: auto;
-          height: auto;
-          display: inline-block;
-          border-radius: 0;
-        }
-        .box.minimized #min-toggle:hover {
-          color: var(--theme-text-color);
-          background: none;
-        }
-      }
-
-      /* Mobile minimized state: Circle icon */
-      @media (max-width: 600px) {
-        .box.minimized {
-          width: 45px;
-          height: 45px;
-          min-width: 45px;
-          min-height: 45px;
-          border-radius: 50%;
-          overflow: hidden;
-          resize: none;
-          padding: 0;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
-          background: var(--bg-glass);
-          border-color: var(--accent-color);
-          transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-          cursor: pointer;
-        }
-        .box.minimized #drag-handle {
-          padding-bottom: 0;
-          border-bottom: none;
-          margin-bottom: 0;
-          justify-content: center;
-          align-items: center;
-          height: 100%;
-          width: 100%;
-        }
-        .box.minimized #min-toggle {
-          width: 100%;
-          height: 100%;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 0;
-          border-radius: 50%;
-        }
-        .box.minimized #min-toggle:hover {
-          color: var(--theme-text-color);
-          background: rgba(255, 255, 255, 0.05);
-        }
-        .box.minimized .badge-dot {
-          position: absolute;
-          top: 6px;
-          right: 6px;
-          margin: 0;
-          width: 8px;
-          height: 8px;
-          z-index: 10;
-        }
-        .box:not(.minimized) {
-          width: 100% !important;
-          height: 100% !important;
-          min-width: 0 !important;
-          min-height: 0 !important;
-          max-width: none !important;
-          max-height: none !important;
-          resize: none !important;
-          border-radius: 14px !important;
-        }
-      }
-      
-      /* Rounded translucent scrollbars */
-      ::-webkit-scrollbar {
-        width: 8px;
-        height: 8px;
-      }
-      ::-webkit-scrollbar-track {
-        background: rgba(0, 0, 0, 0.15);
-        border-radius: 8px;
-      }
-      ::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.18);
-        border: 2px solid transparent;
-        background-clip: padding-box;
-        border-radius: 8px;
-      }
-      ::-webkit-scrollbar-thumb:hover {
-        background: rgba(255, 255, 255, 0.35);
-        border: 2px solid transparent;
-        background-clip: padding-box;
-      }
-
-      /* Slide down and fade in micro-animations for expanding sections and tabs */
-      @keyframes slideDown {
-        from { opacity: 0; transform: translateY(-8px); }
-        to { opacity: 1; transform: translateY(0); }
-      }
-      .box .char-card-body,
-      .box .char-section-body,
-      .box .history-detail-body,
-      .box .tab-pane {
-        animation: slideDown 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
-      }
-
-      button {
-        cursor: pointer;
-        margin: 2px 0;
-        background: var(--btn-bg);
-        color: var(--text-primary);
-        border: 1px solid var(--border-color);
-        border-radius: 8px;
-        padding: 5px 12px;
-        font-size: 11px;
-        font-weight: 500;
-        font-family: inherit;
-        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        gap: 6px;
-        letter-spacing: 0.01em;
-      }
-      button:hover {
-        background: var(--btn-hover);
-        border-color: var(--accent-color);
-        box-shadow: 0 0 12px var(--accent-glow);
-        transform: translateY(-1px);
-      }
-      button:active {
-        transform: translateY(0);
-      }
-      #an {
-        background: linear-gradient(135deg, var(--accent-color), var(--accent-border));
-        border: none;
-        color: #ffffff;
-        font-weight: 600;
-        box-shadow: 0 4px 12px var(--accent-glow);
-      }
-      #an:hover {
-        background: linear-gradient(135deg, var(--accent-color), var(--accent-color));
-        box-shadow: 0 6px 16px var(--accent-glow);
-        color: #ffffff;
-        transform: translateY(-1px);
-      }
-      #uc {
-        background: linear-gradient(135deg, var(--accent-color), var(--accent-border));
-        border: none;
-        color: #ffffff;
-        font-weight: 600;
-        box-shadow: 0 4px 12px var(--accent-glow);
-      }
-      #uc:hover {
-        background: linear-gradient(135deg, var(--accent-color), var(--accent-color));
-        box-shadow: 0 6px 16px var(--accent-glow);
-        color: #ffffff;
-        transform: translateY(-1px);
-      }
-      
-      /* Premium glass-morphic input fields */
-      input, select {
-        width: 100%;
-        box-sizing: border-box;
-        margin: 6px 0 10px 0;
-        background: rgba(255, 255, 255, 0.03);
-        color: var(--text-primary);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        padding: 7px 10px;
-        border-radius: 8px;
-        outline: none;
-        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-        font-family: inherit;
-        font-size: 11px;
-      }
-      input:focus, select:focus {
-        border-color: var(--accent-color);
-        box-shadow: 0 0 0 3px var(--accent-glow);
-        background: rgba(0, 0, 0, 0.4);
-      }
-      select option {
-        background-color: #121216;
-        color: var(--text-primary);
-      }
-      #clear-active-location:hover {
-        background: rgba(239, 68, 68, 0.25) !important;
-        border-color: rgba(239, 68, 68, 0.5) !important;
-        box-shadow: 0 0 8px rgba(239, 68, 68, 0.4) !important;
-        transform: translateY(0) !important;
-      }
-      input[type="checkbox"] {
-        cursor: pointer;
-        width: 14px;
-        height: 14px;
-        accent-color: var(--accent-color);
-        margin: 0;
-        border-radius: 4px;
-        transition: all 0.2s;
-      }
-      
-      textarea {
-        width: 100%;
-        box-sizing: border-box;
-        background: rgba(255, 255, 255, 0.03);
-        color: var(--text-primary);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 8px;
-        padding: 8px 12px;
-        outline: none;
-        font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
-        font-size: 11px;
-        line-height: 1.5;
-        resize: vertical;
-        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-      }
-      textarea:focus {
-        border-color: var(--accent-color);
-        box-shadow: 0 0 0 3px var(--accent-glow);
-        background: rgba(0, 0, 0, 0.4);
-      }
-      
-      #open-settings svg, #open-settings-manager svg {
-        transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s;
-      }
-      #open-settings:hover svg, #open-settings-manager:hover svg {
-        transform: rotate(45deg);
-        color: var(--accent-color);
-      }
-
-      /* Premium Header Bar */
-      #drag-handle {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        width: 100%;
-        cursor: move;
-        user-select: none;
-        padding-bottom: 8px;
-        border-bottom: 1px solid var(--border-color);
-        margin-bottom: 8px;
-      }
-      #st {
-        font-weight: 800;
-        font-size: 13.5px;
-        letter-spacing: 0.02em;
-        color: var(--text-primary);
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-      #min-toggle {
-        background: none;
-        border: none;
-        color: var(--accent-color);
-        cursor: pointer;
-        font-size: 13px;
-        padding: 0 4px;
-        margin: 0;
-        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-        text-shadow: none;
-      }
-      #min-toggle:hover {
-        transform: scale(1.25);
-        box-shadow: none;
-        background: none;
-        border: none;
-      }
-
-      /* Premium Toast Notification */
-      #toast {
-        display: none;
-        position: absolute;
-        top: 44px;
-        left: 50%;
-        transform: translate(-50%, -10px);
-        color: #ffffff;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        padding: 6px 14px;
-        border-radius: 8px;
-        font-size: 11px;
-        font-weight: 600;
-        z-index: 9999;
-        transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-        opacity: 0;
-        pointer-events: none;
-        white-space: nowrap;
-        letter-spacing: 0.02em;
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
-      }
-
-      /* Backfill button footer styling */
-      #bf {
-        background: none;
-        border: none;
-        padding: 4px;
-        margin: 0;
-        cursor: pointer;
-        color: var(--text-secondary);
-        font-size: 11px;
-        display: inline-flex;
-        align-items: center;
-        gap: 3px;
-        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-        text-shadow: none;
-        box-shadow: none;
-      }
-      #bf:hover {
-        color: var(--accent-color);
-        transform: scale(1.05);
-        box-shadow: none;
-        background: none;
-      }
-
-      /* Tabs layout */
-      .tab-btn {
-        background: rgba(255, 255, 255, 0.02);
-        border: 1px solid var(--border-color);
-        color: var(--text-secondary);
-        font-weight: 500;
-        cursor: pointer;
-        padding: 4px 8px;
-        font-size: 11px;
-        border-radius: 6px;
-        transition: all 0.2s ease;
-      }
-      .tab-btn:hover {
-        background: rgba(255, 255, 255, 0.05);
-        color: var(--text-primary);
-        border-color: var(--accent-color);
-      }
-      .tab-btn.active {
-        background: var(--accent-color);
-        border-color: var(--accent-border);
-        color: #fff;
-        font-weight: 600;
-        box-shadow: 0 0 10px var(--accent-glow);
-      }
-
-      /* Adventures Manager DB Explorer Categories styles */
-      details.local-category-details {
-        border: 1px solid var(--border-color);
-        border-left: 2.5px solid var(--text-secondary);
-        border-radius: 6px;
-        margin: 4px 0;
-        background: rgba(255, 255, 255, 0.01);
-        transition: all 0.2s ease;
-      }
-      details.local-category-details[open] {
-        background: rgba(0, 0, 0, 0.1);
-        border-color: rgba(255, 255, 255, 0.08);
-      }
-      details.local-category-details > summary {
-        cursor: pointer;
-        padding: 6px 10px;
-        font-weight: 600;
-        font-size: 11px;
-        color: var(--text-secondary);
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        user-select: none;
-        outline: none;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        transition: all 0.2s;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      details.local-category-details > summary:hover {
-        background: rgba(255, 255, 255, 0.02);
-      }
-      details.local-category-details > summary::after {
-        content: "▾";
-        color: var(--text-secondary);
-        font-size: 9px;
-        transition: transform 0.2s;
-        display: inline-block;
-        margin-left: auto;
-        flex-shrink: 0;
-        padding-left: 6px;
-      }
-      details.local-category-details[open] > summary::after {
-        transform: rotate(-180deg);
-      }
-
-      /* Premium Scrollable Container Constraints */
-      .tab-content {
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        min-height: 0;
-        max-height: none;
-      }
-      .tab-pane {
-        flex: 1;
-        display: none;
-        flex-direction: column;
-        min-height: 0;
-        overflow-y: auto;
-      }
-      #view-tracker-scrollable {
-        flex: 1;
-        overflow-y: auto;
-        padding-right: 4px;
-        margin-top: 8px;
-        min-height: 0;
-        max-height: none;
-      }
-      #analyze-body {
-        flex: 1;
-        overflow-y: auto;
-        padding-right: 4px;
-        min-height: 0;
-        max-height: none;
-      }
-      
-      /* Accordion formatting */
-      .box details {
-        border: 1px solid var(--border-color);
-        border-radius: 8px;
-        margin: 6px 0;
-        background: rgba(255, 255, 255, 0.01);
-        transition: all 0.2s;
-        overflow: hidden;
-      }
-      .box details[open] {
-        background: rgba(0, 0, 0, 0.15);
-        border-color: rgba(255, 255, 255, 0.1);
-      }
-      .box summary {
-        cursor: pointer;
-        padding: 8px 12px;
-        font-weight: 600;
-        user-select: none;
-        outline: none;
-        transition: all 0.2s;
-        position: relative;
-        padding-right: 24px;
-        list-style: none; /* Hide standard list-marker in Firefox */
-      }
-      .box summary::-webkit-details-marker {
-        display: none; /* Hide standard list-marker in Chrome/Safari */
-      }
-      .box summary:hover {
-        background: rgba(255, 255, 255, 0.03);
-      }
-      .box summary::after {
-        content: "▾";
-        color: var(--text-secondary);
-        font-size: 10px;
-        transition: transform 0.2s;
-        position: absolute;
-        right: 12px;
-        top: 50%;
-        transform: translateY(-50%);
-        display: inline-block;
-      }
-      .box details[open] > summary::after {
-        transform: translateY(-50%) rotate(-180deg);
-      }
-
-      /* ---- Type-group header rows (Characters, Locations, etc.) ---- */
-      .group-header {
-        border: 1px solid var(--border-color);
-        border-left: 3px solid var(--accent-color);
-        border-radius: 8px;
-        margin: 6px 0;
-        background: rgba(255, 255, 255, 0.02);
-        transition: all 0.25s ease;
-      }
-      .group-header[open] {
-        background: rgba(0, 0, 0, 0.12);
-        border-color: rgba(255, 255, 255, 0.1);
-        border-left-color: var(--accent-color);
-      }
-      .group-header > summary {
-        cursor: pointer;
-        padding: 9px 12px;
-        font-weight: 700;
-        font-size: 12px;
-        color: var(--theme-text-color);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        user-select: none;
-        outline: none;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        transition: all 0.2s;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      .group-header > summary:hover {
-        background: rgba(255, 255, 255, 0.04);
-        box-shadow: inset 0 0 12px var(--accent-glow);
-      }
-      .group-header > summary::after {
-        content: "▾";
-        color: var(--accent-color);
-        font-size: 10px;
-        transition: transform 0.2s;
-        display: inline-block;
-        margin-left: auto;
-        flex-shrink: 0;
-        padding-left: 8px;
-      }
-      .group-header[open] > summary::after {
-        transform: rotate(-180deg);
-      }
-
-      /* ---- Archive section header ---- */
-      .archive-header {
-        border: 1px solid rgba(255, 255, 255, 0.06);
-        border-left: 3px solid var(--text-secondary);
-        border-radius: 8px;
-        margin: 10px 0 6px;
-        background: rgba(0, 0, 0, 0.08);
-        transition: all 0.25s ease;
-      }
-      .archive-header[open] {
-        background: rgba(0, 0, 0, 0.15);
-        border-color: rgba(255, 255, 255, 0.08);
-        border-left-color: var(--text-secondary);
-      }
-      .archive-header > summary {
-        cursor: pointer;
-        padding: 9px 12px;
-        font-weight: 600;
-        font-size: 12px;
-        color: var(--text-secondary);
-        user-select: none;
-        outline: none;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        transition: all 0.2s;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      .archive-header > summary:hover {
-        background: rgba(255, 255, 255, 0.03);
-      }
-      .archive-header > summary::after {
-        content: "▾";
-        color: var(--text-secondary);
-        font-size: 10px;
-        transition: transform 0.2s;
-        display: inline-block;
-        margin-left: auto;
-        flex-shrink: 0;
-        padding-left: 8px;
-      }
-      .archive-header[open] > summary::after {
-        transform: rotate(-180deg);
-      }
-
-      /* ---- Character card rows inside groups: full-width card-styled elements ---- */
-      .box .char-card {
-        border: 1px solid var(--border-color);
-        border-radius: 8px;
-        margin: 8px 0;
-        background: rgba(255, 255, 255, 0.02);
-        overflow: hidden;
-        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-      }
-      .box .char-card[open] {
-        background: rgba(20, 20, 24, 0.85);
-        border-color: rgba(255, 255, 255, 0.16);
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
-        margin: 18px 0; /* Clear visual distance from neighboring cards when expanded */
-      }
-      .box .char-card > summary {
-        cursor: pointer;
-        padding: 10px 14px;
-        font-weight: 600;
-        font-size: 13.5px;
-        color: var(--text-primary);
-        user-select: none;
-        outline: none;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        transition: all 0.2s ease;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      .box .char-card > summary:hover {
-        background: rgba(255, 255, 255, 0.04);
-      }
-      .box .char-card[open] > summary {
-        background: rgba(255, 255, 255, 0.03);
-        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      }
-      .box .char-card > summary::after {
-        content: "▾";
-        color: var(--text-secondary);
-        font-size: 10px;
-        display: inline-block;
-        transition: transform 0.2s ease;
-        margin-left: auto;
-        flex-shrink: 0;
-        padding-left: 8px;
-      }
-      .box .char-card[open] > summary::after {
-        transform: rotate(-180deg);
-        color: var(--accent-color);
-      }
-
-      /* Card Content Body Wrapper */
-      .box .char-card-body {
-        padding: 12px;
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-      }
-
-      /* Pending Proposal Container */
-      .box .pending-proposal-box {
-        border: 1px solid rgba(239, 68, 68, 0.25);
-        border-radius: 8px;
-        padding: 12px;
-        background: rgba(239, 68, 68, 0.04);
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      }
-      .box .pending-title {
-        font-weight: 700;
-        color: #fca5a5;
-        font-size: 11.5px;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        margin-bottom: 2px;
-      }
-      .box .pending-summary {
-        color: #ffb3b3;
-        font-size: 12.5px;
-      }
-
-      /* Inner expandable section rows (Current Entry, view proposed entry) */
-      .box .char-section {
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        border-radius: 6px;
-        background: rgba(255, 255, 255, 0.01);
-        overflow: hidden;
-        transition: all 0.2s ease;
-        margin: 0;
-      }
-      .box .char-section[open] {
-        background: rgba(0, 0, 0, 0.2);
-        border-color: rgba(255, 255, 255, 0.1);
-      }
-      .box .char-section > summary {
-        cursor: pointer;
-        padding: 8px 12px;
-        font-weight: 600;
-        font-size: 11.5px;
-        color: var(--accent-color);
-        user-select: none;
-        outline: none;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        transition: all 0.15s ease;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      .box .char-section > summary:hover {
-        background: rgba(255, 255, 255, 0.03);
-      }
-      .box .char-section > summary::after {
-        content: "▾";
-        color: var(--text-secondary);
-        font-size: 9px;
-        display: inline-block;
-        transition: transform 0.2s ease;
-        margin-left: auto;
-        flex-shrink: 0;
-        padding-left: 8px;
-        opacity: 0.7;
-      }
-      .box .char-section[open] > summary::after {
-        transform: rotate(-180deg);
-      }
-      .box .char-section-body {
-        padding: 10px;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      }
-
-      /* History & Rewrites Styling */
-      .box .history-header {
-        margin-top: 4px;
-        font-size: 11.5px;
-        color: var(--text-secondary);
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        border-top: 1px solid rgba(255, 255, 255, 0.06);
-        padding-top: 10px;
-      }
-      .box .history-list {
-        margin-top: 4px;
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        padding-right: 4px;
-      }
-      .box .history-item {
-        border: 1px solid rgba(255, 255, 255, 0.04);
-        border-radius: 6px;
-        background: rgba(255, 255, 255, 0.01);
-        overflow: hidden;
-        transition: all 0.2s ease;
-        margin: 0;
-      }
-      .box .history-item[open] {
-        background: rgba(0, 0, 0, 0.15);
-        border-color: rgba(255, 255, 255, 0.08);
-      }
-      .box .history-item > summary {
-        cursor: pointer;
-        padding: 6px 12px;
-        font-weight: 500;
-        font-size: 12px;
-        color: var(--text-primary);
-        user-select: none;
-        outline: none;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        transition: all 0.15s ease;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      .box .history-item > summary:hover {
-        background: rgba(255, 255, 255, 0.03);
-      }
-      .box .history-item > summary::after {
-        content: "▾";
-        color: var(--text-secondary);
-        font-size: 9px;
-        display: inline-block;
-        transition: transform 0.2s ease;
-        margin-left: auto;
-        flex-shrink: 0;
-        padding-left: 8px;
-        opacity: 0.5;
-      }
-      .box .history-item[open] > summary::after {
-        transform: rotate(-180deg);
-      }
-      .box .history-detail-body {
-        padding: 10px;
-        background: rgba(0, 0, 0, 0.15);
-        border-top: 1px solid rgba(255, 255, 255, 0.04);
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      }
-      .box .history-meta {
-        font-weight: 600;
-        font-size: 11px;
-        color: var(--accent-color);
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-        padding-bottom: 4px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-      }
-
-      /* Doubly-nested view entry details inside history detail body */
-      .box .view-entry-detail {
-        border: 1px solid rgba(255, 255, 255, 0.04);
-        border-radius: 6px;
-        background: rgba(0, 0, 0, 0.1);
-        overflow: hidden;
-      }
-      .box .view-entry-detail > summary {
-        cursor: pointer;
-        padding: 6px 10px;
-        font-weight: 500;
-        font-size: 11px;
-        color: var(--text-secondary);
-        user-select: none;
-        outline: none;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        transition: all 0.15s ease;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      .box .view-entry-detail > summary:hover {
-        background: rgba(255, 255, 255, 0.02);
-        color: var(--text-primary);
-      }
-      .box .view-entry-detail > summary::after {
-        content: "▾";
-        color: var(--text-secondary);
-        font-size: 8px;
-        display: inline-block;
-        transition: transform 0.2s ease;
-        margin-left: auto;
-        opacity: 0.5;
-      }
-      .box .view-entry-detail[open] > summary::after {
-        transform: rotate(-180deg);
-      }
-
-      /* Action Buttons */
-      .box .action-btn {
-        font-size: 10px;
-        padding: 4px 10px;
-        background: var(--btn-bg, rgba(255, 255, 255, 0.05));
-        border: 1px solid var(--border-color);
-        color: var(--text-primary);
-        border-radius: 6px;
-        cursor: pointer;
-        font-weight: 500;
-        transition: all 0.2s ease;
-        display: inline-block;
-      }
-      .box .action-btn:hover {
-        background: rgba(255, 255, 255, 0.1);
-        border-color: rgba(255, 255, 255, 0.2);
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
-      }
-      
-      /* Fallback nested detail styles for non-grouped contexts (settings, etc.) */
-      .box details details {
-        border: none;
-        border-top: 1px solid rgba(255, 255, 255, 0.04);
-        border-radius: 0;
-        background: none;
-        margin: 0;
-      }
-      .box details details[open] {
-        background: rgba(0, 0, 0, 0.06);
-      }
-      .box details details > summary {
-        cursor: pointer;
-        padding: 6px 12px;
-        font-weight: 500;
-        font-size: 10.5px;
-        color: var(--accent-color);
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        width: 100%;
-        box-sizing: border-box;
-        transition: all 0.15s;
-        user-select: none;
-        outline: none;
-      }
-      .box details details > summary:hover {
-        background: rgba(255, 255, 255, 0.04);
-      }
-      .box details details > summary::after {
-        content: "▾";
-        color: var(--text-secondary);
-        font-size: 9px;
-        display: inline-block;
-        transition: transform 0.2s;
-        margin-left: auto;
-        flex-shrink: 0;
-        padding-left: 8px;
-        opacity: 0.6;
-      }
-      .box details details[open] > summary::after {
-        transform: rotate(-180deg);
-      }
-
-      .prop {
-        border: 1px solid var(--border-color);
-        border-radius: 8px;
-        padding: 8px;
-        margin: 8px 0;
-        background: rgba(0, 0, 0, 0.15);
-      }
-      .sum {
-        color: var(--text-primary);
-        font-weight: 600;
-      }
-      .tl {
-        color: var(--text-secondary);
-        font-size: 11px;
-      }
-      .code-card {
-        background: rgba(10, 10, 12, 0.45);
-        border: 1px solid var(--border-color);
-        border-left: 3px solid var(--accent-color);
-        border-radius: 8px;
-        padding: 8px 12px;
-        margin: 6px 0;
-        box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
-      }
-      .code-card pre {
-        white-space: pre-wrap;
-        margin: 0;
-        font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
-        font-size: 11px;
-        line-height: 1.5;
-        color: var(--text-primary);
-        background: none;
-        border: none;
-        padding: 0;
-        overflow-x: auto;
-      }
-      .code-card-header {
-        font-size: 11px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        margin-bottom: 6px;
-        border-bottom: 1px solid var(--border-color);
-        padding-bottom: 4px;
-        color: var(--accent-color);
-      }
-      .note {
-        color: var(--text-secondary);
-        font-size: 11px;
-        line-height: 1.5;
-      }
-      label {
-        font-weight: 600;
-        font-size: 11px;
-        color: var(--text-secondary);
-        display: block;
-        margin-top: 8px;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-      }
-      h4 { margin: 6px 0 2px }
-      .spinner { width: 22px; height: 22px; border: 2px solid var(--border-color); border-top-color: var(--accent-color); border-radius: 50%; animation: aid-spin 0.8s linear infinite; display: inline-block; }
-      @keyframes aid-spin { to { transform: rotate(360deg); } }
-
-      /* Glassmorphic Overlay / Modal */
-      .box .overlay {
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(10, 10, 14, 0.98);
-        backdrop-filter: blur(30px);
-        -webkit-backdrop-filter: blur(30px);
-        z-index: 20000;
-        display: none;
-        flex-direction: column;
-        padding: 16px;
-        box-sizing: border-box;
-        overflow-y: auto;
-        animation: slideUp 0.3s cubic-bezier(0.25, 0.8, 0.25, 1) forwards;
-      }
-      @keyframes slideUp {
-        from { transform: translateY(100%); opacity: 0; }
-        to { transform: translateY(0); opacity: 1; }
-      }
-      .box .overlay-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        border-bottom: 1px solid var(--border-color);
-        padding-bottom: 8px;
-        margin-bottom: 12px;
-      }
-      .box .overlay-title {
-        font-weight: 800;
-        font-size: 12px;
-        color: var(--accent-color);
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-      }
-      .box .overlay-close {
-        background: none;
-        border: none;
-        color: var(--text-secondary);
-        font-size: 16px;
-        cursor: pointer;
-        padding: 4px;
-        display: inline-flex;
-        align-items: center;
-      }
-      .box .overlay-close:hover {
-        color: var(--text-primary);
-        transform: scale(1.1);
-      }
-      .box .overlay-content {
-        font-size: 11.5px;
-        line-height: 1.6;
-        color: var(--text-primary);
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-      }
-
-      /* Tab Navigation for Main Panel */
-      .main-tab-nav {
-        display: flex;
-        border-bottom: 1px solid var(--border-color);
-        padding-bottom: 6px;
-        gap: 6px;
-        margin-top: 8px;
-        box-sizing: border-box;
-      }
-      .main-tab-btn {
-        background: rgba(255, 255, 255, 0.02);
-        border: 1px solid var(--border-color);
-        color: var(--text-secondary);
-        font-weight: 600;
-        cursor: pointer;
-        padding: 5px 8px;
-        font-size: 11px;
-        border-radius: 8px;
-        transition: all 0.2s ease;
-      }
-      .main-tab-btn:hover {
-        background: rgba(255, 255, 255, 0.05);
-        color: var(--text-primary);
-        border-color: var(--accent-color);
-      }
-      .main-tab-btn.active {
-        background: var(--accent-color);
-        border-color: var(--accent-border);
-        color: #fff;
-        font-weight: 600;
-        box-shadow: 0 0 10px var(--accent-glow);
-      }
-
-      /* Slowly Pulsing Badge Notification */
-      @keyframes slowPulse {
-        0% { transform: scale(1); opacity: 0.85; box-shadow: 0 0 0 0 rgba(217, 70, 239, 0.4); }
-        50% { transform: scale(1.08); opacity: 1; box-shadow: 0 0 8px 3px rgba(217, 70, 239, 0.6); }
-        100% { transform: scale(1); opacity: 0.85; box-shadow: 0 0 0 0 rgba(217, 70, 239, 0.4); }
-      }
-      .box .badge-new-memories {
-        background: linear-gradient(135deg, #d946ef, #a855f7);
-        color: #ffffff;
-        font-size: 9.5px;
-        font-weight: 800;
-        padding: 1px 6px;
-        border-radius: 10px;
-        margin-left: 6px;
-        display: inline-block;
-        vertical-align: middle;
-        animation: slowPulse 2s infinite ease-in-out;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-      }
-
-      /* Slow flashing/pinging animation for newly added memories */
-      @keyframes cardPing {
-        0% { border-color: var(--border-color); background: rgba(255, 255, 255, 0.01); box-shadow: 0 0 0px var(--accent-glow); }
-        30% { border-color: var(--accent-color); background: var(--accent-glow); box-shadow: 0 0 12px var(--accent-glow); }
-        100% { border-color: var(--border-color); background: rgba(255, 255, 255, 0.01); box-shadow: none; }
-      }
-      .box .memory-card.ping-new {
-        animation: cardPing 4s 2 ease-in-out;
-      }
-
-      /* Slow pulsing animation for proposals */
-      @keyframes slowPulseRed {
-        0% { transform: scale(1); opacity: 0.85; box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
-        50% { transform: scale(1.08); opacity: 1; box-shadow: 0 0 8px 3px rgba(239, 68, 68, 0.6); }
-        100% { transform: scale(1); opacity: 0.85; box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
-      }
-      .box .badge-new-proposals {
-        background: linear-gradient(135deg, #ef4444, #f87171);
-        color: #ffffff;
-        font-size: 9.5px;
-        font-weight: 800;
-        padding: 1px 6px;
-        border-radius: 10px;
-        margin-left: 6px;
-        display: inline-block;
-        vertical-align: middle;
-        animation: slowPulseRed 2s infinite ease-in-out;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-      }
-      .box .badge-dot {
-        display: inline-block;
-        width: 7px;
-        height: 7px;
-        background: #ef4444;
-        border-radius: 50%;
-        margin-left: 5px;
-        vertical-align: middle;
-        box-shadow: 0 0 6px rgba(239, 68, 68, 0.8);
-        animation: slowPulseRed 1.5s infinite ease-in-out;
-      }
-      .group-header.has-proposals {
-        border-color: rgba(239, 68, 68, 0.3);
-        border-left-color: #ef4444 !important;
-        background: rgba(239, 68, 68, 0.03);
-      }
-      .group-header.has-proposals > summary {
-        color: #fca5a5;
-      }
-      .group-header.has-proposals > summary::after {
-        color: #ef4444;
-      }
-
-      /* AID Memories timeline cards */
-      .box .memory-card {
-        border: 1px solid var(--border-color);
-        border-radius: 8px;
-        padding: 10px 12px;
-        background: rgba(255, 255, 255, 0.01);
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        transition: all 0.25s ease;
-      }
-      .box .memory-card:hover {
-        background: rgba(255, 255, 255, 0.03);
-        border-color: rgba(255, 255, 255, 0.12);
-      }
-      .box .memory-card-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        font-size: 10px;
-        color: var(--text-secondary);
-      }
-      .box .memory-card-text {
-        font-size: 12px;
-        line-height: 1.5;
-        color: var(--text-primary);
-        white-space: pre-wrap;
-      }
-      .box .memory-status-dot {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        display: inline-block;
-        margin-right: 6px;
-      }
-      .box .memory-status-dot.active {
-        background: var(--accent-color);
-        box-shadow: 0 0 6px var(--accent-glow);
-      }
-      .box .memory-status-dot.used {
-        background: #d946ef;
-        box-shadow: 0 0 6px rgba(217, 70, 239, 0.4);
-      }
-      .box .memory-status-dot.stored {
-        background: var(--text-secondary);
-      }
-    </style>
-    <div class="box theme-emerald">
-      <div id="drag-handle">
-        <div id="st">AID Story Helper</div>
-        <button id="min-toggle">—</button>
-      </div>
-      <div id="self-heal-banner" style="display:none;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:10px;margin:8px;box-sizing:border-box;">
-        <div style="font-weight:700;color:#f87171;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;">Empty Database Detected</div>
-        <div class="note" style="margin:4px 0 8px 0;font-size:11px;line-height:1.4;color:var(--text-secondary);">It looks like your local IndexedDB is empty. If you have a backup, you can restore it now.</div>
-        <div style="display:flex;gap:6px;align-items:center;">
-          <button class="db-restore-trigger" style="background:rgba(239,68,68,0.2);color:#f87171;border:1px solid rgba(239,68,68,0.4);padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px;font-weight:600;min-height:unset;width:auto;">Restore from Backup</button>
-          <button id="dismiss-self-heal-btn" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:10px;font-weight:600;padding:4px 8px;text-decoration:underline;margin:0;min-height:unset;width:auto;">Dismiss</button>
-        </div>
-      </div>
-      <div id="toast">Settings saved</div>
-      
-      <div id="content-body" style="width:100%; flex:1; display:flex; flex-direction:column; overflow:hidden; min-height:0;">
-        <!-- VIEW: TRACKER -->
-        <div id="view-tracker" style="display:flex; flex-direction:column; flex:1; overflow:hidden; min-height:0;">
-          <div id="meta-stats" style="margin:8px 0;padding:8px 12px;background:rgba(0,0,0,0.25);border-radius:8px;border:1px solid var(--border-color);display:flex;justify-content:space-between;font-size:10px;color:var(--text-secondary);font-family:SFMono-Regular,Consolas,monospace;">
-            <div>Actions: <span id="stat-turn" style="color:var(--accent-color);font-weight:bold;">0</span></div>
-            <div>Last Auto-Updated: <span id="stat-last-auto" style="color:var(--accent-color);font-weight:bold;">-</span></div>
-          </div>
-
-          <!-- Tab Navigation for Main Panel -->
-          <div class="main-tab-nav" style="margin-bottom:8px;">
-            <button class="main-tab-btn active" data-tab="main-tab-tracker" style="flex:1;white-space:nowrap;margin:0;position:relative;">Card Manager<span id="tracker-proposals-badge" style="display:none;"></span></button>
-            <button class="main-tab-btn" data-tab="main-tab-memories" style="flex:1;white-space:nowrap;margin:0;position:relative;">Memory Bank<span id="unread-memories-badge" style="display:none;"></span></button>
-          </div>
-
-          <!-- Main Pane 1: Card Manager -->
-          <div id="main-tab-tracker" class="main-tab-pane" style="display:flex; flex-direction:column; flex:1; overflow:hidden; min-height:0;">
-            <div id="location-banners-container" style="flex-shrink:0;"></div>
-            <div id="view-tracker-scrollable">
-              <div id="results"></div>
-            </div>
-          </div>
-
-          <!-- Main Pane 2: AID Memories Timeline -->
-          <div id="main-tab-memories" class="main-tab-pane" style="display:none; flex-direction:column; flex:1; overflow:hidden; min-height:0;">
-            <div style="display:flex; gap:6px; margin-bottom:8px;">
-              <button id="refine-mem" style="flex:1; margin:0; background:linear-gradient(135deg, var(--accent-color), var(--accent-border)); color:#fff; font-weight:600; padding:6px; border-radius:6px; border:none; cursor:pointer; font-size:10px;">⚡ Regenerate Latest</button>
-            </div>
-            <div id="aid-memories-scrollable" style="flex:1; overflow-y:auto; padding-right:4px; min-height:0;">
-              <div id="aid-memories-list" style="display:flex; flex-direction:column; gap:8px;"></div>
-            </div>
-          </div>
-
-          <!-- Pinned Main Footer -->
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:8px;border-top:1px solid var(--border-color);box-sizing:border-box;">
-            <div style="display:flex;gap:12px;align-items:center;">
-              <button id="open-settings" style="background:none;border:none;padding:4px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;" title="Settings">
-                <svg style="width:16px;height:16px;fill:currentColor;" viewBox="0 0 24 24">
-                  <path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.13,5.91,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87 C2.62,9.08,2.67,9.34,2.85,9.48l2.03,1.58C4.83,11.36,4.81,11.69,4.81,12c0,0.31,0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.43-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/>
-                </svg>
-              </button>
-              <button id="bf" title="Backfill Scenario History">⤓ Backfill</button>
-            </div>
-            
-            <button id="create-card-trigger" style="background:var(--accent-color);color:#fff;border:none;border-radius:4px;padding:3.5px 8px;font-size:11px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:4px;box-shadow:0 1px 3px rgba(0,0,0,0.2);" title="Create Story Card">
-              <span>+ Add Card</span>
-            </button>
-
-            <div style="display:flex;gap:6px;align-items:center;">
-              <div style="font-size:10px;color:var(--text-secondary);font-family:system-ui;">v${version}</div>
-              <button id="info-help" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About & How it works">
-                <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
-                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
-                </svg>
-              </button>
-            </div>
-          </div>
-        </div>
-        
-        <!-- VIEW: SETTINGS -->
-        <div id="view-settings" style="display:none;flex-direction:column;gap:10px;margin-top:8px;flex:1;overflow:hidden;min-height:0;">
-          <!-- Tab Navigation -->
-          <div class="tab-nav" style="display:flex;border-bottom:1px solid var(--border-color);padding-bottom:6px;gap:4px;overflow-x:auto;">
-            <button class="tab-btn active" data-tab="tab-gen" style="flex:1;white-space:nowrap;margin:0;">General</button>
-            <button class="tab-btn" data-tab="tab-prov" style="flex:1;white-space:nowrap;margin:0;">AI Provider</button>
-            <button class="tab-btn" data-tab="tab-memoraid" style="flex:1;white-space:nowrap;margin:0;">MemorAID</button>
-            <button class="tab-btn" data-tab="tab-prompts" style="flex:1;white-space:nowrap;margin:0;">Prompts</button>
-            <button class="tab-btn" data-tab="tab-offmeta" style="flex:1;white-space:nowrap;margin:0;">OffMeta's AIN</button>
-            <button class="tab-btn" data-tab="tab-manager" style="flex:1;white-space:nowrap;margin:0;">Adventures Manager</button>
-            <button class="tab-btn" data-tab="tab-debug" style="flex:1;white-space:nowrap;margin:0;">Debug</button>
-          </div>
-          
-          <!-- Tab Panes -->
-          <div class="tab-content">
-            <!-- Pane: General Settings -->
-            <div id="tab-gen" class="tab-pane" style="display:block;">
-              <label>Theme</label>
-              <select id="theme" style="margin:4px 0 8px 0;">
-                <option value="emerald">Modern Emerald</option>
-                <option value="synthwave">Synthwave Purple</option>
-                <option value="amber">Cyber Amber</option>
-                <option value="sapphire">Plasma Sapphire</option>
-              </select>
-              
-              <label>Protagonist Name</label>
-              <input id="prot" type="text" placeholder="e.g. Smoke" style="margin:4px 0 8px 0;" />
-              
-              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 12px 0;">
-                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;flex:1;">
-                  <input id="auto-regen-memories" type="checkbox" style="width:auto;margin:0;" />
-                  Automatically regen latest Memory Bank entry?
-                </label>
-              </div>
-              
-              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
-                <label style="margin:0;flex:1;">Action Lookback Window</label>
-                <button id="info-action-lookback" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About Action Lookback Window">
-                  <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
-                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
-                  </svg>
-                </button>
-              </div>
-              <input id="win" type="number" min="1" placeholder="20" style="margin:4px 0 4px 0;" />
-              
-              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
-                <label style="margin:0;flex:1;">Character Card Character Limit</label>
-              </div>
-              <input id="char-card-limit" type="number" min="100" max="2000" placeholder="600" style="margin:4px 0 8px 0;" />
-
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:4px 0 10px 0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;">
-                <input id="enable-manual-mode" type="checkbox" style="width:auto;margin:0;" />
-                Enable Manual Mode - No Automatic Updates
-              </label>
-
-              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
-                <label style="margin:0;flex:1;">Active Location Sync Mode</label>
-              </div>
-              <select id="location-mode" style="margin:4px 0 8px 0;">
-                <option value="optionA">Option A: Direct Plot Essentials Tagging</option>
-                <option value="optionB">Option B: Active Location Anchor Card</option>
-              </select>
-
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:10px 0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;">
-                <input id="enable-proper-noun-detection" type="checkbox" style="width:auto;margin:0;" checked />
-                Auto Proper Noun Detection?
-              </label>
-              
-              <button id="grant-permissions" type="button" class="btn" style="margin-top:12px;background:var(--accent-color);color:#fff;width:100%;font-weight:600;font-size:11px;display:flex;align-items:center;justify-content:center;gap:6px;padding:8px;border-radius:6px;border:none;cursor:pointer;">
-                <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
-                  <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
-                </svg>
-                Grant AI Dungeon Permissions
-              </button>
-            </div>
-            
-            <!-- Pane: MemorAID Settings -->
-            <div id="tab-memoraid" class="tab-pane" style="display:none; flex-direction:column; gap:8px;">
-              <div id="memoraid-tab-config-banner-container"></div>
-              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 12px 0;">
-                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;flex:1;">
-                  <input id="use-memories" type="checkbox" style="width:auto;margin:0;" />
-                  Use Memories in Plot Essentials?
-                </label>
-                <button id="info-memories" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="How Memories work">
-                  <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
-                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
-                  </svg>
-                </button>
-              </div>
-              
-              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
-                <label style="margin:0;flex:1;">MemorAID Action Lookback Window</label>
-                <button id="info-memoraid-lookback" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About MemorAID Action Lookback Window">
-                  <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
-                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
-                  </svg>
-                </button>
-              </div>
-              <input id="memoraid-win" type="number" min="1" placeholder="8" style="margin:4px 0 8px 0;" />
-
-              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
-                <label style="margin:0;flex:1;">MemorAID Thought Lookback (previous thoughts)</label>
-                <button id="info-memoraid-thought" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About MemorAID Thought Lookback">
-                  <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
-                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
-                  </svg>
-                </button>
-              </div>
-              <input id="memoraid-thought-win" type="number" min="1" placeholder="1" style="margin:4px 0 2px 0;" />
-              <div style="font-size:11px;color:var(--text-secondary);margin-bottom:8px;">
-                <i>* Braced rolling window format is used when setting is greater than 1.</i>
-              </div>
-
-              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
-                <label style="margin:0;flex:1;">Thought Card Character Limit</label>
-              </div>
-              <input id="thought-card-limit" type="number" min="100" max="4000" placeholder="2000" style="margin:4px 0 8px 0;" />
-
-              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
-                <label style="margin:0;flex:1;">MemorAID Scene Presence Lookback</label>
-                <button id="info-memoraid-presence" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About MemorAID Scene Presence Lookback">
-                  <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
-                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
-                  </svg>
-                </button>
-              </div>
-              <input id="memoraid-presence-win" type="number" min="1" placeholder="5" style="margin:4px 0 8px 0;" />
-
-              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
-                <label style="margin:0;flex:1;">Action Intercept Timeout (Seconds)</label>
-                <button id="info-intercept-timeout" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About Action Intercept Timeout">
-                  <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
-                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
-                  </svg>
-                </button>
-              </div>
-              <input id="intercept-timeout" type="number" min="1" placeholder="10" style="margin:4px 0 4px 0;" />
-              <div id="intercept-timing-stats" style="margin:0 0 10px 0;font-size:10px;color:var(--text-secondary);line-height:1.5;letter-spacing:normal;text-transform:none;">
-                <span>Last MemorAID run: <strong id="intercept-timing-last" style="color:var(--text-primary);">–</strong></span>
-                <span style="opacity:0.5;"> &middot; </span>
-                <span>Session avg: <strong id="intercept-timing-avg" style="color:var(--text-primary);">–</strong></span>
-              </div>
-            </div>
-            
-            <!-- Pane: AI Provider -->
-            <div id="tab-prov" class="tab-pane" style="display:none;">
-              <label>Provider</label>
-              <select id="prov" style="margin:4px 0 8px 0;">
-                <option value="claude">Anthropic Claude</option>
-                <option value="openai">OpenAI ChatGPT</option>
-                <option value="gemini">Google Gemini</option>
-                <option value="ollama">Local Ollama</option>
-              </select>
-              
-              <label id="key-lbl">Claude API key</label>
-              <input id="key" type="text" autocomplete="off" placeholder="sk-ant-..." style="-webkit-text-security: disc; margin:4px 0 8px 0;" />
-              
-              <label>Model</label>
-              <div id="model-combo" style="position:relative;margin:4px 0 8px 0;">
-                <input id="model-search" type="text" autocomplete="off" spellcheck="false" placeholder="Search models…" style="margin:0;width:100%;box-sizing:border-box;" />
-                <div id="model-list" role="listbox" style="display:none;position:absolute;left:0;right:0;top:calc(100% + 2px);z-index:60;max-height:240px;overflow-y:auto;background:var(--bg-glass);border:1px solid var(--border-color);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.45);"></div>
-                <select id="model" style="display:none;"><option value="">(enter API key)</option></select>
-              </div>
-              
-              <div id="gemma-disclaimer" class="note" style="margin-top:12px;padding:8px;border-radius:6px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.25);color:#fca5a5;font-size:10.5px;line-height:1.4;display:none;">
-                <strong>Disclaimer:</strong> Google's Gemma models (Gemma 4 26B &amp; Gemma 4 31B) have strict Layer 2 NSFW restrictions on the API. Because these filters can cause the API to fail, they may only work intermittently depending on the content of your story.
-              </div>
-            </div>
-            
-            <!-- Pane: Prompts -->
-            <div id="tab-prompts" class="tab-pane" style="display:none;">
-              <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;gap:8px;width:100%;box-sizing:border-box;">
-                <details style="border:none;background:none;margin:0;padding:0;flex:1;overflow:visible;">
-                  <summary style="cursor:pointer;font-size:10px;font-weight:600;color:var(--accent-color);padding:0 24px 0 0;background:none;display:flex;align-items:center;justify-content:space-between;width:100%;box-sizing:border-box;">
-                    <span>Available Dynamic Tags</span>
-                  </summary>
-                  <div style="margin-top:4px;background:rgba(0,0,0,0.2);border:1px solid var(--border-color);border-radius:6px;padding:6px;font-size:9.5px;color:var(--text-secondary);line-height:1.4;box-sizing:border-box;width:100%;">
-                    <div><code style="color:var(--accent-color);font-weight:bold;">{protagonist}</code> - Replaced by us with the protagonist name (from General, or auto-detected from Plot Essentials) before sending.</div>
-                    <div style="margin-top:3px;"><code style="color:var(--accent-color);font-weight:bold;">{{title}}</code> - Resolved by AI Dungeon to the Story Card's title. Required in every Card Command.</div>
-                  </div>
-                </details>
-                <button id="revert-prompt" style="background:rgba(239,68,68,0.05);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);padding:2px 6px;font-size:9.5px;border-radius:4px;margin:0;white-space:nowrap;align-self:flex-start;">↺ Revert All</button>
-              </div>
-
-              <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Plot Essentials Prompt (your AI provider)</h4>
-              <div class="note" style="margin-bottom:4px;">Drives Plot Essentials updates via your configured provider (Claude/GPT/etc). Story Card templates are configured below.</div>
-              <label style="margin-top:6px;">1. General Instructions</label>
-              <textarea id="prompt-s1" rows="5" style="margin:4px 0 8px 0;"></textarea>
-              
-              <label style="margin-top:6px;">2. Personality & Identity Rules</label>
-              <textarea id="prompt-s2" rows="5" style="margin:4px 0 8px 0;"></textarea>
-              
-              <label style="margin-top:6px;">3. Limits & Budget Ceilings</label>
-              <textarea id="prompt-s3" rows="5" style="margin:4px 0 8px 0;"></textarea>
-              
-              <label style="margin-top:6px;">4. Output JSON Schema</label>
-              <textarea id="prompt-s4" rows="5" style="margin:4px 0 8px 0;"></textarea>
-
-              <div style="margin-top:12px;border-top:1px solid var(--border-color);padding-top:8px;">
-                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Per-Type Card Command Templates (AI Provider)</h4>
-                <div class="note" style="margin-bottom:6px;">Executed through your configured AI Provider — uses the model and settings from the AI Provider tab. Use <code>{{title}}</code> (required; replaced by card title) and <code>{protagonist}</code>. Custom covers any user-named type (e.g. "Song").</div>
-
-                <label style="margin-top:6px;">Entry Formatting</label>
-                <select id="fmt-mode" style="margin:4px 0 8px 0;">
-                  <option value="squareBrackets">[ ] Square brackets</option>
-                  <option value="curlyBraces">{ } Curly braces</option>
-                  <option value="none">None</option>
-                </select>
-
-                <label style="margin-top:6px;">Character</label><textarea id="cc-character" rows="6" style="margin:4px 0 6px 0;"></textarea>
-                <label style="margin-top:6px;">Class</label><textarea id="cc-class" rows="6" style="margin:4px 0 6px 0;"></textarea>
-                <label style="margin-top:6px;">Race</label><textarea id="cc-race" rows="6" style="margin:4px 0 6px 0;"></textarea>
-                <label style="margin-top:6px;">Location</label><textarea id="cc-location" rows="6" style="margin:4px 0 6px 0;"></textarea>
-                <label style="margin-top:6px;">Faction</label><textarea id="cc-faction" rows="6" style="margin:4px 0 6px 0;"></textarea>
-                <label style="margin-top:6px;">Custom</label><textarea id="cc-custom" rows="6" style="margin:4px 0 6px 0;"></textarea>
-                <label style="margin-top:6px;">Memoraid</label><textarea id="cc-memoraid" rows="6" style="margin:4px 0 6px 0;"></textarea>
-              </div>
-            </div>
-            
-            <!-- Pane: Debug / Exports -->
-            <div id="tab-debug" class="tab-pane" style="display:none;">
-              <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Granular Database Exports</h4>
-              <div class="note" style="margin-bottom:8px;">Select an export type to download the data:</div>
-              
-              <div style="display:flex;flex-direction:column;gap:6px;width:100%;">
-                <button id="ex-story" style="justify-content:flex-start;background:rgba(16,185,129,0.05);color:#34d399;border:1px solid rgba(16,185,129,0.2);padding:6px 10px;text-align:left;width:100%;box-sizing:border-box;">
-                  <span>⬇ Just Story Actions JSON</span>
-                </button>
-                <button id="ex-cards" style="justify-content:flex-start;background:rgba(16,185,129,0.05);color:#34d399;border:1px solid rgba(16,185,129,0.2);padding:6px 10px;text-align:left;width:100%;box-sizing:border-box;">
-                  <span>⬇ Just Story Cards JSON</span>
-                </button>
-                <button id="ex-pe" style="justify-content:flex-start;background:rgba(16,185,129,0.05);color:#34d399;border:1px solid rgba(16,185,129,0.2);padding:6px 10px;text-align:left;width:100%;box-sizing:border-box;">
-                  <span>⬇ Just Plot Essentials Plaintext</span>
-                </button>
-                <button id="ex-aidmemories" style="justify-content:flex-start;background:rgba(16,185,129,0.05);color:#34d399;border:1px solid rgba(16,185,129,0.2);padding:6px 10px;text-align:left;width:100%;box-sizing:border-box;">
-                  <span>⬇ Just Memory Bank JSON</span>
-                </button>
-                <button id="ex-propernouns" style="justify-content:flex-start;background:rgba(16,185,129,0.05);color:#34d399;border:1px solid rgba(16,185,129,0.2);padding:6px 10px;text-align:left;width:100%;box-sizing:border-box;">
-                  <span>⬇ Just Proper Noun Logs JSON</span>
-                </button>
-                <button id="ex-all" style="justify-content:flex-start;background:rgba(245,158,11,0.05);color:#fbbf24;border:1px solid rgba(245,158,11,0.25);padding:6px 10px;text-align:left;width:100%;box-sizing:border-box;">
-                  <span>⬇ All Combined Backup JSON</span>
-                </button>
-              </div>
-
-              <h4 style="margin:14px 0 4px;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Diagnostics</h4>
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:4px 0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;">
-                <input id="show-dbg" type="checkbox" style="width:auto;margin:0;" />
-                Verbose debug logging (Console)
-              </label>
-              <div class="note">Logs detailed internal extension activity to the browser Console (developer diagnostic — noisy).</div>
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:8px 0 4px;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;">
-                <input id="log-pe-console" type="checkbox" style="width:auto;margin:0;" />
-                Log Raw Update Plot Essentials to Console
-              </label>
-              <div class="note">When enabled, logs ONLY the raw AI request/response from the last Update Plot Essentials run to the browser Console (open DevTools → Console). Independent of verbose logging above.</div>
-              
-              <div style="margin-top:14px;">
-                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Learned Operations</h4>
-                <div id="learned-ops-list" style="font-family:SFMono-Regular,Consolas,monospace;font-size:9.5px;background:rgba(0,0,0,0.2);border:1px solid var(--border-color);border-radius:6px;padding:6px;margin-top:4px;color:var(--text-primary);max-height:80px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;">None</div>
-              </div>
-
-              <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-                  <h4 style="margin:0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Proper Noun Log Editor</h4>
-                  <button id="clear-pn-logs" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Clear All</button>
-                </div>
-                <div class="note" style="margin-bottom:6px;">Review or delete proper nouns processed by auto-detection.</div>
-                <div id="pn-logs-list" style="max-height:150px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;background:rgba(0,0,0,0.2);border:1px solid var(--border-color);border-radius:6px;padding:6px;box-sizing:border-box;">
-                  <!-- Proper noun log items -->
-                </div>
-              </div>
-              
-              <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
-                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Mobile Settings Sync (QR Code)</h4>
-                <div class="note" style="margin-bottom:8px;">Generate a QR code to sync settings (excluding API keys) directly to your mobile device.</div>
-                <button id="gen-qr-btn" type="button" class="btn" style="justify-content:center;background:rgba(168,85,247,0.08);color:#c084fc;border:1px solid rgba(168,85,247,0.25);padding:6px 12px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;width:100%;box-sizing:border-box;">Generate Sync QR Code</button>
-              </div>
-              
-              <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
-                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Full Database Backup & Restore</h4>
-                <div class="note" style="margin-bottom:8px;">Back up the entire local database (settings, cards, versions, operations, histories) to a single file.</div>
-                <div style="display:flex;gap:6px;width:100%;">
-                  <button class="db-backup-trigger" style="flex:1;justify-content:center;background:rgba(16,185,129,0.08);color:#34d399;border:1px solid rgba(16,185,129,0.25);padding:6px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;">Back Up Database</button>
-                  <button class="db-restore-trigger" style="flex:1;justify-content:center;background:rgba(245,158,11,0.08);color:#fbbf24;border:1px solid rgba(245,158,11,0.25);padding:6px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;">Restore from Backup</button>
-                </div>
-              </div>
-            </div>
-            
-            <!-- Pane: OffMeta's AIN Repository -->
-            <div id="tab-offmeta" class="tab-pane" style="display:none; flex-direction:column; gap:8px; overflow:hidden;">
-              <h4 style="margin:4px 0;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">OffMeta's AIN Repository</h4>
-              <div class="note" style="margin-bottom:4px; font-size:11px;">Apply curated instructions directly to your AI Instructions, Author's Note, or Plot Essentials.</div>
-              
-              <!-- Sub Tab Navigation -->
-              <div class="offmeta-subtab-nav" style="display:flex;border-bottom:1px solid var(--border-color);padding-bottom:4px;margin-bottom:6px;gap:2px;overflow-x:auto;">
-                <button class="offmeta-subtab-btn active" data-subtab="offmeta-subtab-intro" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--theme-text-color);border-bottom:2px solid var(--theme-text-color);font-weight:700;cursor:pointer;transition:all 0.2s;">Introduction</button>
-                <button class="offmeta-subtab-btn" data-subtab="offmeta-subtab-premade" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--text-secondary);border-bottom:2px solid transparent;cursor:pointer;transition:all 0.2s;">Premade AIN</button>
-                <button class="offmeta-subtab-btn" data-subtab="offmeta-subtab-anpe" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--text-secondary);border-bottom:2px solid transparent;cursor:pointer;transition:all 0.2s;">AN/PE</button>
-                <button class="offmeta-subtab-btn" data-subtab="offmeta-subtab-individual" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--text-secondary);border-bottom:2px solid transparent;cursor:pointer;transition:all 0.2s;">Individual AIN</button>
-              </div>
-
-              <!-- Search box and status feedback -->
-              <div id="offmeta-search-container" style="display:none; flex-direction:column; gap:6px; margin-bottom:4px;">
-                <input id="offmeta-search" type="text" placeholder="Search instructions (e.g. repetition, romance)..." style="width:100%; box-sizing:border-box; margin:0; font-size:11.5px; padding:5px 8px;" />
-                <div id="offmeta-status" style="font-size:11px; display:none; padding:4px 8px; border-radius:4px; font-weight:600; line-height:1.35; margin-top:2px;"></div>
-              </div>
-
-              <!-- Repository container -->
-              <div id="offmeta-repo-container" style="display:flex; flex-direction:column; gap:12px; flex:1; overflow-y:auto; padding-right:4px; min-height:0;">
-                <!-- Loading State placeholder -->
-                <div style="text-align:center; padding:30px; color:var(--text-secondary);">
-                  <div class="spinner" style="width:16px; height:16px; margin-bottom:6px; border-width:2px;"></div>
-                  <div>Fetching rules from Google Doc...</div>
-                </div>
-              </div>
-            </div>
-            
-            <!-- Pane: Adventures Manager -->
-            <div id="tab-manager" class="tab-pane" style="display:none; flex-direction:column; gap:8px; overflow:hidden;">
-              <div style="display:flex; justify-content:space-between; align-items:center; margin:4px 0;">
-                <h4 style="margin:0;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Adventures Manager</h4>
-                <button id="open-settings-manager" style="background:none;border:none;padding:4px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;" title="Settings">
-                  <svg style="width:16px;height:16px;fill:currentColor;" viewBox="0 0 24 24">
-                    <path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.13,5.91,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87 C2.62,9.08,2.67,9.34,2.85,9.48l2.03,1.58C4.83,11.36,4.81,11.69,4.81,12c0,0.31,0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.43-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/>
-                  </svg>
-                </button>
-              </div>
-              <div class="note" style="margin-bottom:4px; font-size:11px;">Manage your Favorites library and explore locally stored adventure data.</div>
-              
-              <!-- Sub Tab Navigation -->
-              <div class="manager-subtab-nav" style="display:flex;border-bottom:1px solid var(--border-color);padding-bottom:4px;margin-bottom:6px;gap:2px;">
-                <button id="btn-subtab-global" class="manager-subtab-btn active" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--theme-text-color);border-bottom:2px solid var(--theme-text-color);font-weight:700;cursor:pointer;">Favorites</button>
-                <button id="btn-subtab-explorer" class="manager-subtab-btn" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--text-secondary);border-bottom:2px solid transparent;cursor:pointer;">Local DB Explorer</button>
-              </div>
-
-              <!-- Main Manager Container -->
-              <div id="manager-panels" style="display:flex; flex-direction:column; gap:8px; flex:1; overflow-y:auto; padding-right:4px; min-height:0;">
-                <!-- Subpane: Favorites -->
-                <div id="subpane-global" style="display:flex; flex-direction:column; gap:8px;">
-                  <button id="btn-show-add-global" style="width:100%;margin:0;background:linear-gradient(135deg, var(--accent-color), var(--accent-border));color:#fff;font-weight:600;padding:6px;border-radius:6px;border:none;cursor:pointer;font-size:11px;">+ Add New Favorite</button>
-                  
-                  <!-- Form: Add Favorite (hidden by default) -->
-                  <div id="form-add-global" style="display:none; flex-direction:column; gap:6px; background:rgba(0,0,0,0.25); border:1px solid var(--border-color); border-radius:8px; padding:10px; box-sizing:border-box;">
-                    <div style="font-weight:600; font-size:11px; color:var(--theme-text-color); margin-bottom:4px;">New Favorite</div>
-                    <label style="font-size:10px; text-transform:uppercase; color:var(--text-secondary);">Asset Type</label>
-                    <select id="global-type" style="margin:2px 0 6px 0; font-size:11.5px; padding:4px;">
-                      <option value="ain">AI Instructions (AIN)</option>
-                      <option value="an">Author's Note (AN)</option>
-                      <option value="pe">Character Description (PE)</option>
-                      <option value="sc">Story Card (SC)</option>
-                    </select>
-
-                    <label style="font-size:10px; text-transform:uppercase; color:var(--text-secondary);">Title / Name</label>
-                    <input id="global-title" type="text" placeholder="e.g. My Custom Rules or Character Name" style="margin:2px 0 6px 0; font-size:11.5px; padding:4px;" />
-
-                    <!-- SC specific fields -->
-                    <div id="sc-fields" style="display:none; flex-direction:column; gap:6px;">
-                      <label style="font-size:10px; text-transform:uppercase; color:var(--text-secondary);">Story Card Type</label>
-                      <select id="global-sc-type" style="margin:2px 0 6px 0; font-size:11.5px; padding:4px;">
-                        <option value="character">Character</option>
-                        <option value="location">Location</option>
-                        <option value="faction">Faction</option>
-                        <option value="class">Class</option>
-                        <option value="race">Race</option>
-                        <option value="custom">Custom</option>
-                      </select>
-
-                      <label style="font-size:10px; text-transform:uppercase; color:var(--text-secondary);">Keys / Triggers (comma-separated)</label>
-                      <input id="global-keys" type="text" placeholder="e.g. elf,legolas" style="margin:2px 0 6px 0; font-size:11.5px; padding:4px;" />
-
-                      <label style="font-size:10px; text-transform:uppercase; color:var(--text-secondary);">Description (Notes/Thought Log)</label>
-                      <textarea id="global-description" rows="2" placeholder="Sleek details..." style="margin:2px 0 6px 0; font-size:11.5px; padding:4px; font-family:inherit; resize:vertical;"></textarea>
-                    </div>
-
-                    <label style="font-size:10px; text-transform:uppercase; color:var(--text-secondary);">Content / Instruction Value</label>
-                    <textarea id="global-value" rows="4" placeholder="Enter content or instructions here..." style="margin:2px 0 6px 0; font-size:11.5px; padding:4px; font-family:inherit; resize:vertical;"></textarea>
-
-                    <div style="display:flex; gap:6px; justify-content:flex-end; margin-top:4px;">
-                      <button id="btn-cancel-global" style="margin:0; padding:4px 10px; font-size:11px; background:rgba(255,255,255,0.05); border-radius:6px; border:1px solid var(--border-color); color:var(--text-secondary);">Cancel</button>
-                      <button id="btn-save-global" style="margin:0; padding:4px 10px; font-size:11px; background:var(--accent-color); color:#fff; border-radius:6px; border:none; font-weight:600;">Create</button>
-                    </div>
-                  </div>
-
-                  <!-- Favorites Categorized Lists -->
-                  <div id="global-assets-list" style="display:flex; flex-direction:column; gap:8px;"></div>
-                </div>
-
-                <!-- Subpane: Local DB Explorer -->
-                <div id="subpane-explorer" style="display:none; flex-direction:column; gap:8px;">
-                  <div id="db-explorer-list" style="display:flex; flex-direction:column; gap:8px;"></div>
-                  <div style="display:flex; justify-content:flex-start; margin-top:8px;">
-                    <button id="btn-view-hidden-adv" style="background:none !important; border:none !important; box-shadow:none !important; transform:none !important; padding:4px 0; color:var(--text-secondary); text-decoration:underline; font-size:10.5px; cursor:pointer; font-family:inherit; transition:color 0.2s;" onmouseover="this.style.color='var(--theme-text-color)'" onmouseout="this.style.color='var(--text-secondary)'">View Hidden Adventures</button>
-                  </div>
-                </div>
-              </div>
-              
-              <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
-                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Full Database Backup & Restore</h4>
-                <div class="note" style="margin-bottom:8px;">Back up the entire local database (settings, cards, versions, operations, histories) to a single file.</div>
-                <div style="display:flex;gap:6px;width:100%;">
-                  <button class="db-backup-trigger" style="flex:1;justify-content:center;background:rgba(16,185,129,0.08);color:#34d399;border:1px solid rgba(16,185,129,0.25);padding:6px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;">Back Up Database</button>
-                  <button class="db-restore-trigger" style="flex:1;justify-content:center;background:rgba(245,158,11,0.08);color:#fbbf24;border:1px solid rgba(245,158,11,0.25);padding:6px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;">Restore from Backup</button>
-                </div>
-              </div>
-            </div>
-          </div>
-          
-          <!-- Actions footer for settings view -->
-          <div id="settings-footer" style="display:flex;justify-content:flex-end;gap:8px;border-top:1px solid var(--border-color);padding-top:8px;margin-top:4px;">
-            <button id="cancel-settings" style="margin:0;background:rgba(255,255,255,0.02);padding:4px 10px;border-radius:6px;">Cancel</button>
-            <button id="save" style="margin:0;background:linear-gradient(135deg, var(--accent-color), var(--accent-border));color:#fff;font-weight:600;min-width:70px;padding:4px 10px;border-radius:6px;border:none;">Save</button>
-          </div>
-        </div>
-
-        <!-- VIEW: UPDATE PLOT ESSENTIALS (Analyze) -->
-        <div id="view-analyze" style="display:none;flex-direction:column;gap:10px;margin-top:8px;flex:1;overflow:hidden;min-height:0;">
-          <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border-color);padding-bottom:6px;">
-            <div style="font-weight:600;color:var(--accent-color);font-size:13px;">⟳ Update Plot Essentials</div>
-            <button id="analyze-back" style="margin:0;background:rgba(255,255,255,0.02);padding:4px 10px;border-radius:6px;">← Back</button>
-          </div>
-          <div id="analyze-body"></div>
-        </div>
-
-        <!-- OVERLAY: MEMORIES HELP -->
-        <div id="overlay-memories" class="overlay">
-          <div class="overlay-header">
-            <div class="overlay-title">Memories Block Feature</div>
-            <button class="overlay-close" type="button" data-close="overlay-memories">×</button>
-          </div>
-          <div class="overlay-content">
-            <p>When enabled, the tracker will automatically manage a <strong>[Memories (newest to oldest): ...]</strong> block inside your adventure's Plot Essentials.</p>
-            <p><strong>Setup Format:</strong><br/>Create a block in your Plot Essentials exactly like this:</p>
-            <div class="code-card" style="margin:4px 0;"><pre>[Memories (newest to oldest):
-- latest memory here
-- something that happened before that
-]</pre></div>
-            <p><strong>How it works:</strong><br/>The AI analyzes your gameplay actions, summarizes new events, and automatically prepends them as new bullet points to keep a continuous running history of your story.</p>
-            <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 12px;color:#fbe3b4;display:flex;gap:8px;align-items:flex-start;">
-              <svg style="width:16px;height:16px;fill:currentColor;flex-shrink:0;margin-top:2px;" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
-              <span><strong>Note:</strong> A longer lookback window (e.g. 60+ actions) is highly recommended for the AI to have enough context to generate high-quality, continuous memories.</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- OVERLAY: ACTION LOOKBACK HELP -->
-        <div id="overlay-action-lookback" class="overlay">
-          <div class="overlay-header">
-            <div class="overlay-title">Action Lookback Window</div>
-            <button class="overlay-close" type="button" data-close="overlay-action-lookback">×</button>
-          </div>
-          <div class="overlay-content">
-            <p>This setting controls the number of recent gameplay actions and the resulting text from AI Dungeon sent to your third-party provider for story card updates.</p>
-          </div>
-        </div>
-
-        <!-- OVERLAY: MEMORAID LOOKBACK HELP -->
-        <div id="overlay-memoraid-lookback" class="overlay">
-          <div class="overlay-header">
-            <div class="overlay-title">MemorAID Action Lookback Window</div>
-            <button class="overlay-close" type="button" data-close="overlay-memoraid-lookback">×</button>
-          </div>
-          <div class="overlay-content">
-            <p>This setting controls how many actions (turns) of recent gameplay context the extension retrieves to use as additional context for the NPC's Thought Card generation.</p>
-            <p><strong>How it works:</strong><br/>When generating a MemorAID thought card (sensory Intake → internal Thought → next Action), the extension looks back at this number of turns of active history to build the narrative generation context. Adjusting this allows for more detailed context reflection but consumes more text from the history budget.</p>
-          </div>
-        </div>
-
-        <!-- OVERLAY: MEMORAID THOUGHT HELP -->
-        <div id="overlay-memoraid-thought" class="overlay">
-          <div class="overlay-header">
-            <div class="overlay-title">MemorAID Thought Lookback</div>
-            <button class="overlay-close" type="button" data-close="overlay-memoraid-thought">×</button>
-          </div>
-          <div class="overlay-content">
-            <p>This setting controls how many prior thoughts generated by MemorAID are kept in the card value and fed back to the AI provider as rolling context.</p>
-            <p>This controls the rolling thought window size. Up to N of the most recent thoughts will be kept in the memory card value and fed back as context (default = 1, keeping only the newest thought).</p>
-          </div>
-        </div>
-
-        <!-- OVERLAY: MEMORAID PRESENCE HELP -->
-        <div id="overlay-memoraid-presence" class="overlay">
-          <div class="overlay-header">
-            <div class="overlay-title">MemorAID Scene Presence Lookback</div>
-            <button class="overlay-close" type="button" data-close="overlay-memoraid-presence">×</button>
-          </div>
-          <div class="overlay-content">
-            <p>This setting controls how many actions (turns) the extension looks back to check if an NPC has been active or mentioned in the scene to trigger the MemorAID intercept and update.</p>
-            <p><strong>How it works:</strong><br/>Each time you enter an action, the extension scans the last <code>N</code> actions (defined by this window) to see if an important character is present. If they are detected, it runs the intercept and updates the thought cards. A smaller window keeps the detection tightly focused on the immediate scene, while a larger window allows characters to stay active even after a few turns of silence.</p>
-          </div>
-        </div>
-
-        <!-- OVERLAY: INTERCEPT TIMEOUT HELP -->
-        <div id="overlay-intercept-timeout" class="overlay">
-          <div class="overlay-header">
-            <div class="overlay-title">Action Intercept Timeout</div>
-            <button class="overlay-close" type="button" data-close="overlay-intercept-timeout">×</button>
-          </div>
-          <div class="overlay-content">
-            <p>This setting controls how many seconds the extension pauses your gameplay actions to wait for NPC thought cards to regenerate before releasing the turn.</p>
-            <p><strong>How it works:</strong><br/>When you submit an action in a scene with active characters, the extension intercepts it and triggers background thought updates. It holds your action up to this timeout to let the AI updates finish and show in the input placeholder. Increase this if you have multiple active NPCs to ensure all their thoughts update before the turn is released.</p>
-          </div>
-        </div>
-
-        <!-- OVERLAY: CREATE NEW STORY CARD -->
-        <div id="overlay-add-card" class="overlay">
-          <div class="overlay-header">
-            <div class="overlay-title">Create New Story Card</div>
-            <button class="overlay-close" type="button" data-close="overlay-add-card">×</button>
-          </div>
-          <div class="overlay-content" style="gap:10px;">
-            <div style="display:flex;flex-direction:column;gap:2px;">
-              <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;">Card Type</label>
-              <select id="ac-type" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:6px;font-size:11px;font-family:inherit;margin:2px 0 4px 0;">
-                <option value="character">Character</option>
-                <option value="location">Location</option>
-                <option value="faction">Faction</option>
-                <option value="class">Class</option>
-                <option value="race">Race</option>
-                <option value="custom">Custom</option>
-                <option value="memory">Memory</option>
-              </select>
-            </div>
-
-            <div style="display:flex;flex-direction:column;gap:2px;">
-              <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;">Name / Title</label>
-              <input id="ac-title" type="text" placeholder="e.g. Rena" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:6px;font-size:11px;font-family:inherit;margin:2px 0 4px 0;"/>
-            </div>
-
-            <div style="display:flex;flex-direction:column;gap:2px;">
-              <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;">Trigger Keys (comma-separated)</label>
-              <input id="ac-keys" type="text" placeholder="e.g. rena, merchant" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:6px;font-size:11px;font-family:inherit;margin:2px 0 4px 0;"/>
-            </div>
-
-            <div style="display:flex;flex-direction:column;gap:2px;">
-              <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;">Description / Notes</label>
-              <input id="ac-desc" type="text" placeholder="e.g. Optional notes" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:6px;font-size:11px;font-family:inherit;margin:2px 0 4px 0;"/>
-            </div>
-
-            <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-height:0;">
-              <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;">Entry Value (Body)</label>
-              <textarea id="ac-value" placeholder="The core story card content..." style="background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:6px;font-size:11px;font-family:inherit;resize:none;flex:1;min-height:80px;box-sizing:border-box;margin:2px 0 4px 0;"></textarea>
-            </div>
-
-            <button id="ac-submit" style="width:100%;margin-top:4px;background:linear-gradient(135deg, var(--accent-color), var(--accent-border));color:#fff;font-weight:600;padding:8px;border-radius:6px;border:none;cursor:pointer;font-size:11px;">Create & Push to AID</button>
-          </div>
-        </div>
-
-        <!-- OVERLAY: GENERAL ABOUT & HELP -->
-        <div id="overlay-help" class="overlay">
-          <div class="overlay-header">
-            <div class="overlay-title">About & How it Works</div>
-            <button class="overlay-close" type="button" data-close="overlay-help">×</button>
-          </div>
-          <div class="overlay-content">
-            <p>This extension orchestrates context tracking and memory management for your AI Dungeon adventures, dynamically partitioning updates between your private AI APIs and AI Dungeon's native generators.</p>
-            
-            <p><strong>1. Architectural Division: PE vs SC</strong></p>
-            <ul style="margin:0;padding-left:16px;display:flex;flex-direction:column;gap:8px;">
-              <li>
-                <strong>Plot Essentials (PE):</strong> 
-                Character blocks embedded directly inside your adventure's main memory context. Updates are fully driven by <strong>your configured outside AI Provider API</strong> (Claude, OpenAI GPT, Gemini, or local Ollama).
-                <br/><span class="note" style="margin-top:2px;display:inline-block;">*Includes an option (enabled via <strong>Settings → General → Use Memories in Plot Essentials?</strong>) to automatically construct and prepend a dynamic Memories block in Plot Essentials via outside AI calls.</span>
-              </li>
-              <li>
-                <strong>Story Cards (SC):</strong> 
-                World Info elements stored in AI Dungeon's database. Updates are driven by <strong>your configured outside AI Provider API</strong> using the command templates defined in settings, and committed back via GQL mutations.
-              </li>
-            </ul>
-
-            <p><strong>2. Gameplay Context Window Integration</strong></p>
-            <p>When generating Story Card updates, the extension dynamically captures the last <code>N</code> actions of chronological gameplay history (up to the provider's context limits) and feeds it to your outside AI provider. For Location cards, the current card description is automatically prepended, reserving all remaining character budget for recent gameplay actions.</p>
-
-            <p><strong>3. Automated Action Lookback Active Tracker</strong></p>
-            <p>The tracker continuously monitors action progression in the background. If a character's name or trigger words were present in the previous lookback window but disappear from the current window (indicating <strong>they have just fell out of active gameplay actions / exited the active scene</strong>), the extension automatically and silently triggers a card update in the background.</p>
-            <p>A new pending proposal is generated immediately, ready for you to review, accept, or reject the moment you open the Tracker panel!</p>
-
-            <p><strong>4. How it Determines Characters</strong></p>
-            <p>The tracker parses your adventure's Plot Essentials memory to identify existing characters by looking for these patterns:</p>
-            <ul style="margin:0;padding-left:16px;display:flex;flex-direction:column;gap:4px;">
-              <li><code>Your name: Smoke</code> (identifies the protagonist)</li>
-              <li><code>[Name is/are ...]</code> or <code>Name is/are ...</code></li>
-              <li><code>[Name: ...]</code> or <code>Name: ...</code></li>
-            </ul>
-
-            <p><strong>5. MemorAID NPC Thought Tracking</strong></p>
-            <p>The extension intercepts outgoing player actions to generate and synchronize thoughts for active NPCs in companion thought cards.
-            <br/><span class="note" style="margin-top:2px;display:inline-block;">*Settings under the MemorAID tab allow you to define the lookback size and customize the intercept release timeout to wait for background thought updates to finish before releasing the turn.</span></p>
-
-            <p><strong>6. Memory Bank & Auto-Regeneration</strong></p>
-            <p>You can edit and refine individual AI Dungeon memory blocks directly from the Memory Bank tab.
-            <br/><span class="note" style="margin-top:2px;display:inline-block;">*Enabling <strong>Settings → General → Automatically regen latest Memory Bank entry?</strong> automatically runs memory block refinement on the latest memory block whenever new actions are synchronized, using loop-safe diffing to prevent endless loops.</span></p>
-          </div>
-        </div>
-      </div>
-    </div>`);
+  setSafeHTML(root, buildPanelTemplate(version));
   document.documentElement.appendChild(host);
   function checkUrlVisibility() {
     const isSettingsUrl = location.pathname === "/settings" || location.pathname.endsWith("/settings");
@@ -2130,137 +206,43 @@ export function mountPanel(): PanelHandle {
   checkUrlVisibility();
 
   let lastState: PanelState | null = null;
+  // Crystallized Knows-editor schema cache: IndexedDB is the source of truth post-migration
+  // (card.description is retired/always ""), so the panel fetches it via message round-trip
+  // and repaints once resolved. Keyed by cardId; cleared entries refetch on next render.
+  const crystallizedSchemaCache = new Map<string, import("../inference/crystallized").SchemaItem[]>();
+  // Preferences editor cache — populated from the SAME getCrystallizedSchema fetch as the schema cache
+  // (the returned state carries both). Values are the plain preference sentences, ranked strongest-first.
+  const crystallizedPreferencesCache = new Map<string, string[]>();
+  const crystallizedSchemaFetching = new Set<string>();
+  const npcMemoryCache = new Map<string, NpcMemBlock[]>();
+  const npcMemoryFetching = new Set<string>();
+  let npcBackfillWatchdog: ReturnType<typeof setTimeout> | null = null;
   const $ = (id: string) => root.getElementById(id) as HTMLElement;
   const st = $("st"), results = $("results");
   const keyEl = $("key") as HTMLInputElement, protEl = $("prot") as HTMLInputElement, modelEl = $("model") as HTMLSelectElement, winEl = $("win") as HTMLInputElement;
-  const memoraidWinEl = $("memoraid-win") as HTMLInputElement, memoraidThoughtWinEl = $("memoraid-thought-win") as HTMLInputElement, memoraidPresenceWinEl = $("memoraid-presence-win") as HTMLInputElement;
+  const memoraidThoughtWinEl = $("memoraid-thought-win") as HTMLInputElement, memoraidPresenceWinEl = $("memoraid-presence-win") as HTMLInputElement;
   const interceptTimeoutEl = $("intercept-timeout") as HTMLInputElement;
   const charCardLimitEl = $("char-card-limit") as HTMLInputElement;
+  const memoraidWinEl = $("memoraid-win") as HTMLInputElement;
   const thoughtCardLimitEl = $("thought-card-limit") as HTMLInputElement;
   const provEl = $("prov") as HTMLSelectElement, keyLblEl = $("key-lbl") as HTMLLabelElement;
   const themeEl = $("theme") as HTMLSelectElement;
-
-  // Render the MemorAID intercept timing readout (seconds). Elements only exist after a full
-  // render, so guard for null and no-op when the settings tab markup isn't mounted yet.
-  function applyMemoraidTiming(stats: PanelState["memoraidTiming"]) {
-    const fmt = (ms: number | null | undefined) =>
-      ms == null ? "–" : `${(ms / 1000).toFixed(1)}s`;
-    const lastEl = root.getElementById("intercept-timing-last");
-    const avgEl = root.getElementById("intercept-timing-avg");
-    if (lastEl) lastEl.textContent = fmt(stats?.lastMs);
-    if (avgEl) {
-      avgEl.textContent = stats?.avgMs != null
-        ? `${fmt(stats.avgMs)} (${stats.count} run${stats.count === 1 ? "" : "s"})`
-        : "–";
-    }
-  }
-
-  // Searchable, scroll-capped model picker. The native <select> popup dumps 30+ models as one
-  // un-filterable flat list (Hick's Law / choice overload). This keeps the <select> as the hidden
-  // value-holder (setModels + save logic unchanged) and layers a type-to-filter combobox on top:
-  // grouped by family when browsing (Chunking/Proximity), flat when searching, capped height with
-  // scroll, instant filtering (Doherty), familiar combobox pattern (Jakob's Law).
-  const modelSearchEl = root.getElementById("model-search") as HTMLInputElement | null;
-  const modelListEl = root.getElementById("model-list") as HTMLDivElement | null;
-  let modelHighlightIdx = -1;
-
-  function modelFamilyOf(id: string): string {
-    const p = id.split("-");
-    return p.length >= 2 ? `${p[0]} ${p[1]}` : id;
-  }
-
-  function renderModelList(query: string) {
-    if (!modelListEl) return;
-    const q = query.trim().toLowerCase();
-    const opts = Array.from(modelEl.options)
-      .filter((o) => o.value && o.value.toLowerCase().includes(q));
-    modelHighlightIdx = -1;
-    if (opts.length === 0) {
-      setSafeHTML(modelListEl, `<div style="padding:8px 10px;color:var(--text-secondary);font-size:11px;">No models match “${esc(query)}”</div>`);
-      return;
-    }
-    const selected = modelEl.value;
-    const grouped = q.length === 0; // group headers only when browsing the full list
-    let html = "";
-    let lastFamily = "";
-    for (const o of opts) {
-      if (grouped) {
-        const fam = modelFamilyOf(o.value);
-        if (fam !== lastFamily) {
-          html += `<div style="padding:6px 10px 2px;font-size:9px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-secondary);position:sticky;top:0;background:var(--bg-glass);">${esc(fam)}</div>`;
-          lastFamily = fam;
-        }
-      }
-      const isSel = o.value === selected;
-      html += `<div class="model-opt" data-value="${esc(o.value)}" role="option" style="padding:6px 10px;font-size:12px;cursor:pointer;color:var(--text-primary);${isSel ? "background:var(--accent-glow);font-weight:600;" : ""}">${esc(o.value)}</div>`;
-    }
-    setSafeHTML(modelListEl, html);
-  }
-
-  function modelOptItems(): HTMLElement[] {
-    return modelListEl ? Array.from(modelListEl.querySelectorAll(".model-opt")) as HTMLElement[] : [];
-  }
-
-  function applyModelHighlight() {
-    const items = modelOptItems();
-    items.forEach((el, i) => {
-      el.style.background = i === modelHighlightIdx ? "var(--btn-hover)" : (el.dataset.value === modelEl.value ? "var(--accent-glow)" : "");
-    });
-    const hl = modelHighlightIdx >= 0 ? items[modelHighlightIdx] : undefined;
-    if (hl) hl.scrollIntoView({ block: "nearest" });
-  }
-
-  function openModelList() {
-    if (!modelListEl) return;
-    renderModelList(modelSearchEl?.value && modelSearchEl.value !== modelEl.value ? modelSearchEl.value : "");
-    modelListEl.style.display = "block";
-    const sel = modelOptItems().find((el) => el.dataset.value === modelEl.value);
-    if (sel) sel.scrollIntoView({ block: "nearest" });
-  }
-
-  function closeModelList() {
-    if (modelListEl) modelListEl.style.display = "none";
-    if (modelSearchEl) modelSearchEl.value = modelEl.value; // restore display to the committed value
-  }
-
-  function selectModel(value: string) {
-    modelEl.value = value;
-    if (modelSearchEl) modelSearchEl.value = value;
-    if (modelListEl) modelListEl.style.display = "none";
-    modelEl.dispatchEvent(new Event("change"));
-  }
-
-  if (modelSearchEl && modelListEl) {
-    modelSearchEl.addEventListener("focus", () => { openModelList(); modelSearchEl.select(); });
-    modelSearchEl.addEventListener("input", () => { renderModelList(modelSearchEl.value); modelListEl.style.display = "block"; });
-    modelSearchEl.addEventListener("keydown", (e: KeyboardEvent) => {
-      const items = modelOptItems();
-      if (e.key === "ArrowDown") { e.preventDefault(); modelHighlightIdx = Math.min(items.length - 1, modelHighlightIdx + 1); applyModelHighlight(); }
-      else if (e.key === "ArrowUp") { e.preventDefault(); modelHighlightIdx = Math.max(0, modelHighlightIdx - 1); applyModelHighlight(); }
-      else if (e.key === "Enter") {
-        e.preventDefault();
-        const pick = items[modelHighlightIdx] || items.find((el) => el.dataset.value === modelEl.value) || items[0];
-        if (pick?.dataset.value) selectModel(pick.dataset.value);
-      } else if (e.key === "Escape") { closeModelList(); modelSearchEl.blur(); }
-    });
-    // mousedown (not click) so selection wins the race against the input's blur.
-    modelListEl.addEventListener("mousedown", (e: MouseEvent) => {
-      const opt = (e.target as HTMLElement)?.closest(".model-opt") as HTMLElement | null;
-      if (opt?.dataset.value) { e.preventDefault(); selectModel(opt.dataset.value); }
-    });
-    // Close when clicking anywhere outside the combobox.
-    root.addEventListener("mousedown", (e: Event) => {
-      const t = e.target as HTMLElement;
-      if (modelListEl.style.display === "block" && !t.closest?.("#model-combo")) closeModelList();
-    });
-  }
+  const enableLcEl = $("enable-living-characters") as HTMLInputElement;
+  const lcTitlePrefixEl = $("lc-title-prefix") as HTMLInputElement;
+  const lcKeyPrefixEl = $("lc-key-prefix") as HTMLInputElement;
+  const groupThoughtsEl = $("group-thoughts-in-roster") as HTMLInputElement;
+  const crystallizedIntervalEl = $("crystallized-interval") as HTMLInputElement;
+  const crystallizedEntryMaxCharsEl = $("crystallized-max-chars") as HTMLInputElement;
+  const crystallizedNodeCapEl = $("crystallized-node-cap") as HTMLInputElement;
+  const crystallizedKnowsCapEl = $("crystallized-knows-cap") as HTMLInputElement;
+  const crystallizedRecallsCapEl = $("crystallized-recalls-cap") as HTMLInputElement;
+  const crystallizedVividCapEl = $("crystallized-vivid-cap") as HTMLInputElement;
+  const crystallizedOutlookCapEl = $("crystallized-outlook-cap") as HTMLInputElement;
+  const crystallizedPreferencesCapEl = $("crystallized-preferences-cap") as HTMLInputElement;
+  const crystallizedNpcMemoryCapEl = $("crystallized-npc-memory-cap") as HTMLInputElement;
 
   function updateProviderLabels() {
     const prov = provEl.value;
-    const gemmaDisclaimerEl = $("gemma-disclaimer");
-    if (gemmaDisclaimerEl) {
-      gemmaDisclaimerEl.style.display = prov === "gemini" ? "block" : "none";
-    }
     if (prov === "openai") {
       keyLblEl.textContent = "OpenAI API key";
       keyEl.placeholder = "sk-...";
@@ -2286,17 +268,7 @@ export function mountPanel(): PanelHandle {
       }
     }
   }
-  provEl.addEventListener("change", () => {
-    updateProviderLabels();
-    if (providerChangeCb) {
-      providerChangeCb(provEl.value, keyEl.value.trim());
-    }
-  });
-  keyEl.addEventListener("change", () => {
-    if (providerChangeCb) {
-      providerChangeCb(provEl.value, keyEl.value.trim());
-    }
-  });
+  provEl.addEventListener("change", updateProviderLabels);
 
   const box = root.querySelector(".box") as HTMLElement;
   function updateThemeClass() {
@@ -2307,15 +279,16 @@ export function mountPanel(): PanelHandle {
   }
   themeEl.addEventListener("change", () => {
     updateThemeClass();
-    if (themeChangeCb) {
-      themeChangeCb(themeEl.value);
+    if (cbs.themeChange) {
+      cbs.themeChange(themeEl.value);
     }
   });
+
+  let dragOccurred = false;
 
   const toggle = root.getElementById("min-toggle") as HTMLElement;
   const contentBody = root.getElementById("content-body") as HTMLElement;
 
-  let dragOccurred = false;
   let isMinimized = localStorage.getItem("aid-tracker-minimized") === "true";
 
   function applyPosition() {
@@ -2338,13 +311,16 @@ export function mountPanel(): PanelHandle {
       host.style.height = "";
     } else {
       if (window.innerWidth <= 600) {
-        // Mobile docked position
+        // Mobile docked position, capped so it never covers the whole screen (leaves room to
+        // scroll the story underneath). `host` itself carries an explicit size here — the
+        // @media (max-width: 600px) cap on `.box:not(.minimized)` in panel-template.ts's CSS
+        // only shrinks the inner box, not this outer positioned host, so it's mirrored here.
         host.style.left = "10px";
         host.style.right = "10px";
         host.style.top = "60px";
-        host.style.bottom = "80px";
+        host.style.bottom = "auto";
         host.style.width = "calc(100% - 20px)";
-        host.style.height = "calc(100% - 140px)";
+        host.style.height = "min(70dvh, 70vh)";
 
         box.style.width = "100%";
         box.style.height = "100%";
@@ -2424,6 +400,13 @@ export function mountPanel(): PanelHandle {
       return;
     }
 
+    // Switching tabs swaps the scroll container — the back-to-top button would otherwise linger
+    // pointing at the previous pane's scroll position.
+    if (target.closest(".main-tab-btn") || target.closest(".subtab-btn")) {
+      const btt = root.getElementById("back-to-top");
+      if (btt) btt.style.display = "none";
+    }
+
     if (isMinimized) {
       isMinimized = false;
       localStorage.setItem("aid-tracker-minimized", String(isMinimized));
@@ -2432,10 +415,193 @@ export function mountPanel(): PanelHandle {
       isMinimized = true;
       localStorage.setItem("aid-tracker-minimized", String(isMinimized));
       updateMinState();
+    } else if (window.innerWidth <= 600 && target.closest("#drag-handle")) {
+      // Mobile: the docked panel can't be dragged, so the whole title row doubles as a minimize
+      // target — far easier to hit than the small "—" button. Desktop keeps the title as a pure
+      // drag handle (minimizing on title-click there would fire after every drag-less click).
+      isMinimized = true;
+      localStorage.setItem("aid-tracker-minimized", String(isMinimized));
+      updateMinState();
     }
   });
 
+  // Back-to-top: long lists (card roster, memory banks) scroll far on every form factor. Scroll
+  // events don't bubble, so listen in CAPTURE phase on the content body and track whichever known
+  // scroll container the user last scrolled; show the button once it's meaningfully deep.
+  {
+    let lastScrolledEl: HTMLElement | null = null;
+    const backToTop = root.getElementById("back-to-top");
+    contentBody.addEventListener("scroll", (e) => {
+      const el = e.target as HTMLElement;
+      if (!el?.classList) return;
+      if (!(el.classList.contains("scrollable-panel") || el.classList.contains("tab-pane") || el.classList.contains("mb-pane"))) return;
+      lastScrolledEl = el;
+      if (backToTop) backToTop.style.display = el.scrollTop > 300 ? "flex" : "none";
+    }, true);
+    backToTop?.addEventListener("click", () => {
+      lastScrolledEl?.scrollTo({ top: 0, behavior: "smooth" });
+      backToTop.style.display = "none";
+    });
+  }
+
+  // Mobile soft-keyboard handling (visualViewport-driven "keyboard mode").
+  //
+  // Why the old guard wasn't enough: the wave-5 fix only SKIPPED the JS re-clamp on resize while a
+  // panel field was focused — but the panel's mobile size is `min(70dvh, 70vh)` (host inline) plus a
+  // `max-height: min(70dvh, 70vh) !important` stylesheet cap on the box, and vh/dvh are CSS units the
+  // browser RE-RESOLVES by itself when the soft keyboard shrinks the viewport (Firefox Android shrinks
+  // the layout viewport; no resize listener involved). Keyboard halves the viewport → the panel
+  // squashes to 70% of half a screen and the field being edited is nowhere in sight.
+  //
+  // Fix: while an editable field inside the panel is focused AND the keyboard is up (visualViewport
+  // height well below its no-keyboard baseline), size the host in fixed PX to fill exactly the visible
+  // area above the keyboard — px doesn't re-resolve. `top = vv.offsetTop` also keeps it in view on
+  // browsers that overlay the keyboard and pan the visual viewport (Chrome Android) rather than
+  // resizing the layout viewport (Firefox Android). The box's !important stylesheet cap is beaten with
+  // an inline !important max-height override for the duration. On keyboard close / blur, everything is
+  // restored and applyPosition() re-runs. Browsers without visualViewport keep the old skip-the-reclamp
+  // behavior (the window resize listener below still guards on editableFocused).
+  let editableFocused = false;
+  let keyboardMode = false;
+  let exitTimer: ReturnType<typeof setTimeout> | undefined;
+  const vv = window.visualViewport;
+  // No-keyboard viewport height. Updated whenever no panel field is focused (tracks rotation and
+  // browser-chrome changes); never updated mid-edit, so it stays the "keyboard closed" reference.
+  let vvBaseline = vv ? vv.height : window.innerHeight;
+  const KEYBOARD_MIN_DELTA = 100; // px drop below baseline that counts as "keyboard open"
+
+  function isEditableTarget(el: EventTarget | null): el is HTMLElement {
+    if (!el || !(el as HTMLElement).tagName) return false;
+    const node = el as HTMLElement;
+    const tag = node.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || node.isContentEditable === true;
+  }
+
+  // Top chrome hidden while typing (mobile keyboard mode): the title bar, stats strip, and the
+  // Active Location / suggestion banners contribute nothing mid-edit but eat the little height left
+  // above the keyboard. Inline display is saved once on hide (idempotent across repeated vv events)
+  // and restored on exit — these are permanent template elements, so a state re-render during
+  // keyboard mode can't resurrect them.
+  // meta-stats no longer exists as shared chrome (its stat spans moved into the Home pane); the
+  // bottom tab bar + footer hide too — nothing above/below the editor earns space while typing.
+  const KEYBOARD_HIDE_IDS = ["drag-handle", "location-banners-container", "main-tab-nav", "main-footer"];
+  function setChromeHidden(hidden: boolean) {
+    for (const id of KEYBOARD_HIDE_IDS) {
+      const el = root.getElementById(id) as HTMLElement | null;
+      if (!el) continue;
+      if (hidden) {
+        if (el.dataset.kbPrevDisplay === undefined) el.dataset.kbPrevDisplay = el.style.display;
+        el.style.display = "none";
+      } else if (el.dataset.kbPrevDisplay !== undefined) {
+        el.style.display = el.dataset.kbPrevDisplay;
+        delete el.dataset.kbPrevDisplay;
+      }
+    }
+  }
+
+  // Focused-textarea auto-grow (keyboard mode): touch has no usable corner-resize, so while the
+  // keyboard is up the textarea being edited is grown to a comfortable share of the space that's
+  // left (clamped so surrounding context stays visible). Inline min-height is saved per element and
+  // restored on blur, so the row snaps back when editing ends.
+  function growFocusedTextarea(el: EventTarget | null) {
+    if (!vv || window.innerWidth > 600) return;
+    if (!el || (el as HTMLElement).tagName !== "TEXTAREA") return;
+    const t = el as HTMLTextAreaElement;
+    if (t.dataset.kbPrevMinHeight === undefined) t.dataset.kbPrevMinHeight = t.style.minHeight;
+    t.style.setProperty("min-height", Math.max(120, Math.min(Math.round(vv.height * 0.35), 240)) + "px", "important");
+  }
+  function ungrowTextarea(el: EventTarget | null) {
+    if (!el || (el as HTMLElement).tagName !== "TEXTAREA") return;
+    const t = el as HTMLTextAreaElement;
+    if (t.dataset.kbPrevMinHeight !== undefined) {
+      t.style.minHeight = t.dataset.kbPrevMinHeight;
+      delete t.dataset.kbPrevMinHeight;
+    }
+  }
+
+  function applyKeyboardLayout() {
+    if (!vv) return;
+    keyboardMode = true;
+    setChromeHidden(true);
+    host.style.left = "10px";
+    host.style.right = "10px";
+    host.style.width = "calc(100% - 20px)";
+    host.style.top = Math.max(0, vv.offsetTop + 6) + "px";
+    host.style.height = Math.max(140, vv.height - 12) + "px";
+    // Inline !important beats the stylesheet's `max-height: min(70dvh,70vh) !important` mobile cap,
+    // which would otherwise re-shrink the box against the keyboard-shrunk viewport.
+    box.style.setProperty("max-height", "none", "important");
+    box.style.height = "100%";
+    box.style.width = "100%";
+  }
+
+  function exitKeyboardLayout() {
+    if (!keyboardMode) return;
+    keyboardMode = false;
+    setChromeHidden(false);
+    box.style.removeProperty("max-height");
+    updateMinState(); // restores the normal docked/floating sizing via applyPosition()
+  }
+
+  function onViewportChange() {
+    if (!vv) return;
+    if (!editableFocused) {
+      vvBaseline = vv.height; // keyboard can't be open for the panel — track the real viewport
+      if (keyboardMode) exitKeyboardLayout();
+      return;
+    }
+    if (isMinimized || window.innerWidth > 600) return;
+    if (vv.height < vvBaseline - KEYBOARD_MIN_DELTA) {
+      const entering = !keyboardMode;
+      applyKeyboardLayout();
+      // Grow the field + scroll the caret into view only on the TRANSITION into keyboard mode — vv
+      // fires resize/scroll continuously while panning, and repeated smooth scrolls would fight the
+      // user's own scrolling. (vv.height is post-keyboard here, so the grow share is accurate.)
+      if (entering) {
+        const active = root.activeElement;
+        growFocusedTextarea(active);
+        if (isEditableTarget(active)) active.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    } else {
+      exitKeyboardLayout(); // keyboard dismissed without blurring (e.g. Android back button)
+    }
+  }
+  if (vv) {
+    vv.addEventListener("resize", onViewportChange);
+    vv.addEventListener("scroll", onViewportChange);
+  }
+
+  root.addEventListener("focusin", (e) => {
+    const target = e.target;
+    if (!isEditableTarget(target)) return;
+    if (exitTimer) { clearTimeout(exitTimer); exitTimer = undefined; }
+    editableFocused = true;
+    // Field hop with the keyboard already up: no vv resize will fire, so grow the new field here.
+    if (keyboardMode) growFocusedTextarea(target);
+    // Delay for the on-screen keyboard's open animation, then size + scroll the caret into view.
+    setTimeout(() => {
+      if (root.activeElement !== target) return;
+      onViewportChange();
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 300);
+  });
+  root.addEventListener("focusout", (e) => {
+    if (!isEditableTarget(e.target)) return;
+    ungrowTextarea(e.target); // per-field, immediate — the next field grows on its own focusin
+    // Debounced: focus hopping between two panel fields fires focusout→focusin back-to-back;
+    // exiting keyboard mode in that gap would flicker the whole panel resize.
+    if (exitTimer) clearTimeout(exitTimer);
+    exitTimer = setTimeout(() => {
+      exitTimer = undefined;
+      const active = root.activeElement;
+      if (isEditableTarget(active)) return; // moved to another field — stay in keyboard mode
+      editableFocused = false;
+      exitKeyboardLayout();
+    }, 250);
+  });
+
   window.addEventListener("resize", () => {
+    if (editableFocused || keyboardMode) return;
     updateMinState();
   });
 
@@ -2566,7 +732,63 @@ export function mountPanel(): PanelHandle {
   const viewTracker = root.getElementById("view-tracker") as HTMLElement;
   const viewSettings = root.getElementById("view-settings") as HTMLElement;
   const viewAnalyze = root.getElementById("view-analyze") as HTMLElement;
+  const viewEditor = root.getElementById("view-editor") as HTMLElement;
   const analyzeBody = root.getElementById("analyze-body") as HTMLElement;
+  const setupHelperContainer = root.getElementById("setup-helper-container") as HTMLElement;
+
+
+  function getFormattedChipValue(key: string, val: string): string {
+    const k = key.trim().toLowerCase();
+    const excluded = ["name", "age", "gender", "sex", "backstory", "personality", "biography", "bio", "history", "class", "race", "faction"];
+    if (excluded.includes(k)) {
+      return val;
+    }
+    return `- ${key}: ${val}`;
+  }
+
+  setupHelperContainer.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    
+    // Check chip click
+    const chip = target.closest(".setup-detail-chip");
+    if (chip) {
+      e.preventDefault(); // Prevent details drawer toggle
+      const key = chip.getAttribute("data-key")!;
+      const val = chip.getAttribute("data-value")!;
+      if (cbs.fillSetupValue) {
+        const formatted = getFormattedChipValue(key, val);
+        cbs.fillSetupValue(formatted);
+      }
+      return;
+    }
+    
+    // Check Name/Bio buttons click
+    const fillBtn = target.closest(".setup-fill-btn");
+    if (fillBtn && lastState?.globalAssets) {
+      e.preventDefault(); // Prevent details drawer toggle
+      const assetId = fillBtn.getAttribute("data-id")!;
+      const asset = lastState.globalAssets.find(a => a.id === assetId);
+      if (asset) {
+        const field = fillBtn.classList.contains("fill-name") ? "title" : "value";
+        const val = field === "title" ? (asset.title || "") : (asset.value || asset.description || "");
+        if (val && cbs.fillSetupValue) {
+          cbs.fillSetupValue(val);
+        }
+      }
+    }
+  });
+
+  setupHelperContainer.addEventListener("input", (e) => {
+    const target = e.target as HTMLInputElement;
+    if (target && target.id === "setup-favorites-search") {
+      const val = target.value;
+      const listEl = root.getElementById("setup-favorites-list");
+      if (listEl && lastState?.globalAssets) {
+        const activeQ = lastState.activeSetupQuestion?.question || "";
+        setSafeHTML(listEl, renderSetupFavorites(lastState.globalAssets, val, activeQ, listEl));
+      }
+    }
+  });
 
   const toastEl = root.getElementById("toast") as HTMLElement;
   let toastTimeout: any = null;
@@ -2599,18 +821,55 @@ export function mountPanel(): PanelHandle {
     viewTracker.style.display = "flex"; // Changed to flex to align with outer constraints
     viewSettings.style.display = "none";
     viewAnalyze.style.display = "none";
+    viewEditor.style.display = "none";
   };
   const showSettingsView = () => {
     viewTracker.style.display = "none";
     viewSettings.style.display = "flex";
     viewAnalyze.style.display = "none";
+    viewEditor.style.display = "none";
     switchTab("tab-gen");
   };
   const showAnalyzeView = () => {
     viewTracker.style.display = "none";
     viewSettings.style.display = "none";
     viewAnalyze.style.display = "flex";
+    viewEditor.style.display = "none";
   };
+
+  // Full-panel editor view (Mobile Rethink Phase B): tapping "edit" takes over the panel instead of
+  // growing a widget inside a scrolling list. Body content is a SNAPSHOT built at open time —
+  // background renderState passes rewrite the hidden panes underneath without touching in-progress
+  // edits. The tab bar/footer live inside #view-tracker, so the editor is naturally chrome-free.
+  let editorReturnTab = "main-tab-home";
+  // One-level back target for editor-from-editor navigation (e.g. editing a memory from inside the
+  // Memory Bank view returns to the bank view, not to the tab). Reset on every top-level open.
+  let editorOnBack: (() => void) | null = null;
+  const openEditorView = (title: string, bodyHtml: string, bind?: (body: HTMLElement) => void, onBack?: () => void) => {
+    if (viewEditor.style.display !== "flex") editorReturnTab = activeTabId; // only snapshot on entry from a tab
+    editorOnBack = onBack || null;
+    viewTracker.style.display = "none";
+    viewSettings.style.display = "none";
+    viewAnalyze.style.display = "none";
+    viewEditor.style.display = "flex";
+    const titleEl = root.getElementById("editor-title");
+    if (titleEl) titleEl.textContent = title;
+    const body = root.getElementById("editor-body") as HTMLElement | null;
+    if (body) {
+      setSafeHTML(body, bodyHtml);
+      bind?.(body);
+    }
+  };
+  const closeEditorView = () => {
+    editorOnBack = null;
+    showTrackerView();
+    switchMainTab(editorReturnTab);
+  };
+  const goEditorBack = () => {
+    if (editorOnBack) { const back = editorOnBack; editorOnBack = null; back(); return; }
+    closeEditorView();
+  };
+  root.getElementById("editor-back")?.addEventListener("click", () => goEditorBack());
   const setAnalyzeLoading = () => {
     setSafeHTML(analyzeBody, `<div style="text-align:center;padding:28px 12px;color:var(--text-secondary);">` +
       `<div class="spinner"></div>` +
@@ -2620,6 +879,9 @@ export function mountPanel(): PanelHandle {
   root.getElementById("analyze-back")!.addEventListener("click", showTrackerView);
 
   let offMetaSections: any[] | null = null;
+  // Must match OFFMETA_PERMISSION_REQUIRED_PREFIX in src/background/background.ts — the panel
+  // can't import that module directly (it's service-worker-only code with side effects).
+  const OFFMETA_PERMISSION_REQUIRED_PREFIX = "PERMISSION_REQUIRED:";
 
   async function loadOffMetaRepository() {
     const container = root.getElementById("offmeta-repo-container");
@@ -2646,15 +908,63 @@ export function mountPanel(): PanelHandle {
         throw new Error(res?.error || "Invalid response");
       }
     } catch (err: any) {
+      const rawMessage = err?.message || String(err);
+      const isPermissionError = rawMessage.startsWith(OFFMETA_PERMISSION_REQUIRED_PREFIX);
+
+      if (isPermissionError) {
+        setSafeHTML(container, `
+          <div style="text-align:center; padding:20px; color:#fca5a5;">
+            <div style="font-weight:bold; margin-bottom:4px; font-size:11px;">Permission needed</div>
+            <div style="font-size:9.5px; margin-bottom:8px;">Firefox needs permission to reach the OffMeta repository (docs.google.com) before it can load these instructions.</div>
+            <button id="offmeta-grant-access" style="margin:0; font-size:9.5px; padding:3px 8px; border-radius:4px; background:rgba(16,185,129,0.12); color:var(--accent-color); border:1px solid rgba(16,185,129,0.3); cursor:pointer;">Grant access</button>
+          </div>
+        `);
+        root.getElementById("offmeta-grant-access")?.addEventListener("click", async () => {
+          try {
+            const res: any = await browser.runtime.sendMessage({ kind: "openPermissionsPage" });
+            if (!res || !res.ok) {
+              throw new Error(res?.error || "unknown error");
+            }
+          } catch (openErr: any) {
+            setSafeHTML(container, `
+              <div style="text-align:center; padding:20px; color:#fca5a5;">
+                <div style="font-weight:bold; margin-bottom:4px; font-size:11px;">Failed to open permissions tab</div>
+                <div style="font-size:9.5px; margin-bottom:8px;">${esc(openErr?.message || String(openErr))}</div>
+                <button id="offmeta-retry" style="margin:0; font-size:9.5px; padding:3px 8px; border-radius:4px; background:rgba(239,68,68,0.1); color:#fca5a5; border:1px solid rgba(239,68,68,0.2); cursor:pointer;">Retry</button>
+              </div>
+            `);
+            root.getElementById("offmeta-retry")?.addEventListener("click", () => {
+              loadOffMetaRepository();
+            });
+          }
+        });
+        return;
+      }
+
+      // Generic failure ALSO offers the grant path: Firefox Android's permissions.contains can
+      // report an origin as granted while the fetch still dies unprivileged ("NetworkError"), so
+      // never strand the user with only Retry — re-granting (now incl. *.googleusercontent.com,
+      // the Docs-export redirect target) is the actual remedy for the permission-shaped failures.
       setSafeHTML(container, `
         <div style="text-align:center; padding:20px; color:#fca5a5;">
           <div style="font-weight:bold; margin-bottom:4px; font-size:11px;">Failed to load repository</div>
-          <div style="font-size:9.5px; margin-bottom:8px;">${esc(err?.message || String(err))}</div>
-          <button id="offmeta-retry" style="margin:0; font-size:9.5px; padding:3px 8px; border-radius:4px; background:rgba(239,68,68,0.1); color:#fca5a5; border:1px solid rgba(239,68,68,0.2); cursor:pointer;">Retry</button>
+          <div style="font-size:9.5px; margin-bottom:8px;">${esc(rawMessage)}</div>
+          <div style="display:flex; gap:6px; justify-content:center;">
+            <button id="offmeta-retry" style="margin:0; font-size:9.5px; padding:3px 8px; border-radius:4px; background:rgba(239,68,68,0.1); color:#fca5a5; border:1px solid rgba(239,68,68,0.2); cursor:pointer;">Retry</button>
+            <button id="offmeta-grant-access" style="margin:0; font-size:9.5px; padding:3px 8px; border-radius:4px; background:rgba(16,185,129,0.12); color:var(--accent-color); border:1px solid rgba(16,185,129,0.3); cursor:pointer;">Grant access</button>
+          </div>
         </div>
       `);
       root.getElementById("offmeta-retry")?.addEventListener("click", () => {
         loadOffMetaRepository();
+      });
+      root.getElementById("offmeta-grant-access")?.addEventListener("click", async () => {
+        try {
+          const res: any = await browser.runtime.sendMessage({ kind: "openPermissionsPage" });
+          if (!res || !res.ok) throw new Error(res?.error || "unknown error");
+        } catch (openErr: any) {
+          showToast("Failed to open permissions tab: " + (openErr?.message || String(openErr)), true);
+        }
       });
     }
   }
@@ -2666,17 +976,7 @@ export function mountPanel(): PanelHandle {
     const btns = root.querySelectorAll(".offmeta-subtab-btn");
     btns.forEach((b) => {
       const active = b.getAttribute("data-subtab") === subTabId;
-      if (active) {
-        (b as HTMLElement).style.color = "var(--theme-text-color)";
-        (b as HTMLElement).style.borderBottomColor = "var(--theme-text-color)";
-        (b as HTMLElement).style.fontWeight = "700";
-        b.classList.add("active");
-      } else {
-        (b as HTMLElement).style.color = "var(--text-secondary)";
-        (b as HTMLElement).style.borderBottomColor = "transparent";
-        (b as HTMLElement).style.fontWeight = "normal";
-        b.classList.remove("active");
-      }
+      b.classList.toggle("active", active);
     });
 
     const statusEl = root.getElementById("offmeta-status");
@@ -2768,12 +1068,18 @@ export function mountPanel(): PanelHandle {
             const isBlock = item.type === "block";
             const displayTitle = item.title || (isBlock ? "Preset Block" : "Instruction");
             
+            let itemContent = item.content;
+            const protName = lastState?.protagonist || "";
+            if (protName) {
+              itemContent = itemContent.replace(/\{protagonist\}/gi, protName);
+            }
+            
             groupHtml += `
               <div class="offmeta-item-card" data-id="${item.id}" style="background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:6px;padding:6px 8px;display:flex;flex-direction:column;gap:6px;box-sizing:border-box;transition:all 0.2s ease;">
                 <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;">
                   <span style="font-weight:600;font-size:11.5px;color:var(--theme-text-color);">${esc(displayTitle)}</span>
                   <div style="display:flex;gap:4px;align-items:center;">
-                    <button class="offmeta-copy-btn" data-content="${esc(item.content)}" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(255,255,255,0.04);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:4px;cursor:pointer;" title="Copy to clipboard">Copy</button>
+                    <button class="offmeta-copy-btn" data-content="${esc(itemContent)}" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(255,255,255,0.04);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:4px;cursor:pointer;" title="Copy to clipboard">Copy</button>
             `;
 
             if (sec.title === "🤖 AN/PE") {
@@ -2781,14 +1087,9 @@ export function mountPanel(): PanelHandle {
                     <button class="offmeta-apply-btn" data-id="${item.id}" data-type="an" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Apply to AN</button>
                     <button class="offmeta-apply-btn" data-id="${item.id}" data-type="pe" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Apply to PE</button>
               `;
-            } else if (sec.title === "🤖 Premade AIN") {
-              groupHtml += `
-                    <button class="offmeta-apply-btn" data-id="${item.id}" data-type="ain" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Apply AIN</button>
-              `;
             } else {
               groupHtml += `
                     <button class="offmeta-apply-btn" data-id="${item.id}" data-type="ain" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Apply AIN</button>
-                    <button class="offmeta-apply-btn" data-id="${item.id}" data-type="an" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Apply to AN</button>
               `;
             }
 
@@ -2803,12 +1104,12 @@ export function mountPanel(): PanelHandle {
                   <summary style="cursor:pointer;font-size:10.5px;color:var(--text-secondary);padding:2px 0;outline:none;list-style:none;">
                     <span style="border-bottom:1px dashed var(--text-secondary);">Click to preview (${item.content.split('\n').length} lines)</span>
                   </summary>
-                  <pre style="margin:4px 0 0 0;font-family:SFMono-Regular,Consolas,monospace;font-size:10px;background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;color:var(--text-primary);max-height:120px;overflow-y:auto;border:1px solid rgba(255,255,255,0.02);">${esc(item.content)}</pre>
+                  <pre style="margin:4px 0 0 0;font-family:SFMono-Regular,Consolas,monospace;font-size:10px;background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;color:var(--text-primary);max-height:120px;overflow-y:auto;border:1px solid rgba(255,255,255,0.02);">${esc(itemContent)}</pre>
                 </details>
               `;
             } else {
               groupHtml += `
-                <div style="font-size:11px;color:var(--text-primary);line-height:1.35;word-break:break-word;">${esc(item.content)}</div>
+                <div style="font-size:11px;color:var(--text-primary);line-height:1.35;word-break:break-word;">${esc(itemContent)}</div>
               `;
             }
 
@@ -2898,7 +1199,7 @@ export function mountPanel(): PanelHandle {
               statusEl.style.color = "#34d399";
               statusEl.style.display = "block";
             }
-            if (applyInstructionCb) applyInstructionCb();
+            if (cbs.applyInstruction) cbs.applyInstruction();
           } else {
             throw new Error(res?.error || "Save rejected by background service worker.");
           }
@@ -2921,14 +1222,6 @@ export function mountPanel(): PanelHandle {
   }
 
   function switchTab(tabId: string) {
-    if (tabId === "tab-manager" && lastState?.isManagerOnly) {
-      managerShowSettings = false;
-      const tabNav = viewSettings.querySelector(".tab-nav") as HTMLElement | null;
-      if (tabNav) tabNav.style.display = "none";
-      const footer = root.getElementById("settings-footer");
-      if (footer) footer.style.display = "none";
-    }
-
     const panes = root.querySelectorAll(".tab-pane");
     const btns = root.querySelectorAll(".tab-btn");
     panes.forEach((p) => {
@@ -2962,9 +1255,7 @@ export function mountPanel(): PanelHandle {
   });
 
   // Adventures Manager sub-tab switching
-  let activeManagerSubtab = "global";
   function switchManagerSubtab(subtab: string) {
-    activeManagerSubtab = subtab;
     const globalPane = root.getElementById("subpane-global");
     const explorerPane = root.getElementById("subpane-explorer");
     const btnGlobal = root.getElementById("btn-subtab-global");
@@ -2974,21 +1265,13 @@ export function mountPanel(): PanelHandle {
       if (subtab === "global") {
         globalPane.style.display = "flex";
         explorerPane.style.display = "none";
-        btnGlobal.style.color = "var(--theme-text-color)";
-        btnGlobal.style.borderBottom = "2px solid var(--theme-text-color)";
-        btnGlobal.style.fontWeight = "700";
-        btnExplorer.style.color = "var(--text-secondary)";
-        btnExplorer.style.borderBottom = "2px solid transparent";
-        btnExplorer.style.fontWeight = "normal";
+        btnGlobal.classList.add("active");
+        btnExplorer.classList.remove("active");
       } else {
         globalPane.style.display = "none";
         explorerPane.style.display = "flex";
-        btnExplorer.style.color = "var(--theme-text-color)";
-        btnExplorer.style.borderBottom = "2px solid var(--theme-text-color)";
-        btnExplorer.style.fontWeight = "700";
-        btnGlobal.style.color = "var(--text-secondary)";
-        btnGlobal.style.borderBottom = "2px solid transparent";
-        btnGlobal.style.fontWeight = "normal";
+        btnExplorer.classList.add("active");
+        btnGlobal.classList.remove("active");
       }
     }
     if (lastState) {
@@ -3051,7 +1334,7 @@ export function mountPanel(): PanelHandle {
 
     const asset: GlobalAsset = {
       id: Math.floor(Math.random() * 1e9).toString() + "-" + Date.now(),
-      type: type as any,
+      type: type as GlobalAsset["type"],
       title,
       value,
       createdAt: new Date().toISOString()
@@ -3067,13 +1350,13 @@ export function mountPanel(): PanelHandle {
       asset.cardType = scType;
     }
 
-    if (saveGlobalAssetCb) {
+    if (cbs.saveGlobalAsset) {
       const btn = root.getElementById("btn-save-global") as HTMLButtonElement;
       const oldText = btn.textContent;
       btn.textContent = "Creating...";
       btn.disabled = true;
       try {
-        const res = await saveGlobalAssetCb(asset);
+        const res = await cbs.saveGlobalAsset(asset);
         if (res?.error) {
           showToast(`Failed to create: ${res.error}`, true);
         } else {
@@ -3208,8 +1491,8 @@ export function mountPanel(): PanelHandle {
               <span style="font-size:9.5px;color:var(--text-secondary);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">(${esc(adv.shortId)})</span>
             </div>
             <div style="display:flex;gap:4px;flex-shrink:0;">
-              <button class="btn-restore-adv" data-shortid="${adv.shortId}" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Restore</button>
-              <button class="btn-purge-adv" data-shortid="${adv.shortId}" data-title="${esc(adv.title || "Untitled Adventure")}" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Delete</button>
+              <button class="btn-restore-adv btn-micro btn-micro--green" data-shortid="${adv.shortId}">Restore</button>
+              <button class="btn-purge-adv btn-micro btn-micro--red" data-shortid="${adv.shortId}" data-title="${esc(adv.title || "Untitled Adventure")}">Delete</button>
             </div>
           </div>
         `).join("");
@@ -3362,9 +1645,9 @@ export function mountPanel(): PanelHandle {
                   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:4px;">
                     <div style="font-weight:600;font-size:11.5px;color:var(--text-primary);word-break:break-all;">${esc(item.title)}</div>
                     <div style="display:flex;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;">
-                      ${!state.isManagerOnly ? `<button class="btn-import-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Import</button>` : ""}
-                      <button class="btn-edit-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(59,130,246,0.1);color:#60a5fa;border:1px solid rgba(59,130,246,0.2);border-radius:4px;cursor:pointer;">Edit</button>
-                      <button class="btn-delete-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Remove From Favorites</button>
+                      ${!state.isManagerOnly ? `<button class="btn-import-asset btn-micro btn-micro--green">Import</button>` : ""}
+                      <button class="btn-edit-asset btn-micro btn-micro--blue">Edit</button>
+                      <button class="btn-delete-asset btn-micro btn-micro--red">Remove From Favorites</button>
                     </div>
                   </div>
                   ${scMeta}
@@ -3389,9 +1672,9 @@ export function mountPanel(): PanelHandle {
                 <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:4px;">
                   <div style="font-weight:600;font-size:11.5px;color:var(--text-primary);word-break:break-all;">${esc(item.title)}</div>
                   <div style="display:flex;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;">
-                    ${!state.isManagerOnly ? `<button class="btn-import-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Import</button>` : ""}
-                    <button class="btn-edit-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(59,130,246,0.1);color:#60a5fa;border:1px solid rgba(59,130,246,0.2);border-radius:4px;cursor:pointer;">Edit</button>
-                    <button class="btn-delete-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Remove From Favorites</button>
+                    ${!state.isManagerOnly ? `<button class="btn-import-asset btn-micro btn-micro--green">Import</button>` : ""}
+                    <button class="btn-edit-asset btn-micro btn-micro--blue">Edit</button>
+                    <button class="btn-delete-asset btn-micro btn-micro--red">Remove From Favorites</button>
                   </div>
                 </div>
                 <details style="cursor:pointer;" data-open-id="global-val-${item.id}"${isGlobalOpen(`global-val-${item.id}`)}>
@@ -3411,9 +1694,9 @@ export function mountPanel(): PanelHandle {
         btn.addEventListener("click", async () => {
           const card = btn.closest(".global-asset-card");
           const assetId = card?.getAttribute("data-id") || "";
-          if (assetId && state.shortId && importGlobalAssetCb) {
+          if (assetId && state.shortId && cbs.importGlobalAsset) {
             btn.textContent = "Importing...";
-            const res = await importGlobalAssetCb(assetId);
+            const res = await cbs.importGlobalAsset(assetId);
             if (res?.error) {
               showToast(`Import failed: ${res.error}`, true);
               btn.textContent = "Import";
@@ -3428,19 +1711,31 @@ export function mountPanel(): PanelHandle {
 
       // Bind remove (delete) buttons
       listGlobal.querySelectorAll(".btn-delete-asset").forEach(btn => {
-        btn.addEventListener("click", async () => {
+        let armTimeout: any = null;
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
           const card = btn.closest(".global-asset-card");
           const assetId = card?.getAttribute("data-id") || "";
-          if (assetId && deleteGlobalAssetCb) {
-            if (confirm("Are you sure you want to remove this from your favorites?")) {
-              const res = await deleteGlobalAssetCb(assetId);
-              if (res?.error) {
-                showToast(`Remove failed: ${res.error}`, true);
-              } else {
-                showToast("Removed from favorites.");
-                triggerRefresh();
-              }
+          if (!assetId || !cbs.deleteGlobalAsset) return;
+
+          if (btn.classList.contains("armed")) {
+            clearTimeout(armTimeout);
+            btn.classList.remove("armed");
+            btn.textContent = "Remove From Favorites";
+            const res = await cbs.deleteGlobalAsset(assetId);
+            if (res?.error) {
+              showToast(`Remove failed: ${res.error}`, true);
+            } else {
+              showToast("Removed from favorites.");
+              triggerRefresh();
             }
+          } else {
+            btn.classList.add("armed");
+            btn.textContent = "Confirm Remove?";
+            armTimeout = setTimeout(() => {
+              btn.classList.remove("armed");
+              btn.textContent = "Remove From Favorites";
+            }, 3000);
           }
         });
       });
@@ -3465,7 +1760,6 @@ export function mountPanel(): PanelHandle {
             const keysInput = card.querySelector(".edit-asset-keys") as HTMLInputElement;
             const descInput = card.querySelector(".edit-asset-desc") as HTMLInputElement;
 
-            const standardTypes = ["character", "location", "faction", "class", "race"];
             let cardType: string | undefined = undefined;
             if (scTypeSelect) {
               if (scTypeSelect.value === "custom") {
@@ -3495,7 +1789,7 @@ export function mountPanel(): PanelHandle {
 
               return `
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Story Card Type</label>
-                <select class="edit-sc-type" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;">
+                <select class="edit-sc-type input-compact input-dark" style="margin:0;">
                   <option value="character" ${scType === "character" ? "selected" : ""}>Character</option>
                   <option value="location" ${scType === "location" ? "selected" : ""}>Location</option>
                   <option value="faction" ${scType === "faction" ? "selected" : ""}>Faction</option>
@@ -3506,28 +1800,28 @@ export function mountPanel(): PanelHandle {
 
                 <div class="edit-sc-custom-type-container" style="display:${scType === "custom" ? "flex" : "none"};flex-direction:column;gap:6px;">
                   <label style="font-size:9.5px;font-weight:600;margin:0;">Custom Type</label>
-                  <input class="edit-sc-custom-type" type="text" value="${esc(customTypeValue)}" placeholder="Enter custom type..." style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+                  <input class="edit-sc-custom-type input-compact input-dark" type="text" value="${esc(customTypeValue)}" placeholder="Enter custom type..." style="margin:0;" />
                 </div>
 
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Name</label>
-                <input class="edit-asset-title" type="text" value="${esc(vals.title)}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+                <input class="edit-asset-title input-compact input-dark" type="text" value="${esc(vals.title)}" style="margin:0;" />
 
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Entry</label>
-                <textarea class="edit-asset-value" rows="6" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(vals.value)}</textarea>
+                <textarea class="edit-asset-value input-compact input-dark" rows="6" style="margin:0;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(vals.value)}</textarea>
 
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Triggers</label>
-                <input class="edit-asset-keys" type="text" value="${esc(vals.keys || "")}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+                <input class="edit-asset-keys input-compact input-dark" type="text" value="${esc(vals.keys || "")}" style="margin:0;" />
 
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Notes</label>
-                <input class="edit-asset-desc" type="text" value="${esc(vals.description || "")}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+                <input class="edit-asset-desc input-compact input-dark" type="text" value="${esc(vals.description || "")}" style="margin:0;" />
               `;
             } else {
               return `
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Title</label>
-                <input class="edit-asset-title" type="text" value="${esc(vals.title)}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+                <input class="edit-asset-title input-compact input-dark" type="text" value="${esc(vals.title)}" style="margin:0;" />
 
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Value</label>
-                <textarea class="edit-asset-value" rows="6" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(vals.value)}</textarea>
+                <textarea class="edit-asset-value input-compact input-dark" rows="6" style="margin:0;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(vals.value)}</textarea>
               `;
             }
           };
@@ -3537,7 +1831,7 @@ export function mountPanel(): PanelHandle {
               <div style="font-weight:700;font-size:10px;text-transform:uppercase;color:var(--text-secondary);">Edit Favorite</div>
               
               <label style="font-size:9.5px;font-weight:600;margin:0;">Asset Type</label>
-              <select class="edit-asset-type" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;">
+              <select class="edit-asset-type input-compact input-dark" style="margin:0;">
                 <option value="ain" ${currentType === "ain" ? "selected" : ""}>AI Instructions (AIN)</option>
                 <option value="an" ${currentType === "an" ? "selected" : ""}>Author's Note (AN)</option>
                 <option value="pe" ${currentType === "pe" ? "selected" : ""}>Character Description (PE)</option>
@@ -3549,7 +1843,7 @@ export function mountPanel(): PanelHandle {
               
               <div style="display:flex;gap:4px;justify-content:flex-end;margin-top:4px;">
                 <button class="btn-save-edit" style="margin:0;padding:2px 8px;font-size:10px;background:rgba(16,185,129,0.2);color:#34d399;border:1px solid rgba(16,185,129,0.3);border-radius:4px;cursor:pointer;">Save</button>
-                <button class="btn-cancel-edit" style="margin:0;padding:2px 8px;font-size:10px;background:rgba(255,255,255,0.05);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:4px;cursor:pointer;">Cancel</button>
+                <button class="btn-cancel-edit btn-cancel" style="margin:0;">Cancel</button>
               </div>
             </div>
           `);
@@ -3601,7 +1895,7 @@ export function mountPanel(): PanelHandle {
             const typeSelect = card.querySelector(".edit-asset-type") as HTMLSelectElement;
             const vals = getFormValues();
 
-            if (saveGlobalAssetCb) {
+            if (cbs.saveGlobalAsset) {
               const newType = typeSelect.value as "ain" | "an" | "pe" | "sc";
               const updatedAsset: GlobalAsset = {
                 ...asset,
@@ -3612,7 +1906,7 @@ export function mountPanel(): PanelHandle {
                 description: newType === "sc" ? vals.description : undefined,
                 cardType: newType === "sc" ? vals.cardType : undefined
               };
-              const res = await saveGlobalAssetCb(updatedAsset);
+              const res = await cbs.saveGlobalAsset(updatedAsset);
               if (res?.error) {
                 showToast(`Save failed: ${res.error}`, true);
               } else {
@@ -3626,7 +1920,9 @@ export function mountPanel(): PanelHandle {
     }
 
     // 2. Render Database Explorer
-    const adventures = state.adventures || [];
+    // Sort by recency (newest createdAt first) so the list isn't in arbitrary DB order. Missing
+    // timestamps sort to the bottom.
+    const adventures = [...(state.adventures || [])].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
     const allCards = state.isManagerOnly ? (state.cards || []) : (state.allCards || []);
     if (adventures.length === 0) {
       setSafeHTML(listExplorer, `<div style="text-align:center;color:var(--text-secondary);padding:20px 0;font-size:11.5px;">No saved adventures found in the database.</div>`);
@@ -3650,7 +1946,7 @@ export function mountPanel(): PanelHandle {
               <span style="flex:1;word-break:break-all;font-size:11.5px;text-align:left;">📁 ${esc(adv.title || "Untitled Adventure")} <span style="font-weight:normal;font-size:9.5px;color:var(--text-secondary);">(${esc(adv.shortId)})</span></span>
               <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
                 <span style="font-size:9.5px;background:var(--btn-bg);padding:2px 6px;border-radius:4px;color:var(--text-secondary);">${assetsCount} assets</span>
-                <button class="btn-delete-adv" data-shortid="${adv.shortId}" data-title="${esc(adv.title || "Untitled Adventure")}" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Remove from...</button>
+                <button class="btn-delete-adv btn-micro btn-micro--red" data-shortid="${adv.shortId}" data-title="${esc(adv.title || "Untitled Adventure")}">Remove from...</button>
               </div>
             </summary>
             <div style="padding:0 8px 8px 8px;border-top:1px solid var(--border-color);margin-top:4px;display:flex;flex-direction:column;gap:8px;">
@@ -3810,10 +2106,10 @@ export function mountPanel(): PanelHandle {
           );
 
           if (existing) {
-            if (deleteGlobalAssetCb) {
+            if (cbs.deleteGlobalAsset) {
               btn.textContent = "☆";
               btn.style.color = "var(--text-secondary)";
-              const res = await deleteGlobalAssetCb(existing.id);
+              const res = await cbs.deleteGlobalAsset(existing.id);
               if (res?.error) {
                 showToast(`Failed to remove favorite: ${res.error}`, true);
                 btn.textContent = "★";
@@ -3824,12 +2120,12 @@ export function mountPanel(): PanelHandle {
               }
             }
           } else {
-            if (saveGlobalAssetCb) {
+            if (cbs.saveGlobalAsset) {
               btn.textContent = "★";
               btn.style.color = "var(--theme-text-color)";
               const asset: GlobalAsset = {
                 id: Math.floor(Math.random() * 1e9).toString() + "-" + Date.now(),
-                type: type as any,
+                type: type as GlobalAsset["type"],
                 title,
                 keys: keys || undefined,
                 value,
@@ -3837,13 +2133,13 @@ export function mountPanel(): PanelHandle {
                 createdAt: new Date().toISOString(),
                 cardType: cardType || undefined
               };
-              const res = await saveGlobalAssetCb(asset);
+              const res = await cbs.saveGlobalAsset(asset);
               if (res?.error) {
                 showToast(`Failed to favorite: ${res.error}`, true);
                 btn.textContent = "☆";
                 btn.style.color = "var(--text-secondary)";
               } else {
-                showToast(`Added '${title}' to favorites.`);
+                showToast(`Added '${title}' to Favorites!`);
                 triggerRefresh();
               }
             }
@@ -3897,7 +2193,7 @@ export function mountPanel(): PanelHandle {
     renderOffMetaRepository();
   });
 
-  const openSettingsHandler = () => {
+  $("open-settings").addEventListener("click", () => {
     (root.getElementById("prompt-s1") as HTMLTextAreaElement).value = lastState?.settings?.customPromptSection1 || DEFAULT_PROMPT_SECTION_1;
     (root.getElementById("prompt-s2") as HTMLTextAreaElement).value = lastState?.settings?.customPromptSection2 || DEFAULT_PROMPT_SECTION_2;
     (root.getElementById("prompt-s3") as HTMLTextAreaElement).value = lastState?.settings?.customPromptSection3 || DEFAULT_PROMPT_SECTION_3;
@@ -3908,39 +2204,13 @@ export function mountPanel(): PanelHandle {
     }
     const fmtEl = root.getElementById("fmt-mode") as HTMLSelectElement | null;
     if (fmtEl) fmtEl.value = lastState?.settings?.formattingMode || DEFAULT_FORMATTING_MODE;
-  };
-
-  $("open-settings").addEventListener("click", () => {
-    openSettingsHandler();
     showSettingsView();
   });
 
-  $("open-settings-manager")?.addEventListener("click", () => {
-    managerShowSettings = true;
-    openSettingsHandler();
-    if (lastState) {
-      api.render(lastState);
-    }
-  });
-
-  $("cancel-settings").addEventListener("click", () => {
-    if (lastState?.isManagerOnly) {
-      managerShowSettings = false;
-      switchTab("tab-manager");
-    } else {
-      showTrackerView();
-    }
-  });
+  $("cancel-settings").addEventListener("click", showTrackerView);
   
   $("view-settings").addEventListener("click", (e) => {
     const target = e.target as HTMLElement;
-    const createConfigTab = target.closest("#create-memoraid-config-btn-tab");
-    if (createConfigTab && createConfigCb) {
-      (createConfigTab as HTMLButtonElement).disabled = true;
-      createConfigTab.textContent = "⏳ Creating Config Card...";
-      createConfigCb();
-    }
-
     const genQrBtn = target.closest("#gen-qr-btn");
     if (genQrBtn && lastState?.settings) {
       (genQrBtn as HTMLButtonElement).disabled = true;
@@ -3956,18 +2226,20 @@ export function mountPanel(): PanelHandle {
       });
     }
   });
-  
+
   $("info-action-lookback").addEventListener("click", (e) => {
     e.stopPropagation();
     $("overlay-action-lookback").style.display = "flex";
   });
-  $("info-memories").addEventListener("click", (e) => {
-    e.stopPropagation();
-    $("overlay-memories").style.display = "flex";
-  });
+
   $("info-memoraid-lookback").addEventListener("click", (e) => {
     e.stopPropagation();
     $("overlay-memoraid-lookback").style.display = "flex";
+  });
+  
+  $("info-memories").addEventListener("click", (e) => {
+    e.stopPropagation();
+    $("overlay-memories").style.display = "flex";
   });
   $("info-memoraid-thought").addEventListener("click", (e) => {
     e.stopPropagation();
@@ -3985,69 +2257,6 @@ export function mountPanel(): PanelHandle {
     e.stopPropagation();
     $("overlay-help").style.display = "flex";
   });
-
-  root.addEventListener("click", async (e) => {
-    const target = e.target as HTMLElement;
-    if (target.classList.contains("db-backup-trigger")) {
-      e.stopPropagation();
-      if (!backupAllCb) return;
-      try {
-        const res = await backupAllCb();
-        if (res && res.ok && res.data) {
-          const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: "application/json" });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = `aid-story-helper-backup-${new Date().toISOString().slice(0, 10)}.json`;
-          a.click();
-          URL.revokeObjectURL(url);
-          showToast("Database backup downloaded successfully!");
-        } else {
-          showToast(res?.error || "Failed to generate backup", true);
-        }
-      } catch (err: any) {
-        showToast(err?.message || String(err), true);
-      }
-    }
-    
-    if (target.closest(".db-restore-trigger")) {
-      e.stopPropagation();
-      if (!restoreAllCb) return;
-      const input = document.createElement("input");
-      input.type = "file";
-      input.accept = ".json";
-      input.addEventListener("change", async () => {
-        const file = input.files?.[0];
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = async () => {
-          try {
-            const data = JSON.parse(reader.result as string);
-            const res = await restoreAllCb?.(data);
-            if (res && res.ok) {
-              showToast("Database restored successfully!");
-              const selfHeal = root.getElementById("self-heal-banner");
-              if (selfHeal) selfHeal.style.display = "none";
-              triggerRefresh();
-            } else {
-              showToast(res?.error || "Failed to restore backup", true);
-            }
-          } catch (err: any) {
-            showToast("Invalid backup file: " + (err?.message || String(err)), true);
-          }
-        };
-        reader.readAsText(file);
-      });
-      input.click();
-    }
-
-    if (target.closest("#dismiss-self-heal-btn")) {
-      e.stopPropagation();
-      selfHealDismissed = true;
-      const banner = root.getElementById("self-heal-banner");
-      if (banner) banner.style.display = "none";
-    }
-  });
   let syncKeys = true;
   const acTitleInput = root.getElementById("ac-title") as HTMLInputElement;
   const acKeysInput = root.getElementById("ac-keys") as HTMLInputElement;
@@ -4060,6 +2269,15 @@ export function mountPanel(): PanelHandle {
     syncKeys = false;
   });
 
+  {
+    // Reveal the custom-type textbox when "Custom" is picked (mirrors the NLP suggestion picker).
+    const acTypeSel = root.getElementById("ac-type") as HTMLSelectElement;
+    const acCustom = root.getElementById("ac-custom-type") as HTMLInputElement;
+    acTypeSel?.addEventListener("change", () => {
+      acCustom.style.display = acTypeSel.value === "custom" ? "block" : "none";
+      if (acTypeSel.value === "custom") acCustom.focus();
+    });
+  }
   $("create-card-trigger").addEventListener("click", (e) => {
     e.stopPropagation();
     syncKeys = true;
@@ -4067,11 +2285,23 @@ export function mountPanel(): PanelHandle {
     acKeysInput.value = "";
     (root.getElementById("ac-desc") as HTMLInputElement).value = "";
     (root.getElementById("ac-value") as HTMLTextAreaElement).value = "";
+    // Populate the type dropdown with base types + this adventure's detected custom types (same
+    // source as the NLP picker), defaulting to Character.
+    const acTypeSel = root.getElementById("ac-type") as HTMLSelectElement;
+    setSafeHTML(acTypeSel, buildTypePickerOptions(lastState?.cards ?? [], "character").replace(/<option value="">None<\/option>/, "") + `<option value="memory">Memory</option>`);
+    acTypeSel.value = "character";
+    const acCustom = root.getElementById("ac-custom-type") as HTMLInputElement;
+    acCustom.value = "";
+    acCustom.style.display = "none";
     $("overlay-add-card").style.display = "flex";
   });
   $("ac-submit").addEventListener("click", async () => {
-    if (!createStoryCardCb) return;
-    const type = (root.getElementById("ac-type") as HTMLSelectElement).value;
+    if (!cbs.createStoryCard) return;
+    let type = (root.getElementById("ac-type") as HTMLSelectElement).value;
+    if (type === "custom") {
+      const ct = (root.getElementById("ac-custom-type") as HTMLInputElement).value.trim();
+      if (ct) type = ct;
+    }
     const title = acTitleInput.value.trim();
     const keys = acKeysInput.value.trim();
     const description = (root.getElementById("ac-desc") as HTMLInputElement).value.trim();
@@ -4087,7 +2317,7 @@ export function mountPanel(): PanelHandle {
     btnSubmit.textContent = "⏳ Creating card on AID...";
 
     try {
-      const res = await createStoryCardCb({ type, title, keys, value, description });
+      const res = await cbs.createStoryCard({ type, title, keys, value, description });
       if (res.error) {
         showToast(res.error, true);
       } else {
@@ -4110,7 +2340,7 @@ export function mountPanel(): PanelHandle {
   });
 
   // Main panel Tab Switch handlers
-  let activeTabId = "main-tab-tracker";
+  let activeTabId = "main-tab-home";
   let lastViewedMemoriesCount = -1;
   const knownMemories = new Set<string>();
 
@@ -4135,15 +2365,15 @@ export function mountPanel(): PanelHandle {
         badge.style.display = "none";
         badge.className = "";
       }
-      if (lastState?.memoryBankEntries) {
-        lastViewedMemoriesCount = lastState.memoryBankEntries.length;
+      if (lastState?.aidMemories) {
+        lastViewedMemoriesCount = lastState.aidMemories.length;
       }
-    } else if (tabId === "main-tab-tracker") {
-      // Clear badge
-      const proposalsBadge = root.getElementById("tracker-proposals-badge");
-      if (proposalsBadge) {
-        proposalsBadge.style.display = "none";
-        proposalsBadge.className = "";
+    } else if (tabId === "main-tab-home") {
+      // Clear badge — the pending queue is now in front of the user.
+      const pendingBadge = root.getElementById("home-pending-badge");
+      if (pendingBadge) {
+        pendingBadge.style.display = "none";
+        pendingBadge.className = "";
       }
     }
   }
@@ -4155,90 +2385,200 @@ export function mountPanel(): PanelHandle {
     });
   });
 
+  // Global search (Home): local + instant over panel state (Mobile Rethink Phase A §3). A result
+  // jumps to the item: story card → Cards tab + open its drawer (data-card-title hook); NPC →
+  // Memory tab → NPC sub-tab + open the mbnpc drawer. Drawers re-render on state, so the jump
+  // waits a tick for the tab switch to paint.
+  function navigateToSearchResult(it: PanelSearchItem): void {
+    if (it.kind === "npc") {
+      switchMainTab("main-tab-memories");
+      (root.querySelector('[data-mbtab="mb-npc"]') as HTMLElement | null)?.click();
+      setTimeout(() => {
+        const drawer = root.querySelector(`#mb-npc details[data-key="mbnpc:${CSS.escape(it.title)}"]`) as HTMLDetailsElement | null;
+        if (drawer) { drawer.open = true; drawer.scrollIntoView({ block: "start", behavior: "smooth" }); }
+      }, 50);
+      return;
+    }
+    switchMainTab("main-tab-tracker");
+    setTimeout(() => {
+      const drawer = root.querySelector(`#results details.char-card[data-card-title="${CSS.escape(it.title)}"]`) as HTMLDetailsElement | null;
+      if (drawer) { drawer.open = true; drawer.scrollIntoView({ block: "start", behavior: "smooth" }); }
+    }, 50);
+  }
+  {
+    const searchInput = root.getElementById("home-search") as HTMLInputElement | null;
+    const resultsEl = root.getElementById("home-search-results") as HTMLElement | null;
+    const renderResults = () => {
+      if (!searchInput || !resultsEl) return;
+      const items = searchPanelItems(searchInput.value, lastState?.cards);
+      if (!items.length) { resultsEl.style.display = "none"; resultsEl.textContent = ""; return; }
+      setSafeHTML(resultsEl, items.map((it, i) =>
+        `<div class="home-result-row" data-res-idx="${i}">
+           <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(it.title)}</span>
+           <span class="home-result-sub">${esc(it.sub)}</span>
+         </div>`).join(""));
+      resultsEl.style.display = "flex";
+      resultsEl.querySelectorAll("[data-res-idx]").forEach((row) => {
+        row.addEventListener("click", () => {
+          const it = items[Number(row.getAttribute("data-res-idx"))];
+          if (!it) return;
+          resultsEl.style.display = "none";
+          searchInput.value = "";
+          navigateToSearchResult(it);
+        });
+      });
+    };
+    let searchTimer: ReturnType<typeof setTimeout> | undefined;
+    searchInput?.addEventListener("input", () => {
+      if (searchTimer) clearTimeout(searchTimer);
+      searchTimer = setTimeout(renderResults, 120);
+    });
+  }
+
+  // Seeding form toggle
+  const lcBtnAddCard = root.getElementById("lc-btn-add-card");
+  const lcAddCardForm = root.getElementById("lc-add-card-form");
+  const lcAddCancelBtn = root.getElementById("lc-add-cancel-btn");
+  const lcAddSubmitBtn = root.getElementById("lc-add-submit-btn") as HTMLButtonElement | null;
+
+  if (lcBtnAddCard && lcAddCardForm) {
+    lcBtnAddCard.addEventListener("click", () => {
+      if (lcAddCardForm.style.display === "none") {
+        lcAddCardForm.style.display = "flex";
+        
+        // Populate owner dropdown
+        const ownerSelect = root.getElementById("lc-add-owner") as HTMLSelectElement | null;
+        if (ownerSelect) {
+          const rosterText = lastState?.settings?.livingCharactersRoster || "";
+          let roster = rosterText.split("\n").map((n: string) => n.trim()).filter(Boolean);
+          if (roster.length === 0 && lastState?.cards) {
+            roster = lastState.cards
+              .filter(c => !c.deletedAt && normalizeType(c.type) === "character" && !(c.title || "").toLowerCase().endsWith(" (memory)"))
+              .map(c => c.title || "")
+              .filter(Boolean);
+          }
+          
+          setSafeHTML(ownerSelect, roster.map((name: string) => `<option value="${esc(name)}">${esc(name)}</option>`).join(""));
+        }
+      } else {
+        lcAddCardForm.style.display = "none";
+      }
+    });
+  }
+
+  if (lcAddCancelBtn && lcAddCardForm) {
+    lcAddCancelBtn.addEventListener("click", () => {
+      lcAddCardForm.style.display = "none";
+    });
+  }
+
+  if (lcAddSubmitBtn && lcAddCardForm) {
+    lcAddSubmitBtn.addEventListener("click", async () => {
+      const ownerSelect = root.getElementById("lc-add-owner") as HTMLSelectElement | null;
+      const targetInput = root.getElementById("lc-add-target") as HTMLInputElement | null;
+      const pressureInput = root.getElementById("lc-add-pressure") as HTMLInputElement | null;
+
+      const owner = ownerSelect?.value.trim();
+      const target = targetInput?.value.trim();
+      const pressure = pressureInput?.value.trim() || "friendship";
+
+      if (!owner || !target) {
+        showToast("Owner and Target are required!", true);
+        return;
+      }
+
+      lcAddSubmitBtn.disabled = true;
+      lcAddSubmitBtn.textContent = "⏳ Creating...";
+
+      try {
+        const titlePrefix = lastState?.settings?.livingCharactersTitlePrefix || "Life - ";
+        const keyPrefix = lastState?.settings?.livingCharactersKeyPrefix || "chaos-v2:";
+        const initialValue = buildLifeCardValue({ owner, target, pressure, occurrence: "none", momentum: "low", status: "seedling" });
+        const initialDesc = `Social Relationship History:\n- Seeded as seedling ${pressure} toward ${target}`;
+
+        if (cbs.createStoryCard) {
+          const res = await cbs.createStoryCard({
+            type: "Life",
+            title: `${titlePrefix}${owner}`,
+            keys: `${keyPrefix}${keyName(owner)},${owner},${target}`,
+            value: initialValue,
+            description: initialDesc
+          });
+
+          if (res.error) {
+            showToast(res.error, true);
+          } else {
+            // Enqueue the one-shot prompt-injection directive so the seeded pressure actually surfaces
+            // (the create path alone never injects — that was the "custom cards don't inject" gap).
+            if (cbs.enqueueLifeInjection) {
+              cbs.enqueueLifeInjection(owner, target, pressure, "low").catch(() => {});
+            }
+            showToast(`Seeded Life Card for ${owner}!`);
+            lcAddCardForm.style.display = "none";
+            if (targetInput) targetInput.value = "";
+            if (pressureInput) pressureInput.value = "";
+          }
+        }
+      } catch (err: any) {
+        showToast(err?.message || String(err), true);
+      } finally {
+        lcAddSubmitBtn.disabled = false;
+        lcAddSubmitBtn.textContent = "Create Life Card";
+      }
+    });
+  }
+
   const memListEl = root.getElementById("aid-memories-list");
   if (memListEl) {
     memListEl.addEventListener("click", (e) => {
       const target = e.target as HTMLElement;
       
-      // Handle Edit button click
+      // Player memory block editing (Phase B): opens the full-panel editor view instead of the old
+      // inline swap-in textarea. Save reuses the updateAidMemories full-list update keyed by idx.
       const editBtn = target.closest(".mem-edit-btn");
       if (editBtn) {
         const card = editBtn.closest(".memory-card") as HTMLElement;
-        const textEl = card.querySelector(".memory-card-text") as HTMLElement;
-        const currentText = textEl.textContent || "";
-        
-        // Hide text and buttons, show textarea and save/cancel buttons
-        textEl.style.display = "none";
-        (editBtn as HTMLElement).style.display = "none";
-        
-        let editArea = card.querySelector(".edit-area") as HTMLElement;
-        if (!editArea) {
-          editArea = document.createElement("div");
-          editArea.className = "edit-area";
-          editArea.style.cssText = "display:flex; flex-direction:column; gap:6px; margin-top:4px;";
-          setSafeHTML(editArea, `
-            <textarea class="edit-textarea" style="width:100%; min-height:60px; background:rgba(0,0,0,0.3); border:1px solid var(--border-color); color:var(--text-primary); border-radius:6px; padding:6px; font-size:11.5px; line-height:1.4; resize:vertical; box-sizing:border-box; outline:none; font-family:inherit;"></textarea>
-            <div style="display:flex; gap:6px; justify-content:flex-end;">
-              <button class="edit-cancel-btn action-btn" style="padding:2px 8px;">Cancel</button>
-              <button class="edit-save-btn action-btn" style="padding:2px 8px; background:rgba(16,185,129,0.15); color:#10b981; border-color:rgba(16,185,129,0.3);">Save</button>
-            </div>
-          `);
-          card.appendChild(editArea);
-        }
-        
-        const textarea = editArea.querySelector(".edit-textarea") as HTMLTextAreaElement;
-        textarea.value = currentText;
-        textarea.focus();
-        return;
-      }
-      
-      // Handle Cancel button click
-      const cancelBtn = target.closest(".edit-cancel-btn");
-      if (cancelBtn) {
-        const card = cancelBtn.closest(".memory-card") as HTMLElement;
-        const textEl = card.querySelector(".memory-card-text") as HTMLElement;
-        const editBtn = card.querySelector(".mem-edit-btn") as HTMLElement;
-        const editArea = card.querySelector(".edit-area") as HTMLElement;
-        
-        if (textEl) textEl.style.display = "block";
-        if (editBtn) editBtn.style.display = "inline-flex";
-        if (editArea) editArea.remove();
-        return;
-      }
-      
-      // Handle Save button click
-      const saveBtn = target.closest(".edit-save-btn");
-      if (saveBtn) {
-        const card = saveBtn.closest(".memory-card") as HTMLElement;
         const idx = parseInt(card.getAttribute("data-idx")!, 10);
-        const textarea = card.querySelector(".edit-textarea") as HTMLTextAreaElement;
-        const newText = textarea.value.trim();
-        
-        if (newText && lastState?.memoryBankEntries) {
-          const updatedMemories = [...lastState.memoryBankEntries];
-          const item = updatedMemories[idx];
-          if (item) {
-            updatedMemories[idx] = {
-              actionIds: item.actionIds || [],
-              text: newText,
-              lastRelevantActionId: item.lastRelevantActionId
-            };
-            updateMemoryBankCb?.(updatedMemories);
-          }
-        }
+        const textEl = card.querySelector(".memory-card-text") as HTMLElement | null;
+        const currentText = textEl?.textContent || "";
+        openEditorView(`Memory Block #${idx + 1}`, `
+          <textarea class="editor-mem-text input-dark" rows="10" style="width:100%;box-sizing:border-box;background:rgba(0,0,0,0.3);border:1px solid var(--border-color);color:var(--text-primary);border-radius:6px;padding:6px;font-size:11.5px;line-height:1.4;resize:vertical;font-family:inherit;"></textarea>
+          <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+            <button class="editor-save-aid-mem action-btn" style="background:rgba(16,185,129,0.15);color:#10b981;border-color:rgba(16,185,129,0.3);">Save</button>
+          </div>
+        `, (body) => {
+          const ta = body.querySelector(".editor-mem-text") as HTMLTextAreaElement | null;
+          if (ta) { ta.value = currentText; ta.focus(); }
+          body.querySelector(".editor-save-aid-mem")?.addEventListener("click", () => {
+            const newText = (ta?.value || "").trim();
+            if (newText && lastState?.aidMemories) {
+              const updatedMemories = [...lastState.aidMemories];
+              const item = updatedMemories[idx];
+              if (item) {
+                updatedMemories[idx] = {
+                  actionIds: item.actionIds || [],
+                  text: newText,
+                  lastRelevantActionId: item.lastRelevantActionId
+                };
+                cbs.updateAidMemories?.(updatedMemories);
+              }
+            }
+            closeEditorView();
+          });
+        });
         return;
       }
-      
+
       // Handle Delete button click
       const deleteBtn = target.closest(".mem-delete-btn");
       if (deleteBtn) {
         const card = deleteBtn.closest(".memory-card") as HTMLElement;
         const idx = parseInt(card.getAttribute("data-idx")!, 10);
         
-        if (lastState?.memoryBankEntries) {
-          const updatedMemories = [...lastState.memoryBankEntries];
+        if (lastState?.aidMemories) {
+          const updatedMemories = [...lastState.aidMemories];
           updatedMemories.splice(idx, 1);
-          updateMemoryBankCb?.(updatedMemories);
+          cbs.updateAidMemories?.(updatedMemories);
         }
         return;
       }
@@ -4274,129 +2614,435 @@ export function mountPanel(): PanelHandle {
     if (fmtEl) fmtEl.value = DEFAULT_FORMATTING_MODE;
   });
 
-  let decisionCb: ((id: string, s: "applied" | "rejected") => void) | null = null;
-  let pushCb: ((id: string) => void) | null = null;
-  let genCardCb: ((cardId: string) => void) | null = null;
-  let updateMemoryBankCb: ((memories: any[]) => void) | null = null;
   let refineMemoryBlockCb: ((index: number) => void) | null = null;
-  let analyzeCb: (() => void) | null = null;
-  let themeChangeCb: ((theme: string) => void) | null = null;
-  let applyInstructionCb: (() => void) | null = null;
-  let createConfigCb: (() => void) | null = null;
-  let dismissMemoraidBannerCb: (() => void) | null = null;
-  let createStoryCardCb: ((card: { type: string; title: string; keys: string; value: string; description?: string }) => Promise<{ ok?: boolean; error?: string }>) | null = null;
-  let saveCardKeysCb: ((cardId: string, keys: string) => Promise<{ ok?: boolean; error?: string }>) | null = null;
-  results.addEventListener("click", (e) => {
+  let lastDebug: any = null;
+  const onResultsClick = (e: Event) => {
     const target = e.target as HTMLElement;
-    const createConfig = target.closest("#create-memoraid-config-btn");
-    if (createConfig && createConfigCb) {
-      (createConfig as HTMLButtonElement).disabled = true;
-      createConfig.textContent = "⏳ Creating Config Card...";
-      createConfigCb();
-      return;
-    }
-    const dismissBanner = target.closest("#dismiss-memoraid-banner-btn");
-    if (dismissBanner && dismissMemoraidBannerCb) {
-      (dismissBanner as HTMLButtonElement).disabled = true;
-      dismissMemoraidBannerCb();
-      return;
-    }
-
     const an = target.closest("#an");
-    if (an && analyzeCb) {
+    if (an && cbs.analyze) {
       showAnalyzeView();
       setAnalyzeLoading();
-      analyzeCb();
+      cbs.analyze();
       return;
     }
     const gen = target.closest("[data-gen-card]");
-    if (gen && genCardCb) {
+    if (gen && cbs.generateCard) {
       const cardId = gen.getAttribute("data-gen-card");
       if (cardId) {
         (gen as HTMLButtonElement).disabled = true;
-        const providerKey = lastState?.settings?.provider || "claude";
-        let providerLabel = "Claude";
-        if (providerKey === "openai") providerLabel = "OpenAI";
-        else if (providerKey === "gemini") providerLabel = "Gemini";
-        else if (providerKey === "ollama") providerLabel = "Ollama";
-        gen.textContent = `⏳ Generating via ${providerLabel}…`;
-        genCardCb(cardId);
+        gen.textContent = "⏳ Generating via AID…";
+        cbs.generateCard(cardId);
       }
       return;
     }
-    const triggersSubmit = target.closest(".triggers-submit-btn");
-    if (triggersSubmit && saveCardKeysCb) {
-      const cardId = triggersSubmit.getAttribute("data-card-id");
+    const genc = target.closest("[data-gen-compact]");
+    if (genc && cbs.generateCompactCard) {
+      const cardId = genc.getAttribute("data-gen-compact");
       if (cardId) {
-        const inputEl = results.querySelector(`.triggers-input[data-card-id="${cardId}"]`) as HTMLInputElement | null;
-        const newKeys = inputEl?.value.trim() || "";
-        
-        const btn = triggersSubmit as HTMLButtonElement;
-        btn.disabled = true;
-        btn.textContent = "⏳";
-        
-        saveCardKeysCb(cardId, newKeys).then((res) => {
-          if (res?.error) {
-            showToast(res.error, true);
-          } else {
-            showToast("Triggers updated successfully!");
+        (genc as HTMLButtonElement).disabled = true;
+        genc.textContent = "⏳ Compacting…";
+        cbs.generateCompactCard(cardId);
+      }
+      return;
+    }
+    const reroll = target.closest("[data-reroll-card]");
+    if (reroll && cbs.rerollAppearance) {
+      const cardId = reroll.getAttribute("data-reroll-card");
+      if (cardId) {
+        (reroll as HTMLButtonElement).disabled = true;
+        reroll.textContent = "⏳ Re-rolling…";
+        cbs.rerollAppearance(cardId);
+      }
+      return;
+    }
+    const distill = target.closest(".distill-now-btn");
+    if (distill && cbs.distillCrystallized) {
+      const cardId = distill.getAttribute("data-card-id");
+      const charName = distill.getAttribute("data-char-name");
+      if (cardId && charName) {
+        (distill as HTMLButtonElement).disabled = true;
+        distill.textContent = "⏳ Distilling...";
+        cbs.distillCrystallized(cardId, charName);
+      }
+      return;
+    }
+    const backfillNpc = target.closest(".backfill-npc-memories-btn");
+    if (backfillNpc && cbs.backfillNpcMemories) {
+      const charName = backfillNpc.getAttribute("data-char-name");
+      if (charName) {
+        (backfillNpc as HTMLButtonElement).disabled = true;
+        backfillNpc.textContent = "⏳ Backfilling...";
+        cbs.backfillNpcMemories(charName);
+        // Arm a watchdog in case the worker dies before any progress broadcast arrives (re-armed on
+        // each npcMemoryProgress via refreshNpcMemory; cleared on the final `done`).
+        if (npcBackfillWatchdog) clearTimeout(npcBackfillWatchdog);
+        npcBackfillWatchdog = setTimeout(() => {
+          npcBackfillWatchdog = null;
+          refreshOpenNpcBankList(charName);
+          panelHandle.showToast(`Backfill for ${charName} stopped responding — refresh to see what landed.`, true);
+        }, 60000);
+      }
+      return;
+    }
+    const npcMemRegen = target.closest(".npc-mem-regen-btn");
+    if (npcMemRegen && cbs.regenerateNpcMemoryBlock) {
+      const charName = npcMemRegen.getAttribute("data-char"); const blockId = npcMemRegen.getAttribute("data-block-id");
+      if (charName && blockId) {
+        const btn = npcMemRegen as HTMLButtonElement; btn.disabled = true; btn.style.opacity = "0.5"; btn.title = "Regenerating…";
+        cbs.regenerateNpcMemoryBlock(charName, blockId).then((res) => {
+          const b = (res as any)?.block as NpcMemBlock | undefined;
+          const cardEl = npcMemRegen.closest(".npc-mem-block") as HTMLElement | null;
+          if (b && cardEl) {
+            const textEl = cardEl.querySelector(".memory-card-text") as HTMLElement | null;
+            if (textEl) textEl.textContent = b.povText;
+            const key = charName.toLowerCase(); const cached = npcMemoryCache.get(key);
+            if (cached) { const i = cached.findIndex(x => x.blockId === blockId); if (i >= 0) cached[i] = b; }
           }
-        }).catch((err: any) => {
-          showToast(err?.message || String(err), true);
-        }).finally(() => {
-          btn.disabled = false;
-          btn.textContent = "✓";
+          btn.disabled = false; btn.style.opacity = ""; btn.title = "Regenerate this memory";
+        }).catch(() => { btn.disabled = false; btn.style.opacity = ""; });
+      }
+      return;
+    }
+    // NPC memory block editing (Phase B): opens the full-panel editor view instead of the old
+    // inline swap-in textarea. Save reuses saveNpcMemoryBlock and patches the cache + list text.
+    const npcMemEdit = target.closest(".npc-mem-edit-btn");
+    if (npcMemEdit) {
+      const cardEl = npcMemEdit.closest(".npc-mem-block") as HTMLElement | null;
+      const textEl = cardEl?.querySelector(".memory-card-text") as HTMLElement | null;
+      const charName = cardEl?.getAttribute("data-char"); const blockId = cardEl?.getAttribute("data-block-id");
+      if (cardEl && textEl && charName && blockId) {
+        const cur = textEl.textContent || "";
+        openEditorView(`${charName} — Memory`, `
+          <textarea class="editor-mem-text input-dark" rows="10" style="width:100%;box-sizing:border-box;background:rgba(0,0,0,0.3);border:1px solid var(--border-color);color:var(--text-primary);border-radius:6px;padding:6px;font-size:11.5px;line-height:1.4;resize:vertical;font-family:inherit;"></textarea>
+          <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+            <button class="editor-save-npc-mem action-btn" style="background:rgba(16,185,129,0.15);color:#10b981;border-color:rgba(16,185,129,0.3);">Save</button>
+          </div>
+        `, (body) => {
+          const ta = body.querySelector(".editor-mem-text") as HTMLTextAreaElement | null;
+          if (ta) { ta.value = cur; ta.focus(); }
+          body.querySelector(".editor-save-npc-mem")?.addEventListener("click", async (ev) => {
+            const btn = ev.currentTarget as HTMLButtonElement;
+            const newText = (ta?.value || "").trim();
+            if (!newText || !cbs.saveNpcMemoryBlock) return;
+            btn.disabled = true; btn.textContent = "⏳ Saving...";
+            try {
+              const r = await cbs.saveNpcMemoryBlock(charName, blockId, newText);
+              if (r?.error) throw new Error(r.error);
+              const key = charName.toLowerCase(); const cached = npcMemoryCache.get(key);
+              if (cached) { const i = cached.findIndex(x => x.blockId === blockId); if (i >= 0) cached[i] = { ...cached[i]!, povText: newText }; }
+              showToast("Memory updated.");
+              goEditorBack(); // returns to the Memory Bank view (this editor was opened from it)
+            } catch (err: any) {
+              showToast(err?.message || String(err), true);
+              btn.disabled = false; btn.textContent = "Save";
+            }
+          });
+        }, () => openNpcBankView(charName)); // Back returns to the bank view, not the tab
+      }
+      return;
+    }
+    const npcMemDel = target.closest(".npc-mem-delete-btn");
+    if (npcMemDel && cbs.deleteNpcMemoryBlock) {
+      const charName = npcMemDel.getAttribute("data-char"); const blockId = npcMemDel.getAttribute("data-block-id");
+      if (charName && blockId) {
+        cbs.deleteNpcMemoryBlock(charName, blockId).then(() => {
+          npcMemDel.closest(".npc-mem-block")?.remove(); // surgical removal, no full re-render
+          const key = charName.toLowerCase(); const cached = npcMemoryCache.get(key);
+          if (cached) npcMemoryCache.set(key, cached.filter(x => x.blockId !== blockId));
         });
       }
       return;
     }
-    const entrySubmit = target.closest(".entry-submit-btn");
-    if (entrySubmit && saveCardValueCb) {
-      const cardId = entrySubmit.getAttribute("data-card-id");
+    const mbSubtab = target.closest(".subtab-btn[data-mbtab]") as HTMLElement | null;
+    if (mbSubtab) {
+      const which = mbSubtab.getAttribute("data-mbtab");
+      root.querySelectorAll(".subtab-btn[data-mbtab]").forEach((b) => b.classList.toggle("active", b === mbSubtab));
+      root.querySelectorAll(".mb-pane").forEach((p) => { (p as HTMLElement).style.display = p.id === which ? "flex" : "none"; });
+      return;
+    }
+    const consolidateOutlook = target.closest(".consolidate-outlook-btn");
+    if (consolidateOutlook && cbs.consolidateOutlook) {
+      const charName = consolidateOutlook.getAttribute("data-char-name");
+      if (charName) {
+        (consolidateOutlook as HTMLButtonElement).disabled = true;
+        consolidateOutlook.textContent = "⏳ Consolidating...";
+        cbs.consolidateOutlook(charName);
+      }
+      return;
+    }
+    const del = target.closest(".card-delete-btn") as HTMLButtonElement | null;
+    if (del && cbs.deleteStoryCard) {
+      const cardId = del.getAttribute("data-card-id");
+      if (!cardId) return;
+      if (del.classList.contains("armed")) {
+        del.classList.remove("armed");
+        del.disabled = true;
+        del.textContent = "⏳ Deleting…";
+        cbs.deleteStoryCard(cardId).then((res) => {
+          if (res?.error) { showToast(res.error, true); del.disabled = false; del.textContent = "Delete"; }
+          else { showToast("Card deleted."); }
+        }).catch((err) => { showToast(err?.message || String(err), true); del.disabled = false; del.textContent = "Delete"; });
+      } else {
+        del.classList.add("armed");
+        del.textContent = "Confirm delete?";
+        setTimeout(() => { if (del.classList.contains("armed")) { del.classList.remove("armed"); del.textContent = "Delete"; } }, 3000);
+      }
+      return;
+    }
+    // Card entry + triggers editing (Phase B): one button opens the full-panel editor view instead
+    // of the old inline triggers-input/entry-textarea widgets. Save pushes only the changed fields
+    // via the same saveCardKeys/saveCardValue paths the inline editors used.
+    const openCardEditor = target.closest(".open-card-editor");
+    if (openCardEditor) {
+      const cardId = openCardEditor.getAttribute("data-card-id");
+      const card = cardId ? lastState?.cards?.find((c) => c.id === cardId) : undefined;
+      if (cardId && card) {
+        const origKeys = card.keys || "";
+        const origValue = card.value || "";
+        openEditorView(card.title || "Card", `
+          <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;">Triggers</label>
+          <input class="editor-keys input-dark" type="text" value="${esc(origKeys)}" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:6px 8px;border-radius:6px;font-size:11.5px;" />
+          <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;margin-top:6px;">Entry</label>
+          <textarea class="editor-entry input-dark" rows="14" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:6px 8px;border-radius:6px;font-size:11.5px;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(origValue)}</textarea>
+          <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+            <button class="editor-save-card action-btn" style="background:rgba(16,185,129,0.15);color:#10b981;border-color:rgba(16,185,129,0.3);">Save</button>
+          </div>
+        `, (body) => {
+          body.querySelector(".editor-save-card")?.addEventListener("click", async (ev) => {
+            const btn = ev.currentTarget as HTMLButtonElement;
+            const newKeys = (body.querySelector(".editor-keys") as HTMLInputElement | null)?.value.trim() ?? origKeys;
+            const newValue = (body.querySelector(".editor-entry") as HTMLTextAreaElement | null)?.value.trim() ?? origValue;
+            btn.disabled = true; btn.textContent = "⏳ Saving...";
+            try {
+              if (newKeys !== origKeys && cbs.saveCardKeys) {
+                const r = await cbs.saveCardKeys(cardId, newKeys);
+                if (r?.error) throw new Error(r.error);
+              }
+              if (newValue !== origValue && cbs.saveCardValue) {
+                const r = await cbs.saveCardValue(cardId, newValue);
+                if (r?.error) throw new Error(r.error);
+              }
+              showToast("Card updated.");
+              closeEditorView();
+            } catch (err: any) {
+              showToast(err?.message || String(err), true);
+              btn.disabled = false; btn.textContent = "Save";
+            }
+          });
+        });
+      }
+      return;
+    }
+    const consolidate = target.closest(".consolidate-crystallized-btn");
+    if (consolidate && cbs.consolidateCrystallized) {
+      const cardId = consolidate.getAttribute("data-card-id");
       if (cardId) {
-        const inputEl = results.querySelector(`.entry-input[data-card-id="${cardId}"]`) as HTMLTextAreaElement | null;
-        const newValue = inputEl?.value.trim() || "";
-
-        const btn = entrySubmit as HTMLButtonElement;
+        const btn = consolidate as HTMLButtonElement;
         btn.disabled = true;
-        btn.textContent = "⏳";
-
-        saveCardValueCb(cardId, newValue).then((res) => {
-          if (res?.error) {
-            showToast(res.error, true);
-          } else {
-            showToast("Entry updated successfully!");
-          }
+        btn.textContent = "⏳ Consolidating...";
+        cbs.consolidateCrystallized(cardId).then((res) => {
+          // Consolidate rewrites Knows in IndexedDB out from under the editor — drop the cached
+          // schema so the next render refetches instead of showing the pre-consolidate snapshot (Finding 3).
+          if (!res?.error) crystallizedSchemaCache.delete(cardId);
         }).catch((err: any) => {
           showToast(err?.message || String(err), true);
         }).finally(() => {
           btn.disabled = false;
-          btn.textContent = "✓";
+          btn.textContent = "Consolidate";
         });
       }
+      return;
+    }
+    // Knows/Preferences editors open in the full-panel editor view (Phase B). The builders' output
+    // is driven by the SAME delegated handlers (bound to #editor-body too), so add/delete/save work
+    // unchanged. Schema/prefs come from the caches the NPC drawer render lazily primes.
+    const openKnows = target.closest(".open-knows-editor");
+    if (openKnows) {
+      const cardId = openKnows.getAttribute("data-card-id");
+      const charName = openKnows.getAttribute("data-char") || "NPC";
+      if (cardId) {
+        const card = lastState?.cards?.find((c) => c.id === cardId);
+        const schemaItems = crystallizedSchemaCache.get(cardId) || parseCrystallized(card?.description).schema;
+        openEditorView(`${charName} — Knows`, buildKnowsEditorHtml(cardId, schemaItems));
+      }
+      return;
+    }
+    const openPrefs = target.closest(".open-prefs-editor");
+    if (openPrefs) {
+      const cardId = openPrefs.getAttribute("data-card-id");
+      const charName = openPrefs.getAttribute("data-char") || "NPC";
+      if (cardId) {
+        const prefTexts = crystallizedPreferencesCache.get(cardId) || [];
+        openEditorView(`${charName} — Preferences`, buildPreferencesEditorHtml(cardId, prefTexts));
+      }
+      return;
+    }
+    const openBank = target.closest(".open-npc-bank");
+    if (openBank) {
+      const charName = openBank.getAttribute("data-char");
+      if (charName) openNpcBankView(charName);
+      return;
+    }
+    const knowsAdd = target.closest(".knows-add");
+    if (knowsAdd) {
+      const cardId = knowsAdd.getAttribute("data-card-id");
+      if (cardId) {
+        const editor = knowsAdd.closest(".knows-editor");
+        const container = editor?.querySelector(".knows-rows-container");
+        if (container) {
+          const idx = container.querySelectorAll(".knows-row").length;
+          const div = document.createElement("div");
+          div.className = "knows-row";
+          div.setAttribute("data-idx", String(idx));
+          div.style.cssText = "display:flex;flex-direction:column;gap:4px;margin-bottom:8px;padding:6px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.04);border-radius:6px;";
+          setSafeHTML(div as any, `
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input class="knows-canon input-compact input-dark" value="" placeholder="Subject" style="flex:1;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;" />
+              <input class="knows-aliases input-compact input-dark" value="" placeholder="aka (comma-separated)" style="flex:1;background:rgba(255,255,255,0.03);color:var(--text-secondary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;" />
+              <button class="knows-del" data-idx="${idx}" style="background:rgba(239, 68, 68, 0.15);color:#f87171;border:1px solid rgba(239, 68, 68, 0.3);border-radius:4px;cursor:pointer;padding:2px 6px;font-size:11px;">✕</button>
+            </div>
+            <textarea class="knows-text input-dark" rows="2" style="background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;font-family:inherit;resize:vertical;"></textarea>
+          `);
+          container.appendChild(div);
+        }
+      }
+      return;
+    }
+    const knowsDel = target.closest(".knows-del");
+    if (knowsDel) {
+      const row = knowsDel.closest(".knows-row");
+      row?.remove();
+      return;
+    }
+    const knowsSave = target.closest(".knows-save");
+    if (knowsSave && cbs.saveCrystallizedSchema) {
+      const cardId = knowsSave.getAttribute("data-card-id");
+      if (cardId) {
+        const editor = knowsSave.closest(".knows-editor");
+        if (editor) {
+          const rows = Array.from(editor.querySelectorAll(".knows-row"));
+          const schema = rows.map((r) => ({
+            subject: (r.querySelector(".knows-canon") as HTMLInputElement)?.value.trim() || "",
+            aliases: (r.querySelector(".knows-aliases") as HTMLInputElement)?.value.split(",").map((s) => s.trim()).filter(Boolean) || [],
+            text: (r.querySelector(".knows-text") as HTMLTextAreaElement)?.value.trim() || "",
+          })).filter((s) => s.subject && s.text);
+          const btn = knowsSave as HTMLButtonElement;
+          btn.disabled = true;
+          btn.textContent = "⏳ Saving...";
+          cbs.saveCrystallizedSchema(cardId, schema).then((res) => {
+            if (res?.error) {
+              showToast(res.error, true);
+            } else {
+              // Keep the cache in sync with what was just saved — otherwise the editor can keep
+              // showing the first-fetch snapshot forever while distillation rewrites Knows underneath,
+              // and the NEXT manual save would silently clobber that newer state (Finding 3).
+              crystallizedSchemaCache.set(cardId, schema);
+            }
+          }).catch((err: any) => {
+            showToast(err?.message || String(err), true);
+          }).finally(() => {
+            btn.disabled = false;
+            btn.textContent = "Save Knows";
+          });
+        }
+      }
+      return;
+    }
+    const prefsAdd = target.closest(".prefs-add");
+    if (prefsAdd) {
+      const cardId = prefsAdd.getAttribute("data-card-id");
+      if (cardId) {
+        const editor = prefsAdd.closest(".prefs-editor");
+        const container = editor?.querySelector(".prefs-rows-container");
+        if (container) {
+          const div = document.createElement("div");
+          setSafeHTML(div as any, prefRowHtml(""));
+          const row = div.firstElementChild;
+          if (row) { container.appendChild(row); (row.querySelector(".pref-text") as HTMLTextAreaElement | null)?.focus(); }
+        }
+      }
+      return;
+    }
+    const prefsDel = target.closest(".pref-del");
+    if (prefsDel) {
+      prefsDel.closest(".pref-row")?.remove();
+      return;
+    }
+    const prefsSave = target.closest(".prefs-save");
+    if (prefsSave && cbs.savePreferences) {
+      const cardId = prefsSave.getAttribute("data-card-id");
+      if (cardId) {
+        const editor = prefsSave.closest(".prefs-editor");
+        if (editor) {
+          const prefs = Array.from(editor.querySelectorAll(".pref-text"))
+            .map((t) => (t as HTMLTextAreaElement).value.trim())
+            .filter(Boolean);
+          const btn = prefsSave as HTMLButtonElement;
+          btn.disabled = true;
+          btn.textContent = "⏳ Saving...";
+          cbs.savePreferences(cardId, prefs).then((res) => {
+            if (res?.error) {
+              showToast(res.error, true);
+            } else {
+              // Keep the editor cache in sync with what was just saved (same rationale as Knows —
+              // avoids showing the stale first-fetch snapshot or clobbering a newer save).
+              crystallizedPreferencesCache.set(cardId, prefs);
+            }
+          }).catch((err: any) => {
+            showToast(err?.message || String(err), true);
+          }).finally(() => {
+            btn.disabled = false;
+            btn.textContent = "Save Preferences";
+          });
+        }
+      }
+      return;
+    }
+    const memoraidSave = target.closest(".memoraid-save-btn");
+    if (memoraidSave && cbs.setMemoraidCharacters) {
+      const inputEl = results.querySelector(".memoraid-chars-input") as HTMLTextAreaElement | null;
+      const names = (inputEl?.value || "").split(/[\r\n,]+/).map(s => s.trim()).filter(Boolean);
+      const btn = memoraidSave as HTMLButtonElement;
+      const orig = btn.textContent;
+      btn.disabled = true; btn.textContent = "⏳ Saving...";
+      cbs.setMemoraidCharacters(names).then((res) => {
+        if (res?.error) showToast(res.error, true); else showToast("MemorAID characters saved!");
+      }).catch((err: any) => {
+        showToast(err?.message || String(err), true);
+      }).finally(() => {
+        btn.disabled = false; btn.textContent = orig || "💾 Save Characters";
+      });
       return;
     }
     const t = target.closest("[data-act]");
     if (!t) return;
     const vid = t.getAttribute("data-vid"); const act = t.getAttribute("data-act");
     console.log("[AID panel] Click detected. act:", act, "vid:", vid);
-    if (vid && (act === "applied" || act === "rejected") && decisionCb) {
-      console.log("[AID panel] Triggering decisionCb for vid:", vid, "act:", act);
-      decisionCb(vid, act);
+    if (vid && (act === "applied" || act === "rejected") && cbs.proposalDecision) {
+      console.log("[AID panel] Triggering cbs.proposalDecision for vid:", vid, "act:", act);
+      cbs.proposalDecision(vid, act);
     }
-    if (vid && act === "push" && pushCb) {
-      console.log("[AID panel] Triggering pushCb (onPushVersion) for vid:", vid);
-      pushCb(vid);
+    if (vid && act === "push" && cbs.pushVersion) {
+      console.log("[AID panel] Triggering cbs.pushVersion (onPushVersion) for vid:", vid);
+      cbs.pushVersion(vid);
     }
-  });
+  };
+  results.addEventListener("click", onResultsClick);
+  // The Memory Bank pane (Player/NPC sub-tabs, NPC Knows editor + memory viewer) lives OUTSIDE
+  // #results, so bind the same delegated handler there too — otherwise its clicks never fire.
+  { const mbPaneEl = root.getElementById("main-tab-memories"); if (mbPaneEl) mbPaneEl.addEventListener("click", onResultsClick); }
+  // The full-panel editor view hosts the Knows/Preferences editors (whose add/delete/save handlers
+  // resolve via closest(".knows-editor"/".prefs-editor") in this same delegated handler) — bind it
+  // there too so those editors work unchanged inside the view.
+  { const editorBodyEl = root.getElementById("editor-body"); if (editorBodyEl) editorBodyEl.addEventListener("click", onResultsClick); }
 
   // Accept/Reject clicks inside the Update Plot Essentials results view.
   analyzeBody.addEventListener("click", (e) => {
     const t = (e.target as HTMLElement).closest("[data-act]");
     if (!t) return;
     const vid = t.getAttribute("data-vid"); const act = t.getAttribute("data-act");
-    if (vid && (act === "applied" || act === "rejected") && decisionCb) {
-      decisionCb(vid, act);
+    if (vid && (act === "applied" || act === "rejected") && cbs.proposalDecision) {
+      cbs.proposalDecision(vid, act);
       const actions = t.closest("[data-prop]")?.querySelector(".prop-actions") as HTMLElement | null;
       if (actions) setSafeHTML(actions, act === "applied"
         ? `<span class="note" style="color:var(--accent-color);font-weight:600;">✓ Accepted</span>`
@@ -4405,6 +3051,118 @@ export function mountPanel(): PanelHandle {
   });
 
   function esc(s: string) { return s.replace(/[\u0026\u003c\u003e\u0022]/g, (c) => ({ "\u0026": "&amp;", "\u003c": "&lt;", "\u003e": "&gt;", "\u0022": "&quot;" }[c]!)); }
+
+  function doesDetailMatchQuestion(key: string, question: string): boolean {
+    const k = key.toLowerCase();
+    const q = question.toLowerCase();
+    if (q.includes(k)) return true;
+    if (k === "age" && (q.includes("old") || q.includes("years"))) return true;
+    if (k === "gender" && (q.includes("sex") || q.includes("male") || q.includes("female"))) return true;
+    if (k === "name" && (q.includes("who are you") || q.includes("called") || q.includes("identity"))) return true;
+    return false;
+  }
+
+  function renderSetupFavorites(globalAssets: GlobalAsset[], filterText = "", activeQuestion = "", existingContainer?: HTMLElement): string {
+    // Only saved Plot Essentials character blocks are offered for scenario setup.
+    const filtered = (globalAssets ?? []).filter(a => {
+      if (a.type !== "pe") return false;
+      if (filterText) {
+        const matchText = filterText.toLowerCase();
+        return (a.title || "").toLowerCase().includes(matchText) ||
+               (a.keys || "").toLowerCase().includes(matchText) ||
+               (a.value || "").toLowerCase().includes(matchText);
+      }
+      return true;
+    });
+
+    filtered.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+
+    if (filtered.length === 0) {
+      return `<div style="text-align:center; padding:12px; color:var(--text-secondary); font-size:11px;">No favorite characters found.</div>`;
+    }
+
+    // Keep track of previously existing drawers' open states to preserve them
+    const existingFavIds = new Set<string>();
+    const openFavIds = new Set<string>();
+    const container = existingContainer || root.getElementById("setup-favorites-list");
+    if (container) {
+      container.querySelectorAll(".setup-fav-drawer").forEach(el => {
+        const id = el.getAttribute("data-id");
+        if (id) {
+          existingFavIds.add(id);
+          if ((el as HTMLDetailsElement).open) {
+            openFavIds.add(id);
+          }
+        }
+      });
+    }
+
+    return filtered.map(a => {
+      const icon = "👤";
+      const typeLabel = "Bio";
+      
+      // Extract details for chips
+      const details = extractDetailsFromText(a.value)
+        .concat(extractDetailsFromText(a.description || ""));
+      
+      // Add name itself as a chip
+      details.unshift({ key: "Name", value: a.title });
+
+      // Deduplicate details by key
+      const seenKeys = new Set<string>();
+      const uniqueDetails = details.filter(d => {
+        const k = d.key.toLowerCase();
+        if (seenKeys.has(k)) return false;
+        seenKeys.add(k);
+        return true;
+      });
+
+      const chipsHtml = uniqueDetails.map(d => {
+        const isMatch = doesDetailMatchQuestion(d.key, activeQuestion);
+        const style = isMatch
+          ? "background:rgba(168,85,247,0.25); color:#d8b4fe; border:1px solid rgba(168,85,247,0.5); font-weight:600; box-shadow:0 0 4px rgba(168,85,247,0.2);"
+          : "background:rgba(255,255,255,0.04); color:var(--text-secondary); border:1px solid rgba(255,255,255,0.06);";
+          
+        return `
+          <span class="setup-detail-chip" data-key="${esc(d.key)}" data-value="${esc(d.value)}" style="padding:2px 6px; border-radius:4px; font-size:9px; cursor:pointer; max-width:100%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; transition:all 0.15s ease; ${style}" title="Click to fill: ${esc(d.value)}">
+            ${esc(d.key)}: ${esc(d.value)}
+          </span>
+        `;
+      }).join("");
+
+      const wasPresent = existingFavIds.has(a.id);
+      const isOpen = wasPresent 
+        ? openFavIds.has(a.id) 
+        : !!(activeQuestion && uniqueDetails.some(d => doesDetailMatchQuestion(d.key, activeQuestion)));
+
+      return `
+        <details class="char-card setup-fav-drawer" data-id="${esc(a.id)}" ${isOpen ? "open" : ""}>
+          <summary>
+            <span>
+              ${icon} ${esc(a.title)}
+              <span style="color:var(--text-secondary);font-size:10.5px;font-weight:normal;margin-left:4px;">
+                (${esc(typeLabel)}${a.description || a.keys ? ` - ${esc(a.description || a.keys || "")}` : ""})
+              </span>
+            </span>
+          </summary>
+          <div class="char-card-body" style="background:rgba(0,0,0,0.15); border-top:1px solid rgba(255,255,255,0.04);">
+            <div style="display:flex; justify-content:space-between; align-items:center; font-size:9.5px; color:var(--text-secondary);">
+              <span>Quick Fill:</span>
+              <div style="display:flex; gap:4px;">
+                <button class="setup-fill-btn fill-name" data-id="${esc(a.id)}" style="margin:0; padding:2px 6px; font-size:9px; background:rgba(168,85,247,0.15); color:#c084fc; border:1px solid rgba(168,85,247,0.3); border-radius:4px; cursor:pointer;" title="Fill character name">Name</button>
+                <button class="setup-fill-btn fill-bio" data-id="${esc(a.id)}" style="margin:0; padding:2px 6px; font-size:9px; background:rgba(16,185,129,0.15); color:#34d399; border:1px solid rgba(16,185,129,0.3); border-radius:4px; cursor:pointer;" title="Fill character entry/bio">Full Bio</button>
+              </div>
+            </div>
+            ${chipsHtml ? `
+              <div style="display:flex; flex-wrap:wrap; gap:4px; margin-top:2px;">
+                ${chipsHtml}
+              </div>
+            ` : ""}
+          </div>
+        </details>
+      `;
+    }).join("");
+  }
 
   // Builds <optgroup>-grouped <option>s of all non-deleted cards for the "link to existing card"
   // pickers (suggestion banner + proper noun log editor). Leads with a disabled placeholder.
@@ -4496,13 +3254,203 @@ export function mountPanel(): PanelHandle {
       html += `<details style="margin-top:8px;"><summary style="cursor:pointer;color:var(--text-secondary);font-size:11px;">${res.warnings.length} warning(s)</summary>` +
         `<ul style="margin:4px 0;padding-left:18px;">` + res.warnings.map((w: string) => `<li class="note" style="margin:2px 0;">${esc(w)}</li>`).join("") + `</ul></details>`;
     }
-    html += `<button id="analyze-done" style="margin-top:12px;width:100%;background:linear-gradient(135deg, var(--accent-color), var(--accent-border));color:#fff;font-weight:600;padding:6px;border-radius:6px;border:none;">View Tracker</button>`;
+    html += `<button id="analyze-done" class="btn-primary" style="margin-top:12px;width:100%;padding:6px;">View Tracker</button>`;
     setSafeHTML(analyzeBody, html);
     root.getElementById("analyze-done")?.addEventListener("click", showTrackerView);
   }
 
-  // Renders the AID Memories timeline + unread badge. Called from render() and from
+  // Renders the Memory Bank timeline + unread badge. Called from render() and from
   // updateMemories() (surgical WS-driven refresh of just this section).
+  /** The Knows (schema) editor markup — migrated from the Card Manager Crystallized card to the
+   *  Memory Bank → NPC tab. Delegated handlers (.knows-add/.knows-del/.knows-save) operate on
+   *  `.knows-editor[data-card-id]` regardless of where this is rendered. */
+  function buildKnowsEditorHtml(genCardId: string, schemaItems: import("../inference/crystallized").SchemaItem[]): string {
+    return `<div class="knows-editor" data-card-id="${esc(genCardId)}" style="margin-top:6px;padding:8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:8px;">` +
+      `<div class="knows-rows-container">` +
+      schemaItems.map((item, idx) => `
+        <div class="knows-row" data-idx="${idx}" style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;padding:6px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.04);border-radius:6px;">
+          <div style="display:flex;gap:6px;align-items:center;">
+            <input class="knows-canon input-compact input-dark" value="${esc(item.subject)}" placeholder="Subject" style="flex:1;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;" />
+            <input class="knows-aliases input-compact input-dark" value="${esc((item.aliases || []).join(', '))}" placeholder="aka (comma-separated)" style="flex:1;background:rgba(255,255,255,0.03);color:var(--text-secondary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;" />
+            <button class="knows-del" data-idx="${idx}" style="background:rgba(239, 68, 68, 0.15);color:#f87171;border:1px solid rgba(239, 68, 68, 0.3);border-radius:4px;cursor:pointer;padding:2px 6px;font-size:11px;">✕</button>
+          </div>
+          <textarea class="knows-text input-dark" rows="2" style="background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;font-family:inherit;resize:vertical;">${esc(item.text)}</textarea>
+        </div>
+      `).join("") +
+      `</div>` +
+      `<div style="display:flex;gap:8px;margin-top:8px;">` +
+        `<button class="knows-add action-btn" data-card-id="${esc(genCardId)}" style="background:rgba(255,255,255,0.04);color:var(--text-primary);border-color:var(--border-color);">+ Add subject</button>` +
+        `<button class="knows-save action-btn" data-card-id="${esc(genCardId)}" style="background:rgba(16, 185, 129, 0.15);color:#10b981;border-color:rgba(16, 185, 129, 0.3);">Save Knows</button>` +
+      `</div>` +
+    `</div>`;
+  }
+
+  /** One preference-editor row: a single first-person sentence + delete. Mirrors the Knows editor but
+   *  simpler (no subject/aliases). Used by buildPreferencesEditorHtml and the "+ Add preference" click. */
+  function prefRowHtml(text: string): string {
+    return `<div class="pref-row" style="display:flex;gap:6px;align-items:flex-start;margin-bottom:6px;">
+        <textarea class="pref-text input-dark" rows="2" placeholder="e.g. I hate olives. / I love old Audis. / I don't really have an opinion on breadsticks." style="flex:1;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;font-family:inherit;resize:vertical;">${esc(text)}</textarea>
+        <button class="pref-del" style="background:rgba(239, 68, 68, 0.15);color:#f87171;border:1px solid rgba(239, 68, 68, 0.3);border-radius:4px;cursor:pointer;padding:2px 6px;font-size:11px;">✕</button>
+      </div>`;
+  }
+
+  /** The per-NPC Preferences editor: concrete personal texture (positive/negative/neutral). Manually
+   *  editable, seedable, and effectively uncapped; preferences never decay and are pulled into the scene
+   *  by relevance (strength-ranked). Saved as a full authoritative list (deletions honored). */
+  function buildPreferencesEditorHtml(genCardId: string, prefTexts: string[]): string {
+    return `<div class="prefs-editor" data-card-id="${esc(genCardId)}" style="margin-top:6px;padding:8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:8px;">` +
+      `<div class="note" style="margin-bottom:6px;font-size:10px;color:var(--text-secondary);">Tastes, habits, quirks, pet peeves, opinions about things — positive, negative, or neutral. These never fade; they're pulled in when the scene is relevant. Seed as many as you like.</div>` +
+      `<div class="prefs-rows-container">` +
+      (prefTexts.length ? prefTexts.map((t) => prefRowHtml(t)).join("") : "") +
+      `</div>` +
+      `<div style="display:flex;gap:8px;margin-top:8px;">` +
+        `<button class="prefs-add action-btn" data-card-id="${esc(genCardId)}" style="background:rgba(255,255,255,0.04);color:var(--text-primary);border-color:var(--border-color);">+ Add preference</button>` +
+        `<button class="prefs-save action-btn" data-card-id="${esc(genCardId)}" style="background:rgba(16, 185, 129, 0.15);color:#10b981;border-color:rgba(16, 185, 129, 0.3);">Save Preferences</button>` +
+      `</div>` +
+    `</div>`;
+  }
+
+  /** One NPC memory-bank block's markup — styled like the Player Memory Bank cards (regenerate / edit /
+   *  delete icons), minus the "Stored Context" label (the turn range sits there instead). Shared by the
+   *  full render and the surgical incremental insert. */
+  function renderNpcMemBlockHtml(charName: string, b: NpcMemBlock): string {
+    const c = esc(charName); const id = esc(b.blockId);
+    return `<div class="npc-mem-block memory-card" data-char="${c}" data-block-id="${id}" data-turn-end="${b.turnEnd}">
+        <div class="memory-card-header">
+          <div style="display:flex;align-items:center;color:var(--text-secondary);font-size:10px;">turns ${b.turnStart}–${b.turnEnd}</div>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <button class="npc-mem-regen-btn btn-icon" data-char="${c}" data-block-id="${id}" style="color:#eab308;" title="Regenerate this memory">
+              <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>
+            </button>
+            <button class="npc-mem-edit-btn btn-icon" title="Edit memory">
+              <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c0.39-0.39 0.39-1.02 0-1.41l-2.34-2.34c-0.39-0.39-1.02-0.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+            </button>
+            <button class="npc-mem-delete-btn btn-icon" data-char="${c}" data-block-id="${id}" style="color:#f87171;" title="Delete memory">
+              <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="memory-card-text">${esc(b.povText)}</div>
+      </div>`;
+  }
+
+  /** The per-character NPC memory-bank block list (lazy-loaded + cached). Lives inside the Memory
+   *  Bank editor view (openNpcBankView) — the drawer is navigation-only now. */
+  function renderNpcMemList(charName: string): string {
+    const key = charName.toLowerCase();
+    const blocks = npcMemoryCache.get(key);
+    if (!blocks) {
+      if (!npcMemoryFetching.has(key) && cbs.getNpcMemoryBank) {
+        npcMemoryFetching.add(key);
+        cbs.getNpcMemoryBank(charName).then((res) => {
+          npcMemoryCache.set(key, (res?.blocks as NpcMemBlock[]) || []);
+          refreshOpenNpcBankList(charName);
+        }).catch(() => {}).finally(() => npcMemoryFetching.delete(key));
+      }
+      return `<div class="note" style="padding:6px;">Loading…</div>`;
+    }
+    if (!blocks.length) return `<div class="note" style="padding:6px;">No memories yet — use “Backfill memories”.</div>`;
+    return blocks.map((b) => renderNpcMemBlockHtml(charName, b)).join("");
+  }
+
+  /** Re-populate the Memory Bank editor view's list for a character IF that view is currently open
+   *  (lazy fetch completion, backfill watchdog). No-op otherwise. */
+  function refreshOpenNpcBankList(charName: string): void {
+    const body = root.getElementById("editor-body");
+    if (!body) return;
+    const list = Array.from(body.querySelectorAll(".npc-mem-list"))
+      .find((el) => el.getAttribute("data-char") === charName) as HTMLElement | undefined;
+    if (list) setSafeHTML(list, renderNpcMemList(charName));
+  }
+
+  /** The Memory Bank full-panel view for one character: backfill action + the block list. Existing
+   *  delegated handlers (backfill, regen, edit, delete) drive everything — they're bound to
+   *  #editor-body too. The per-block ✏️ edit opens ANOTHER editor level whose Back returns here. */
+  function openNpcBankView(charName: string): void {
+    openEditorView(`${charName} — Memory Bank`,
+      `<div style="display:flex;gap:6px;flex-shrink:0;"><button class="backfill-npc-memories-btn btn-micro btn-micro--green" data-char-name="${esc(charName)}" title="Generate this character's point-of-view memories from the adventure's native memory blocks">Backfill memories</button></div>` +
+      `<div class="npc-mem-list" data-char="${esc(charName)}" style="display:flex;flex-direction:column;gap:8px;">${renderNpcMemList(charName)}</div>`);
+  }
+
+  /** Surgically splice one freshly-generated block into the open NPC memory list WITHOUT re-rendering
+   *  the whole pane (avoids flicker + scroll-jump during backfill). Keeps the cache in sync. Returns
+   *  false if the list DOM isn't present (caller may fall back to a full render). */
+  function insertNpcMemBlock(charName: string, block: NpcMemBlock): boolean {
+    const key = charName.toLowerCase();
+    // Keep the cache consistent (sorted newest-first) so a later full render matches the DOM.
+    const cached = npcMemoryCache.get(key);
+    if (cached && !cached.some((b) => b.blockId === block.blockId)) {
+      cached.push(block);
+      cached.sort((a, b) => b.turnEnd - a.turnEnd);
+    }
+    // The block list lives in the Memory Bank editor view now (the drawer is navigation-only).
+    const pane = root.getElementById("editor-body");
+    if (!pane) return false;
+    let list: HTMLElement | null = null;
+    pane.querySelectorAll(".npc-mem-list").forEach((el) => { if (el.getAttribute("data-char") === charName) list = el as HTMLElement; });
+    if (!list) return false;
+    const listEl = list as HTMLElement;
+    if (listEl.querySelector(`.npc-mem-block[data-block-id="${block.blockId.replace(/"/g, '\\"')}"]`)) return true; // already shown
+    // Replace the "Loading…/No memories" placeholder if present.
+    const placeholder = listEl.querySelector(".note");
+    if (placeholder && listEl.children.length === 1) listEl.textContent = "";
+    const frag = document.createElement("div");
+    setSafeHTML(frag, renderNpcMemBlockHtml(charName, block));
+    const node = frag.firstElementChild as HTMLElement | null;
+    if (!node) return true;
+    // Insert in sorted position (newest turnEnd first).
+    let inserted = false;
+    for (const existing of Array.from(listEl.querySelectorAll(":scope > .npc-mem-block"))) {
+      const te = Number((existing as HTMLElement).getAttribute("data-turn-end") || "0");
+      if (block.turnEnd > te) { listEl.insertBefore(node, existing); inserted = true; break; }
+    }
+    if (!inserted) listEl.appendChild(node);
+    return true;
+  }
+
+  /** Render the Memory Bank → NPC sub-pane: one drawer per Crystallized NPC (Knows editor + memory
+   *  bank viewer). Open-state preserved via data-key. */
+  function renderNpcMemoryBank(state: PanelState) {
+    const pane = root.getElementById("mb-npc");
+    if (!pane) return;
+    const crystCards = (state.cards || []).filter((c) => !c.deletedAt && (c.title || "").toLowerCase().endsWith(" - crystallized"));
+    if (!crystCards.length) {
+      setSafeHTML(pane, `<div class="note" style="padding:12px;">No Crystallized NPCs yet. Enable Crystallized and add characters in the Card Manager → MemorAID section.</div>`);
+      return;
+    }
+    const openKeys = new Set<string>();
+    pane.querySelectorAll("details[data-key]").forEach((d) => { if ((d as HTMLDetailsElement).open) openKeys.add(d.getAttribute("data-key") || ""); });
+    let html = "";
+    for (const cc of crystCards) {
+      const charName = (cc.title || "").replace(/\s*-\s*crystallized$/i, "");
+      const genCardId = cc.id;
+      const cachedSchema = crystallizedSchemaCache.get(genCardId);
+      if (!cachedSchema && !crystallizedSchemaFetching.has(genCardId) && cbs.getCrystallizedSchema) {
+        crystallizedSchemaFetching.add(genCardId);
+        cbs.getCrystallizedSchema(genCardId).then((res) => {
+          if (res?.ok && res.state) {
+            crystallizedSchemaCache.set(genCardId, res.state.schema || []);
+            // Preferences are strength-ranked in the editor (relevance-ranking is scene-only); the
+            // background sorts render output, but here we sort by strength for a stable, sensible order.
+            crystallizedPreferencesCache.set(genCardId, [...(res.state.preferences || [])].sort((a, b) => b.strength - a.strength).map((p) => p.text));
+            if (lastState) renderNpcMemoryBank(lastState);
+          }
+        }).catch(() => {}).finally(() => crystallizedSchemaFetching.delete(genCardId));
+      }
+      // All three sections open full-panel views (Phase B + follow-up): the drawer is pure
+      // navigation — three large tappable rows whose chevrons signal "opens its own panel".
+      html += `<details class="char-card" data-key="mbnpc:${esc(charName)}"><summary>${esc(charName)}</summary>` +
+        `<div style="display:flex;flex-direction:column;gap:6px;margin:8px 0;">` +
+          `<button class="open-knows-editor npc-section-btn" data-card-id="${esc(genCardId)}" data-char="${esc(charName)}"><span>🧠 Knows</span><span class="npc-section-chevron">›</span></button>` +
+          `<button class="open-prefs-editor npc-section-btn" data-card-id="${esc(genCardId)}" data-char="${esc(charName)}"><span>✨ Preferences</span><span class="npc-section-chevron">›</span></button>` +
+          `<button class="open-npc-bank npc-section-btn" data-char="${esc(charName)}"><span>📚 Memory Bank</span><span class="npc-section-chevron">›</span></button>` +
+        `</div>` +
+      `</details>`;
+    }
+    setSafeHTML(pane, html);
+    pane.querySelectorAll("details[data-key]").forEach((d) => { if (openKeys.has(d.getAttribute("data-key") || "")) (d as HTMLDetailsElement).open = true; });
+  }
+
   function renderMemoriesSection(state: PanelState) {
     const refineBtn = root.getElementById("refine-mem") as HTMLButtonElement | null;
     if (refineBtn) {
@@ -4511,7 +3459,7 @@ export function mountPanel(): PanelHandle {
     }
     const memListEl = root.getElementById("aid-memories-list");
     if (memListEl) {
-      if (!state.memoryBankEntries || state.memoryBankEntries.length === 0) {
+      if (!state.aidMemories || state.aidMemories.length === 0) {
         setSafeHTML(memListEl, `<div class="note" style="padding:12px;text-align:center;">No AID-generated memories captured yet.</div>`);
       } else {
         const actionMap = new Map<string, string>();
@@ -4522,7 +3470,7 @@ export function mountPanel(): PanelHandle {
         }
 
         const isInitialLoad = knownMemories.size === 0;
-        const itemsWithIndex = state.memoryBankEntries.map((m, index) => ({ m, index }));
+        const itemsWithIndex = state.aidMemories.map((m, index) => ({ m, index }));
         const reversedItems = [...itemsWithIndex].reverse();
         setSafeHTML(memListEl, reversedItems.map(({ m, index }) => {
           const text = typeof m === "string" ? m : (m?.text || "");
@@ -4564,17 +3512,17 @@ export function mountPanel(): PanelHandle {
                   <span>${statusText}</span>
                 </div>
                 <div style="display:flex;gap:6px;align-items:center;">
-                  <button class="mem-refine-btn" style="background:none;border:none;padding:2px;cursor:pointer;color:#eab308;display:inline-flex;align-items:center;justify-content:center;" title="Regenerate memory block">
+                  <button class="mem-refine-btn btn-icon" style="color:#eab308;" title="Regenerate this memory with your provider">
                     <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                       <path d="M7 2v11h3v9l7-12h-4l4-8z"/>
                     </svg>
                   </button>
-                  <button class="mem-edit-btn" style="background:none;border:none;padding:2px;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="Edit memory">
+                  <button class="mem-edit-btn btn-icon" title="Edit memory">
                     <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                       <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c0.39-0.39 0.39-1.02 0-1.41l-2.34-2.34c-0.39-0.39-1.02-0.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
                     </svg>
                   </button>
-                  <button class="mem-delete-btn" style="background:none;border:none;padding:2px;cursor:pointer;color:#f87171;display:inline-flex;align-items:center;justify-content:center;" title="Delete memory">
+                  <button class="mem-delete-btn btn-icon" style="color:#f87171;" title="Delete memory">
                     <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                       <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
                     </svg>
@@ -4590,7 +3538,7 @@ export function mountPanel(): PanelHandle {
     }
 
     // Handle unread badge
-    const memoriesCount = state.memoryBankEntries?.length ?? 0;
+    const memoriesCount = state.aidMemories?.length ?? 0;
     if (lastViewedMemoriesCount === -1) {
       lastViewedMemoriesCount = memoriesCount;
     }
@@ -4610,6 +3558,505 @@ export function mountPanel(): PanelHandle {
       }
     }
   }
+
+  const PRESET_MODES = [
+    {
+      name: "Drama & Tension",
+      emoji: "🎭",
+      color: "#f97316", rgb: "249,115,22",
+      tagline: "Heart-pounding conflicts. Shifting alliances. Emotional fireworks.",
+      blurb: "Soap-opera twists and love triangles that keep you hooked.",
+      pressures: ["jealousy", "betrayal", "suspicion", "envy", "rivalry", "confrontation", "gossip", "misunderstanding", "obsession"],
+      spark: "A whispered rumor at the dinner table turns into a thrown glass. By midnight, two best friends are not speaking."
+    },
+    {
+      name: "Romance & Connection",
+      emoji: "💕",
+      color: "#ec4899", rgb: "236,72,153",
+      tagline: "Slow burns, deep bonds, and feelings that hit hard.",
+      blurb: "The kind of tension that makes the story throb.",
+      pressures: ["attraction", "seduction", "protectiveness", "curiosity", "trust", "jealousy", "teasing", "longing"],
+      spark: "The power cuts out, her hand finds his in the dark, and neither of them lets go first."
+    },
+    {
+      name: "Chaos & High Drama",
+      emoji: "💀",
+      color: "#a855f7", rgb: "168,85,247",
+      tagline: "Everything spirals into unpredictable intensity.",
+      blurb: "Reality-TV levels of 'what the hell just happened?'",
+      pressures: ["confrontation", "argument", "suspicion", "narcissism", "overreaction", "paranoia", "betrayal"],
+      spark: "An accusation lands wrong, an old text resurfaces, and suddenly everyone is yelling."
+    },
+    {
+      name: "Comedy & Lighthearted",
+      emoji: "🤣",
+      color: "#eab308", rgb: "234,179,8",
+      tagline: "Bursts of absurdity to balance the storm.",
+      blurb: "Laughs that make the wild ride even better.",
+      pressures: ["awkward", "misunderstanding", "overreaction", "confusion", "silly behavior"],
+      spark: "He misheard the question, answered with full confidence, and now the room thinks he is proposing."
+    },
+    {
+      name: "Psychological & Depth",
+      emoji: "🧠",
+      color: "#22c55e", rgb: "34,197,94",
+      tagline: "Dive into the hidden mind and soul.",
+      blurb: "Stories that crawl under your skin and stay there.",
+      pressures: ["guilt", "envy", "obsession", "avoidance", "suspicion", "regret", "curiosity", "possession"],
+      spark: "She edits the apology, deletes it, and decides to act like nothing happened. He notices."
+    },
+    {
+      name: "Survival & Challenge",
+      emoji: "☢️",
+      color: "#ef4444", rgb: "239,68,68",
+      tagline: "High-stakes worlds where every choice bites back.",
+      blurb: "Gritty, morally gray survival that refuses to let go.",
+      pressures: ["scarcity", "resource competition", "paranoia", "betrayal", "self-preservation", "desperation", "territorial behavior", "fear", "mistrust"],
+      spark: "Three cans of food left. Four people. By morning, one bed is empty."
+    }
+  ];
+
+  const CORE_PRESSURES = ["friendship", "trust", "curiosity", "protectiveness", "jealousy", "rivalry", "attraction", "seduction", "teasing"];
+  const WILDCARDS = ["yelling", "food fight", "awkward silence", "broken glass", "stolen letter", "wrong name", "thunderstorm", "uninvited guest", "burnt dinner", "midnight knock"];
+
+  function renderLivingCharactersSection(state: PanelState) {
+    if (!state.settings) return;
+
+    const statusBanner = root.getElementById("lc-status-banner");
+    if (statusBanner) {
+      statusBanner.innerHTML = `
+        <div style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.2); border-radius:8px; padding:10px; margin-bottom:4px; font-size:11px; line-height:1.4; color:var(--text-secondary);">
+          <div style="font-weight:700; color:#10b981; letter-spacing:0.03em; margin-bottom:2px;">🌱 Living Characters by nerdgrl450</div>
+          <div>NPC relationship threads (Life Cards) are managed directly by the extension. No AI Dungeon scripting sandbox or config cards are required.</div>
+        </div>
+      `;
+    }
+
+    const rosterEl = root.getElementById("lc-config-roster") as HTMLTextAreaElement | null;
+    const pressuresEl = root.getElementById("lc-config-pressures") as HTMLTextAreaElement | null;
+    const protagonistEl = root.getElementById("lc-config-protagonist") as HTMLInputElement | null;
+    const involvementEl = root.getElementById("lc-config-involvement") as HTMLSelectElement | null;
+    const intervalEl = root.getElementById("lc-config-interval") as HTMLInputElement | null;
+    const maxEl = root.getElementById("lc-config-max") as HTMLSelectElement | null;
+    const relevanceEl = root.getElementById("lc-config-relevance") as HTMLSelectElement | null;
+    const dormancyEl = root.getElementById("lc-config-dormancy") as HTMLInputElement | null;
+    const reseedEl = root.getElementById("lc-config-reseed-cooldown") as HTMLInputElement | null;
+    const staleEl = root.getElementById("lc-config-stale") as HTMLInputElement | null;
+    const maxLifetimeEl = root.getElementById("lc-config-max-lifetime") as HTMLInputElement | null;
+
+    // Per-adventure simulation config (state.livingConfig). Falls back to built-in defaults.
+    const lc: LivingConfig = state.livingConfig || {};
+    if (rosterEl && root.activeElement !== rosterEl) {
+      let rosterText = lc.roster || "";
+      if (!rosterText && state.cards) {
+        const names = state.cards
+          .filter(c => !c.deletedAt && normalizeType(c.type) === "character" && !(c.title || "").toLowerCase().endsWith(" (memory)"))
+          .map(c => c.title || "")
+          .filter(Boolean);
+        rosterText = names.join("\n");
+      }
+      rosterEl.value = rosterText;
+    }
+    if (pressuresEl && root.activeElement !== pressuresEl) {
+      pressuresEl.value = lc.pressures || DEFAULT_LC_PRESSURES;
+    }
+    if (protagonistEl && root.activeElement !== protagonistEl) {
+      protagonistEl.value = state.protagonist || "";
+    }
+    if (involvementEl) {
+      involvementEl.value = lc.protagonistInvolvement || "normal";
+    }
+    if (intervalEl && root.activeElement !== intervalEl) {
+      intervalEl.value = String(lc.interval ?? 15);
+    }
+    if (maxEl) {
+      maxEl.value = String(lc.maxActive ?? 2);
+    }
+    if (relevanceEl) {
+      relevanceEl.value = lc.sceneRelevance || "strict";
+    }
+    if (dormancyEl && root.activeElement !== dormancyEl) {
+      dormancyEl.value = String(lc.dormancyTurns ?? 7);
+    }
+    if (reseedEl && root.activeElement !== reseedEl) {
+      reseedEl.value = String(lc.reseedCooldown ?? 15);
+    }
+    if (staleEl && root.activeElement !== staleEl) {
+      staleEl.value = String(lc.staleTurns ?? 14);
+    }
+    if (maxLifetimeEl && root.activeElement !== maxLifetimeEl) {
+      maxLifetimeEl.value = String(lc.maxActiveTurns ?? 4);
+    }
+    const continueModeEl = root.getElementById("lc-config-continue-mode") as HTMLSelectElement | null;
+    if (continueModeEl) {
+      continueModeEl.value = lc.continueInjectionMode || "defer";
+    }
+
+    // Pairing Pressure Pools editor. The container / add-button / datalist are static template elements
+    // (stable across renders); here we only repopulate the rows + name suggestions and wire add/delete
+    // once. Rows aren't clobbered while the user is typing inside the container.
+    const pairingContainer = root.getElementById("lc-pairing-pools");
+    const pairingDatalist = root.getElementById("lc-character-names");
+    const addPairingBtn = root.getElementById("lc-add-pairing") as HTMLButtonElement | null;
+    const pairingRowHtml = (a: string, b: string, pressures: string) =>
+      `<div class="lc-pairing-row" style="display:flex; gap:4px; align-items:center; flex-wrap:wrap;">` +
+        `<input class="lc-pair-a input-compact input-dark" list="lc-character-names" placeholder="Character A" value="${esc(a)}" style="flex:1; min-width:78px;" />` +
+        `<span style="opacity:0.55; font-size:11px;">↔</span>` +
+        `<input class="lc-pair-b input-compact input-dark" list="lc-character-names" placeholder="Character B" value="${esc(b)}" style="flex:1; min-width:78px;" />` +
+        `<input class="lc-pair-pressures input-compact input-dark" placeholder="romance, devotion" value="${esc(pressures)}" style="flex:2; min-width:110px;" />` +
+        `<button class="lc-pairing-del" title="Remove pairing" style="background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.3); border-radius:4px; cursor:pointer; padding:2px 6px; font-size:11px; min-height:unset; width:auto;">✕</button>` +
+      `</div>`;
+    if (pairingDatalist) {
+      const names = new Set<string>();
+      (lc.roster || "").split("\n").map(n => n.trim()).filter(Boolean).forEach(n => names.add(n));
+      (state.cards || [])
+        .filter(c => !c.deletedAt && normalizeType(c.type) === "character" && !(c.title || "").toLowerCase().endsWith(" (memory)"))
+        .forEach(c => { if (c.title) names.add(c.title); });
+      if (state.protagonist) names.add(state.protagonist);
+      setSafeHTML(pairingDatalist, Array.from(names).map(n => `<option value="${esc(n)}"></option>`).join(""));
+    }
+    if (pairingContainer && !pairingContainer.contains(root.activeElement)) {
+      const pairs = lc.pressurePairs || [];
+      setSafeHTML(pairingContainer, pairs.map(p => pairingRowHtml(p.a || "", p.b || "", (p.pressures || []).join(", "))).join(""));
+    }
+    if (addPairingBtn && !addPairingBtn.dataset.lcWired) {
+      addPairingBtn.dataset.lcWired = "1";
+      addPairingBtn.addEventListener("click", () => {
+        if (!pairingContainer) return;
+        const div = document.createElement("div");
+        setSafeHTML(div as any, pairingRowHtml("", "", ""));
+        const row = div.firstElementChild;
+        if (row) { pairingContainer.appendChild(row); (row.querySelector(".lc-pair-a") as HTMLInputElement | null)?.focus(); }
+      });
+    }
+    if (pairingContainer && !pairingContainer.dataset.lcWired) {
+      pairingContainer.dataset.lcWired = "1";
+      pairingContainer.addEventListener("click", (e) => {
+        const del = (e.target as HTMLElement).closest(".lc-pairing-del");
+        if (del) del.closest(".lc-pairing-row")?.remove();
+      });
+    }
+
+    // Render Core Pressures
+    const coreContainer = root.getElementById("lc-core-pills-container");
+    if (coreContainer) {
+      setSafeHTML(coreContainer, CORE_PRESSURES.map(p => `
+        <span class="lc-pill" data-pressure="${p}" style="display:inline-flex; align-items:center; background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.25); border-radius:12px; padding:3px 8px; font-size:10px; cursor:pointer; color:#34d399; user-select:none; font-weight:500; transition:background 0.2s;">${p}</span>
+      `).join(""));
+      
+      coreContainer.querySelectorAll(".lc-pill").forEach(el => {
+        el.addEventListener("click", () => {
+          const p = el.getAttribute("data-pressure");
+          if (p && pressuresEl) {
+            const lines = pressuresEl.value.split("\n").map(l => l.trim()).filter(Boolean);
+            if (!lines.includes(p)) {
+              lines.push(p);
+              pressuresEl.value = lines.join("\n");
+              showToast(`Added pressure: ${p}`);
+            }
+          }
+        });
+      });
+    }
+
+    // Render Wildcards
+    const wildContainer = root.getElementById("lc-wild-pills-container");
+    if (wildContainer) {
+      setSafeHTML(wildContainer, WILDCARDS.map(w => `
+        <span class="lc-pill-wild" data-wildcard="${w}" style="display:inline-flex; align-items:center; background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.25); border-radius:12px; padding:3px 8px; font-size:10px; cursor:pointer; color:#f87171; user-select:none; font-weight:500; transition:background 0.2s;">${w}</span>
+      `).join(""));
+      
+      wildContainer.querySelectorAll(".lc-pill-wild").forEach(el => {
+        el.addEventListener("click", () => {
+          const w = el.getAttribute("data-wildcard");
+          if (w && pressuresEl) {
+            const lines = pressuresEl.value.split("\n").map(l => l.trim()).filter(Boolean);
+            if (!lines.includes(w)) {
+              lines.push(w);
+              pressuresEl.value = lines.join("\n");
+              showToast(`Added wildcard: ${w}`);
+            }
+          }
+        });
+      });
+    }
+
+    // Render Preset Modes
+    const modesContainer = root.getElementById("lc-modes-container");
+    if (modesContainer) {
+      setSafeHTML(modesContainer, PRESET_MODES.map((m, idx) => `
+        <div class="preset-card" data-idx="${idx}" style="background:linear-gradient(135deg, rgba(${m.rgb},0.07), rgba(255,255,255,0.01)); border:1px solid rgba(${m.rgb},0.3); border-radius:12px; padding:10px; display:flex; flex-direction:column; gap:5px; box-sizing:border-box; width:100%;">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; width:100%;">
+            <div style="font-weight:800; color:${m.color}; font-size:12px; text-shadow:0 0 12px rgba(${m.rgb},0.35);">${m.emoji} ${m.name}</div>
+            <button class="lc-btn-apply-preset btn-micro" data-idx="${idx}" style="font-weight:600; background:rgba(${m.rgb},0.15); color:${m.color}; border:1px solid rgba(${m.rgb},0.4); white-space:nowrap;">Apply Mode</button>
+          </div>
+          <div style="font-size:10px; color:var(--text-secondary); line-height:1.3; font-style:italic;">${m.tagline}</div>
+          <div style="display:flex; flex-wrap:wrap; gap:4px; margin-top:2px;">
+            ${m.pressures.map(p => `<span class="lc-preset-pill" data-pressure="${p}" title="Click to add this pressure" style="background:rgba(${m.rgb},0.1); border:1px solid rgba(${m.rgb},0.35); color:${m.color}; border-radius:8px; padding:2px 7px; font-size:9.5px; cursor:pointer; user-select:none; font-weight:500; transition:background 0.2s;">${p}</span>`).join("")}
+          </div>
+          <div style="border-left:2px solid ${m.color}; font-size:9.5px; color:var(--text-secondary); line-height:1.45; margin-top:4px; font-style:italic; background:rgba(${m.rgb},0.05); border-radius:0 4px 4px 0; padding:4px 6px;">
+            <strong style="color:${m.color};">Spark:</strong> ${m.spark}
+          </div>
+        </div>
+      `).join(""));
+
+      modesContainer.querySelectorAll(".lc-btn-apply-preset").forEach(el => {
+        el.addEventListener("click", () => {
+          const idx = parseInt(el.getAttribute("data-idx")!, 10);
+          const mode = PRESET_MODES[idx];
+          if (mode && pressuresEl) {
+            pressuresEl.value = mode.pressures.join("\n");
+            showToast(`Applied preset mode: ${mode.name}`);
+          }
+        });
+      });
+
+      // Individual preset pills: click to append that single pressure to the pool
+      modesContainer.querySelectorAll(".lc-preset-pill").forEach(el => {
+        el.addEventListener("click", () => {
+          const p = el.getAttribute("data-pressure");
+          if (p && pressuresEl) {
+            const lines = pressuresEl.value.split("\n").map(l => l.trim()).filter(Boolean);
+            if (!lines.includes(p)) {
+              lines.push(p);
+              pressuresEl.value = lines.join("\n");
+              showToast(`Added pressure: ${p}`);
+            } else {
+              showToast(`Already in pool: ${p}`);
+            }
+          }
+        });
+      });
+    }
+
+    const activeList = root.getElementById("lc-active-list");
+    if (activeList) {
+      const titlePrefix = state.settings.livingCharactersTitlePrefix || "Life - ";
+      const keyPrefix = state.settings.livingCharactersKeyPrefix || "chaos-v2:";
+
+      const lifeCards = (state.cards || []).filter(c => {
+        if (c.deletedAt) return false;
+        const typeLower = (c.type || "").toLowerCase();
+        const titleLower = (c.title || "").toLowerCase();
+        const keysList = (c.keys || "").split(/[,;]+/).map(k => k.trim().toLowerCase()).filter(Boolean);
+        return (
+          typeLower === "life" ||
+          titleLower.startsWith(titlePrefix.toLowerCase()) ||
+          keysList.some(k => k.startsWith(keyPrefix.toLowerCase()))
+        );
+      });
+
+      if (lifeCards.length === 0) {
+        setSafeHTML(activeList, `<div class="note" style="padding:12px; text-align:center;">No active relationship threads (Life Cards) in play. Seed one below!</div>`);
+      } else {
+        setSafeHTML(activeList, lifeCards.map(c => {
+          const owner = c.title ? c.title.replace(new RegExp(`^${titlePrefix}`, "i"), "").trim() : "Unknown";
+          const parsed = parseLifeCardEntry(c.value);
+          const targetName = parsed.target || "none";
+          const pressureName = parsed.pressure || "none";
+          const occurrence = parsed.occurrence || "none";
+          const momentum = parsed.momentum || "low";
+          const status = (parsed.status || "active").toLowerCase();
+          
+          let statusColor = "#a855f7";
+          let statusIcon = "⚡";
+          if (status === "seedling") {
+            statusColor = "#10b981";
+            statusIcon = "🌱";
+          } else if (status === "dormant") {
+            statusColor = "#6b7280";
+            statusIcon = "💤";
+          }
+
+          return `
+            <div class="life-card-row" data-cardid="${c.id}" style="background:rgba(255,255,255,0.02); border:1px solid var(--border-color); border-radius:12px; padding:10px; display:flex; flex-direction:column; gap:4px; box-sizing:border-box; width:100%;">
+              <div class="life-card-display">
+                <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
+                  <div style="font-weight:700; color:var(--text-primary); font-size:11.5px; display:flex; align-items:center; gap:6px;">
+                    <span style="color:${statusColor}; font-weight:bold; font-size:10px; text-transform:uppercase; border:1px solid ${statusColor}; border-radius:4px; padding:1px 5px; background:color-mix(in srgb, ${statusColor}, transparent 92%); display:inline-flex; align-items:center; gap:3px;">
+                      <span>${statusIcon}</span><span>${status}</span>
+                    </span>
+                    <span>${owner} ➔ ${targetName}</span>
+                  </div>
+                  <div style="display:flex; gap:6px; align-items:center;">
+                    <button class="lc-status-toggle-btn btn-icon" title="${status === 'dormant' ? 'Reactivate (back in scene)' : 'Mark dormant (paused)'}" style="font-size:12px;">${status === 'dormant' ? '▶' : '💤'}</button>
+                    <button class="lc-resolve-btn btn-icon" style="color:#34d399; font-size:12px;" title="Resolve — archive this pressure, keeping its history">✅</button>
+                    <button class="lc-card-edit-btn btn-icon" title="Edit relationship details">
+                      <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
+                        <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c0.39-0.39 0.39-1.02 0-1.41l-2.34-2.34c-0.39-0.39-1.02-0.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+                      </svg>
+                    </button>
+                    <button class="lc-card-delete-btn btn-icon" style="color:#f87171;" title="Delete Relationship Card">
+                      <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
+                        <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <div style="font-size:11px; margin-top:2px;">
+                  <strong style="color:var(--text-primary);">Pressure:</strong> <span style="color:var(--accent-color); font-weight:600;">${pressureName}</span>
+                  <span style="margin:0 6px; color:var(--border-color);">|</span>
+                  <strong style="color:var(--text-primary);">Urgency:</strong> <span>${momentum}</span>
+                </div>
+                ${occurrence && occurrence.toLowerCase() !== "none" ? `<div style="font-size:10px; color:var(--text-secondary); line-height:1.4; margin-top:2px; background:rgba(0,0,0,0.1); border-radius:4px; padding:4px 6px; word-break:break-word;">
+                  <strong>Latest Occurrence driving pressure:</strong> ${esc(occurrence)}
+                </div>` : ""}
+              </div>
+
+              <!-- Inline Edit Form -->
+              <div class="life-card-edit-form" style="display:none; flex-direction:column; gap:6px; margin-top:4px; border-top:1px solid var(--border-color); padding-top:6px; font-size:10.5px; box-sizing:border-box; width:100%;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; box-sizing:border-box; width:100%;">
+                  <div style="display:flex; flex-direction:column; gap:2px;">
+                    <label style="font-weight:600;">Target Name</label>
+                    <input type="text" class="edit-lc-target input-compact input-dark" value="${esc(targetName)}" />
+                  </div>
+                  <div style="display:flex; flex-direction:column; gap:2px;">
+                    <label style="font-weight:600;">Pressure</label>
+                    <input type="text" class="edit-lc-pressure input-compact input-dark" value="${esc(pressureName)}" />
+                  </div>
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; box-sizing:border-box; width:100%;">
+                  <div style="display:flex; flex-direction:column; gap:2px;">
+                    <label style="font-weight:600;">Urgency</label>
+                    <input type="text" class="edit-lc-momentum input-compact input-dark" value="${esc(momentum)}" placeholder="low / medium / high" />
+                  </div>
+                  <div style="display:flex; flex-direction:column; gap:2px;">
+                    <label style="font-weight:600;">Status</label>
+                    <select class="edit-lc-status input-compact input-dark">
+                      <option value="seedling" ${status === "seedling" ? "selected" : ""}>seedling</option>
+                      <option value="active" ${status === "active" ? "selected" : ""}>active</option>
+                      <option value="dormant" ${status === "dormant" ? "selected" : ""}>dormant</option>
+                    </select>
+                  </div>
+                </div>
+                <div style="display:flex; flex-direction:column; gap:2px;">
+                  <label style="font-weight:600;">Latest Occurrence driving pressure</label>
+                  <input type="text" class="edit-lc-occurrence input-compact input-dark" value="${esc(occurrence)}" />
+                </div>
+                <div style="display:flex; gap:6px; justify-content:flex-end; margin-top:2px;">
+                  <button class="lc-edit-cancel-btn" style="background:rgba(255,255,255,0.05); border:1px solid var(--border-color); color:var(--text-primary); font-size:10px; padding:3px 8px; border-radius:4px; cursor:pointer; width:auto; min-height:unset;">Cancel</button>
+                  <button class="lc-edit-save-btn" style="background:rgba(16,185,129,0.15); border:1px solid rgba(16,185,129,0.3); color:#34d399; font-size:10px; padding:3px 8px; border-radius:4px; cursor:pointer; font-weight:600; width:auto; min-height:unset;">Save Changes</button>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join(""));
+
+        activeList.querySelectorAll(".life-card-row").forEach(row => {
+          const cardId = row.getAttribute("data-cardid")!;
+          const displayDiv = row.querySelector(".life-card-display") as HTMLElement;
+          const formDiv = row.querySelector(".life-card-edit-form") as HTMLElement;
+          
+          row.querySelector(".lc-card-edit-btn")?.addEventListener("click", () => {
+            displayDiv.style.display = "none";
+            formDiv.style.display = "flex";
+          });
+
+          row.querySelector(".lc-status-toggle-btn")?.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            if (!cbs.setLifeCardStatus) return;
+            const card = (state.cards || []).find(c => c.id === cardId);
+            const cur = (parseLifeCardEntry(card?.value).status || "active").toLowerCase();
+            const next = cur === "dormant" ? "active" : "dormant";
+            const res = await cbs.setLifeCardStatus(cardId, next);
+            if (res.error) showToast(res.error, true);
+            else showToast(next === "dormant" ? "Relationship marked dormant." : "Relationship reactivated.");
+          });
+
+          row.querySelector(".lc-resolve-btn")?.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            if (!cbs.setLifeCardStatus) return;
+            const res = await cbs.setLifeCardStatus(cardId, "resolved");
+            if (res.error) showToast(res.error, true);
+            else showToast("Pressure resolved and archived (history kept).");
+          });
+
+          row.querySelector(".lc-edit-cancel-btn")?.addEventListener("click", () => {
+            displayDiv.style.display = "block";
+            formDiv.style.display = "none";
+          });
+
+          row.querySelector(".lc-edit-save-btn")?.addEventListener("click", async () => {
+            const targetVal = (formDiv.querySelector(".edit-lc-target") as HTMLInputElement).value.trim();
+            const pressureVal = (formDiv.querySelector(".edit-lc-pressure") as HTMLInputElement).value.trim();
+            const momentumVal = (formDiv.querySelector(".edit-lc-momentum") as HTMLInputElement).value.trim();
+            const statusVal = (formDiv.querySelector(".edit-lc-status") as HTMLSelectElement).value;
+            const occurrenceVal = (formDiv.querySelector(".edit-lc-occurrence") as HTMLInputElement).value.trim();
+
+            if (!targetVal || !pressureVal) {
+              showToast("Target and Pressure are required!", true);
+              return;
+            }
+
+            const btn = row.querySelector(".lc-edit-save-btn") as HTMLButtonElement;
+            btn.disabled = true;
+            btn.textContent = "⏳ Saving...";
+
+            try {
+              const card = (state.cards || []).find(c => c.id === cardId);
+              const ownerName = card?.title ? card.title.replace(new RegExp(`^${titlePrefix}`, "i"), "").trim() : "Unknown";
+              const newValue = buildLifeCardValue({ owner: ownerName, target: targetVal, pressure: pressureVal, occurrence: occurrenceVal || "none", momentum: momentumVal || "low", status: statusVal });
+              if (cbs.saveCardValue) {
+                const res = await cbs.saveCardValue(cardId, newValue);
+                if (res.error) {
+                  showToast(res.error, true);
+                } else {
+                  showToast("Relationship updated successfully!");
+                }
+              }
+            } catch (err: any) {
+              showToast(err?.message || String(err), true);
+            } finally {
+              btn.disabled = false;
+              btn.textContent = "Save Changes";
+            }
+          });
+
+          const delBtn = row.querySelector(".lc-card-delete-btn") as HTMLElement | null;
+          if (delBtn) {
+            let armTimeout: any = null;
+            delBtn.addEventListener("click", async (e) => {
+              e.stopPropagation();
+              if (delBtn.classList.contains("armed")) {
+                clearTimeout(armTimeout);
+                delBtn.classList.remove("armed");
+                delBtn.innerHTML = `<svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
+                delBtn.setAttribute("title", "Delete Relationship Card");
+                delBtn.setAttribute("style", "color:#f87171;");
+
+                try {
+                  if (cbs.deleteStoryCard) {
+                    const res = await cbs.deleteStoryCard(cardId);
+                    if (res.error) {
+                      showToast(res.error, true);
+                    } else {
+                      showToast("Relationship card deleted.");
+                    }
+                  }
+                } catch (err: any) {
+                  showToast(err?.message || String(err), true);
+                }
+              } else {
+                delBtn.classList.add("armed");
+                delBtn.innerHTML = `<span style="font-size:9px;font-weight:bold;background:#ef4444;color:#fff;padding:1px 4px;border-radius:3px;display:inline-flex;align-items:center;line-height:1;">Confirm?</span>`;
+                delBtn.setAttribute("title", "Click again to confirm delete");
+                delBtn.setAttribute("style", "color:#ffffff;");
+                
+                armTimeout = setTimeout(() => {
+                  delBtn.classList.remove("armed");
+                  delBtn.innerHTML = `<svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
+                  delBtn.setAttribute("title", "Delete Relationship Card");
+                  delBtn.setAttribute("style", "color:#f87171;");
+                }, 3000);
+              }
+            });
+          }
+        });
+      }
+    }
+  }
+
+
 
   async function compressSettings(settings: any): Promise<string> {
     const cleanSettings = { ...settings };
@@ -4641,23 +4088,16 @@ export function mountPanel(): PanelHandle {
     if (cleanSettings.theme === "emerald") delete cleanSettings.theme;
     if (cleanSettings.formattingMode === DEFAULT_FORMATTING_MODE) delete cleanSettings.formattingMode;
     if (cleanSettings.analyzeWindow === 20) delete cleanSettings.analyzeWindow;
-    if (cleanSettings.memoraidThoughtLookback === 0) delete cleanSettings.memoraidThoughtLookback;
+    if (cleanSettings.memoraidThoughtLookback === 1) delete cleanSettings.memoraidThoughtLookback;
     if (cleanSettings.memoraidPresenceLookback === 5) delete cleanSettings.memoraidPresenceLookback;
+    if (cleanSettings.thoughtCardLimit === 2000) delete cleanSettings.thoughtCardLimit;
     if (cleanSettings.interceptTimeout === 4) delete cleanSettings.interceptTimeout;
     if (cleanSettings.locationMode === "optionA") delete cleanSettings.locationMode;
     if (cleanSettings.enableProperNounDetection !== false) delete cleanSettings.enableProperNounDetection;
-    if (cleanSettings.manualMode === false) delete cleanSettings.manualMode;
+    if (!cleanSettings.enableAutomaticUpdates) delete cleanSettings.enableAutomaticUpdates;
     if (cleanSettings.showDebug === false) delete cleanSettings.showDebug;
     if (cleanSettings.useMemories === false) delete cleanSettings.useMemories;
     if (cleanSettings.autoRegenerateMemoryBankEntry === false) delete cleanSettings.autoRegenerateMemoryBankEntry;
-    if (cleanSettings.useSinglePassGeneration === false) delete cleanSettings.useSinglePassGeneration;
-
-    // Public-only settings
-    if (cleanSettings.memoraidLookback === 8) delete cleanSettings.memoraidLookback;
-    if (cleanSettings.logPlotEssentials === false) delete cleanSettings.logPlotEssentials;
-    if (cleanSettings.characterCardLimit === 600) delete cleanSettings.characterCardLimit;
-    if (cleanSettings.thoughtCardLimit === 2000) delete cleanSettings.thoughtCardLimit;
-    if (cleanSettings.memoraidBannerDismissed === false) delete cleanSettings.memoraidBannerDismissed;
 
     const jsonStr = JSON.stringify(cleanSettings);
     try {
@@ -4680,6 +4120,11 @@ export function mountPanel(): PanelHandle {
     return "raw:" + btoa(unescape(encodeURIComponent(jsonStr)));
   }
 
+  // Practical scan-reliability ceiling: past this many chars in the rendered URL, the QR
+  // packs so many modules into the fixed on-screen size that phone cameras routinely fail to
+  // resolve it. Skip the doomed render and offer the copy-string fallback instead.
+  const QR_PAYLOAD_CHAR_THRESHOLD = 1500;
+
   function showQrModal(payload: string) {
     root.getElementById("qr-modal")?.remove();
 
@@ -4690,7 +4135,7 @@ export function mountPanel(): PanelHandle {
     modal.style.cssText = "display:flex;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.65);align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);box-sizing:border-box;";
 
     const container = document.createElement("div");
-    container.style.cssText = "background:#121215;border:1px solid var(--border-color);border-radius:12px;padding:20px;width:280px;display:flex;flex-direction:column;align-items:center;gap:12px;box-shadow:0 20px 40px rgba(0,0,0,0.65);text-align:center;color:var(--text-primary);box-sizing:border-box;";
+    container.style.cssText = "background:var(--bg-panel-solid);border:1px solid var(--border-color);border-radius:12px;padding:20px;width:280px;display:flex;flex-direction:column;align-items:center;gap:12px;box-shadow:0 20px 40px rgba(0,0,0,0.5);text-align:center;color:var(--text-primary);box-sizing:border-box;";
 
     const title = document.createElement("div");
     title.style.cssText = "font-weight:700;color:var(--theme-text-color);font-size:14px;letter-spacing:0.02em;";
@@ -4699,11 +4144,43 @@ export function mountPanel(): PanelHandle {
     const note = document.createElement("div");
     note.className = "note";
     note.style.cssText = "margin:0;font-size:11px;line-height:1.4;color:var(--text-secondary);";
-    note.textContent = "Scan this code with your mobile device's camera to import settings (excluding API keys).";
 
-    const canvasContainer = document.createElement("div");
-    canvasContainer.id = "qr-canvas-container";
-    canvasContainer.style.cssText = "background:#fff;padding:8px;border-radius:8px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:180px;height:180px;";
+    const qrUrl = window.location.origin + "/?importSettings=" + encodeURIComponent(payload);
+    const tooLarge = qrUrl.length > QR_PAYLOAD_CHAR_THRESHOLD;
+
+    // Copy-string fallback: always available (primary action when the QR is skipped, secondary
+    // option alongside a rendered QR otherwise). There is no paste-based importer in the panel —
+    // import only fires from the `?importSettings=` URL param on page load (see
+    // checkAndImportQrSettings in content.ts) — so the copied string is the full import URL, meant
+    // to be pasted into the mobile browser's address bar.
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "btn";
+    copyBtn.style.cssText = "background:rgba(255,255,255,0.08);color:var(--text-primary);font-weight:600;font-size:11px;padding:6px 16px;border-radius:6px;border:1px solid var(--border-color);cursor:pointer;width:100%;text-align:center;";
+    copyBtn.textContent = "📋 Copy Sync String";
+
+    const copyFallback = document.createElement("textarea");
+    copyFallback.readOnly = true;
+    copyFallback.value = qrUrl;
+    copyFallback.style.cssText = "display:none;width:100%;height:64px;font-size:9px;font-family:SFMono-Regular,Consolas,monospace;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:6px;padding:6px;box-sizing:border-box;resize:none;";
+
+    copyBtn.addEventListener("click", () => {
+      const flashCopied = () => {
+        const oldText = copyBtn.textContent;
+        copyBtn.textContent = "Copied!";
+        setTimeout(() => { copyBtn.textContent = oldText; }, 1500);
+      };
+      const showFallback = () => {
+        copyFallback.style.display = "block";
+        copyFallback.focus();
+        copyFallback.select();
+      };
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(qrUrl).then(flashCopied).catch(showFallback);
+      } else {
+        showFallback();
+      }
+    });
 
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
@@ -4712,8 +4189,52 @@ export function mountPanel(): PanelHandle {
     closeBtn.textContent = "Close";
 
     container.appendChild(title);
-    container.appendChild(note);
-    container.appendChild(canvasContainer);
+
+    if (tooLarge) {
+      note.textContent = "Settings too large for a reliable QR — copy the sync string instead. Paste the copied link into your mobile browser's address bar (with the extension installed) to import.";
+      container.appendChild(note);
+      container.appendChild(copyBtn);
+      container.appendChild(copyFallback);
+    } else {
+      note.textContent = "Scan this code with your mobile device's camera to import settings (excluding API keys).";
+      container.appendChild(note);
+
+      const canvasContainer = document.createElement("div");
+      canvasContainer.id = "qr-canvas-container";
+      canvasContainer.style.cssText = "background:#fff;padding:8px;border-radius:8px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:180px;height:180px;";
+      container.appendChild(canvasContainer);
+
+      try {
+        // Fixed near-black on white regardless of theme — theme-accent colors (e.g. cyan) render
+        // as low-contrast modules that phone cameras struggle to decode. `quiet: 4` guarantees a
+        // >=4-module quiet zone in QR-native units (the surrounding #fff padding adds more on top).
+        QrCreator.render({
+          text: qrUrl,
+          radius: 0.2,
+          ecLevel: "M",
+          fill: "#111111",
+          background: "#ffffff",
+          size: 164,
+          quiet: 4
+        }, canvasContainer);
+      } catch (err: any) {
+        console.error("[AID panel] QrCreator failed to render:", err);
+        canvasContainer.style.background = "#fee2e2";
+        canvasContainer.style.color = "#991b1b";
+        canvasContainer.style.flexDirection = "column";
+        canvasContainer.style.fontSize = "10px";
+        canvasContainer.style.padding = "12px";
+        canvasContainer.textContent = "QR Code generation failed. The settings payload may be too large. Try resetting some templates to default.";
+      }
+
+      const copyCaption = document.createElement("div");
+      copyCaption.style.cssText = "font-size:10px;color:var(--text-secondary);";
+      copyCaption.textContent = "Can't scan? Copy the sync string instead — paste the link into your mobile browser's address bar.";
+      container.appendChild(copyCaption);
+      container.appendChild(copyBtn);
+      container.appendChild(copyFallback);
+    }
+
     container.appendChild(closeBtn);
     modal.appendChild(container);
     root.appendChild(modal);
@@ -4723,146 +4244,232 @@ export function mountPanel(): PanelHandle {
     modal.addEventListener("click", (e) => {
       if (e.target === modal) closeModal();
     });
-
-    const qrUrl = window.location.origin + "/?importSettings=" + encodeURIComponent(payload);
-    const accentColor = getComputedStyle(modal).getPropertyValue("--accent-color").trim() || "#000000";
-    try {
-      QrCreator.render({
-        text: qrUrl,
-        radius: 0.2,
-        ecLevel: "M",
-        fill: accentColor,
-        background: "#ffffff",
-        size: 164
-      }, canvasContainer);
-    } catch (err: any) {
-      console.error("[AID panel] QrCreator failed to render:", err);
-      canvasContainer.style.background = "#fee2e2";
-      canvasContainer.style.color = "#991b1b";
-      canvasContainer.style.flexDirection = "column";
-      canvasContainer.style.fontSize = "10px";
-      canvasContainer.style.padding = "12px";
-      canvasContainer.textContent = "QR Code generation failed. The settings payload may be too large. Try resetting some templates to default.";
-    }
   }
 
-  api = {
+  const panelHandle: PanelHandle = {
     setStatus: (t) => { st.textContent = t; },
-    showToast: (text, isError) => showToast(text, isError),
-    onExport: (cb) => {
-      $("ex-story").addEventListener("click", () => cb("story"));
-      $("ex-cards").addEventListener("click", () => cb("cards"));
-      $("ex-pe").addEventListener("click", () => cb("pe"));
-      $("ex-aidmemories").addEventListener("click", () => cb("aidmemories"));
-      $("ex-propernouns")?.addEventListener("click", () => cb("propernouns"));
-      $("ex-all").addEventListener("click", () => cb("all"));
+    showToast: (text, isError) => {
+      if (!isContextValid()) return;
+      showToast(text, isError);
     },
-    onBackfill: (cb) => ($("bf")).addEventListener("click", cb),
+    onExport: (cb) => {
+      const safe = safeCallback(cb);
+      $("ex-story").addEventListener("click", () => safe("story"));
+      $("ex-cards").addEventListener("click", () => safe("cards"));
+      $("ex-pe").addEventListener("click", () => safe("pe"));
+      $("ex-aidmemories").addEventListener("click", () => safe("aidmemories"));
+      $("ex-propernouns")?.addEventListener("click", () => safe("propernouns"));
+      $("ex-all").addEventListener("click", () => safe("all"));
+    },
+    // Delegated by class so every entry point works, including dynamically re-rendered ones
+    // (Debug tab, Adventures Manager header, and the empty-DB self-heal banner).
+    onBackupAll: (cb) => {
+      const safe = safeCallback(cb);
+      root.addEventListener("click", (e) => {
+        if ((e.target as HTMLElement)?.closest?.(".db-backup-trigger")) safe();
+      });
+    },
+    onRestoreAll: (cb) => {
+      const safe = safeCallback(cb);
+      root.addEventListener("click", (e) => {
+        if ((e.target as HTMLElement)?.closest?.(".db-restore-trigger")) safe();
+      });
+    },
+    showSelfHealBanner: () => {
+      if (!isContextValid()) return;
+      const results = root.getElementById("results");
+      if (!results || root.getElementById("self-heal-banner")) return;
+      const banner = document.createElement("div");
+      banner.id = "self-heal-banner";
+      banner.setAttribute("style", "margin:8px;padding:10px 12px;background:rgba(59,130,246,0.12);border:1px solid rgba(59,130,246,0.35);border-radius:8px;color:var(--text-primary);font-size:11.5px;line-height:1.5;");
+      setSafeHTML(banner, `<strong>No local data found.</strong> If you just swapped the signed extension for a test build, Firefox cleared its IndexedDB.<br/><button class="db-restore-trigger" style="margin-top:8px;padding:5px 10px;background:rgba(245,158,11,0.22);color:#fbbf24;border:1px solid rgba(245,158,11,0.4);border-radius:6px;cursor:pointer;font-weight:bold;">⬆ Restore from Backup…</button>`);
+      // Sibling of #results (not inside it) so it survives render() rebuilds.
+      results.parentElement?.insertBefore(banner, results);
+    },
+    onBackfill: (cb) => ($("bf")).addEventListener("click", safeCallback(cb)),
     onRefineMemoryBlock: (cb) => {
-      refineMemoryBlockCb = cb;
+      refineMemoryBlockCb = safeCallback(cb);
       $("refine-mem")?.addEventListener("click", () => {
         const btn = $("refine-mem") as HTMLButtonElement;
         if (btn) {
           btn.disabled = true;
           btn.textContent = "Regenerating memory...";
         }
-        if (refineMemoryBlockCb && lastState?.memoryBankEntries && lastState.memoryBankEntries.length > 0) {
-          refineMemoryBlockCb(lastState.memoryBankEntries.length - 1);
+        if (refineMemoryBlockCb && lastState?.aidMemories && lastState.aidMemories.length > 0) {
+          refineMemoryBlockCb(lastState.aidMemories.length - 1);
         }
       });
     },
-    onAnalyze: (cb) => { analyzeCb = cb; },
     showAnalyzeResult: showAnalyzeResultFn,
-    onSaveSettings: (cb) => ($("save")).addEventListener("click", () => {
-      const n = parseInt(winEl.value, 10);
-      const showDbg = (root.getElementById("show-dbg") as HTMLInputElement).checked;
-      const logPE = (root.getElementById("log-pe-console") as HTMLInputElement).checked;
-      const useMems = (root.getElementById("use-memories") as HTMLInputElement).checked;
-      const autoRegenMems = (root.getElementById("auto-regen-memories") as HTMLInputElement).checked;
-      const cardCommands: Record<string, string> = {};
-      for (const k of TYPE_KEYS) {
-        const el = root.getElementById("cc-" + k) as HTMLTextAreaElement | null;
-        const v = el?.value.trim();
-        if (v) cardCommands[k] = v;
-      }
-      const fmtMode = (root.getElementById("fmt-mode") as HTMLSelectElement | null)?.value || DEFAULT_FORMATTING_MODE;
-      const ml = parseInt(memoraidWinEl.value, 10);
-      const mtl = parseInt(memoraidThoughtWinEl.value, 10);
-      const mpl = parseInt(memoraidPresenceWinEl.value, 10);
-      const to = parseInt(interceptTimeoutEl.value, 10);
-      const memoraidLookback = Number.isFinite(ml) && ml > 0 ? ml : 8;
-      const memoraidThoughtLookback = Number.isFinite(mtl) && mtl >= 1 ? mtl : 1;
-      const memoraidPresenceLookback = Number.isFinite(mpl) && mpl > 0 ? mpl : 5;
-      const interceptTimeout = Number.isFinite(to) && to > 0 ? to : 10;
-      const locMode = (root.getElementById("location-mode") as HTMLSelectElement).value;
-      const properNounDetect = (root.getElementById("enable-proper-noun-detection") as HTMLInputElement).checked;
-      const manualMode = (root.getElementById("enable-manual-mode") as HTMLInputElement).checked;
-      const ccl = parseInt(charCardLimitEl.value, 10);
-      const tcl = parseInt(thoughtCardLimitEl.value, 10);
-      const characterCardLimit = Number.isFinite(ccl) && ccl >= 100 ? ccl : 600;
-      const thoughtCardLimit = Number.isFinite(tcl) && tcl >= 100 ? tcl : 2000;
-      cb(
-        provEl.value,
-        keyEl.value.trim(),
-        protEl.value.trim(),
-        modelEl.value.trim(),
-        Number.isFinite(n) && n > 0 ? n : 20,
-        showDbg,
-        themeEl.value,
-        (root.getElementById("prompt-s1") as HTMLTextAreaElement).value,
-        (root.getElementById("prompt-s2") as HTMLTextAreaElement).value,
-        (root.getElementById("prompt-s3") as HTMLTextAreaElement).value,
-        (root.getElementById("prompt-s4") as HTMLTextAreaElement).value,
-        cardCommands,
-        useMems,
-        fmtMode,
-        memoraidLookback,
-        memoraidThoughtLookback,
-        memoraidPresenceLookback,
-        autoRegenMems,
-        interceptTimeout,
-        lastState?.settings?.useSinglePassGeneration ?? false,
-        locMode as any,
-        properNounDetect,
-        manualMode,
-        logPE,
-        characterCardLimit,
-        thoughtCardLimit
-      );
-      if (lastState?.isManagerOnly) {
-        managerShowSettings = false;
-        switchTab("tab-manager");
-      } else {
+    onSaveSettings: (cb) => {
+      const safe = safeCallback(cb);
+      ($("save")).addEventListener("click", () => {
+        const n = parseInt(winEl.value, 10);
+        const showDbg = (root.getElementById("show-dbg") as HTMLInputElement).checked;
+        const useMems = (root.getElementById("use-memories") as HTMLInputElement).checked;
+        const autoRegenMems = (root.getElementById("auto-regen-memories") as HTMLInputElement).checked;
+        const cardCommands: Record<string, string> = {};
+        for (const k of TYPE_KEYS) {
+          const el = root.getElementById("cc-" + k) as HTMLTextAreaElement | null;
+          const v = el?.value.trim();
+          if (v) cardCommands[k] = v;
+        }
+        const fmtMode = (root.getElementById("fmt-mode") as HTMLSelectElement | null)?.value || DEFAULT_FORMATTING_MODE;
+        const mtl = parseInt(memoraidThoughtWinEl.value, 10);
+        const mpl = parseInt(memoraidPresenceWinEl.value, 10);
+        const to = parseInt(interceptTimeoutEl.value, 10);
+        const memoraidThoughtLookback = Number.isFinite(mtl) && mtl >= 1 ? mtl : 1;
+        const memoraidPresenceLookback = Number.isFinite(mpl) && mpl > 0 ? mpl : 5;
+        const interceptTimeout = Number.isFinite(to) && to > 0 ? to : 4;
+        const locMode = (root.getElementById("location-mode") as HTMLSelectElement).value;
+        const properNounDetect = (root.getElementById("enable-proper-noun-detection") as HTMLInputElement).checked;
+        const enableAutomaticUpdates = (root.getElementById("enable-automatic-updates") as HTMLInputElement).checked;
+        const enableMemoraid = (root.getElementById("enable-memoraid") as HTMLInputElement | null)?.checked ?? true;
+        const enableCrystallized = (root.getElementById("enable-crystallized") as HTMLInputElement | null)?.checked ?? false;
+        const cVal = parseInt((root.getElementById("crystallized-interval") as HTMLInputElement | null)?.value || "", 10);
+        const crystallizedInterval = Number.isFinite(cVal) && cVal > 0 ? cVal : 20;
+        const mcVal = parseInt((root.getElementById("crystallized-max-chars") as HTMLInputElement | null)?.value || "", 10);
+        const crystallizedEntryMaxChars = Number.isFinite(mcVal) && mcVal > 0 ? mcVal : 900;
+        const ncVal = parseInt((root.getElementById("crystallized-node-cap") as HTMLInputElement | null)?.value || "", 10);
+        const crystallizedNodeCap = Number.isFinite(ncVal) && ncVal > 0 ? ncVal : 12;
+        const kcVal = parseInt((root.getElementById("crystallized-knows-cap") as HTMLInputElement | null)?.value || "", 10);
+        const crystallizedKnowsCap = Number.isFinite(kcVal) && kcVal > 0 ? kcVal : 2;
+        const rcVal = parseInt((root.getElementById("crystallized-recalls-cap") as HTMLInputElement | null)?.value || "", 10);
+        const crystallizedRecallsCap = Number.isFinite(rcVal) && rcVal >= 0 ? rcVal : 2;
+        const vcVal = parseInt((root.getElementById("crystallized-vivid-cap") as HTMLInputElement | null)?.value || "", 10);
+        const crystallizedVividCap = Number.isFinite(vcVal) && vcVal > 0 ? vcVal : 4;
+        const ocVal = parseInt((root.getElementById("crystallized-outlook-cap") as HTMLInputElement | null)?.value || "", 10);
+        const crystallizedOutlookCap = Number.isFinite(ocVal) && ocVal > 0 ? ocVal : 2;
+        const pcVal = parseInt((root.getElementById("crystallized-preferences-cap") as HTMLInputElement | null)?.value || "", 10);
+        const crystallizedPreferencesCap = Number.isFinite(pcVal) && pcVal > 0 ? pcVal : 4;
+        const nmVal = parseInt((root.getElementById("crystallized-npc-memory-cap") as HTMLInputElement | null)?.value || "", 10);
+        const crystallizedNpcMemoryCap = Number.isFinite(nmVal) && nmVal > 0 ? nmVal : 400;
+        // Per-pass LLM enable flags (default on / opt-out).
+        const crystallizedKnowsEnabled = (root.getElementById("crystallized-knows-enabled") as HTMLInputElement | null)?.checked ?? true;
+        const crystallizedNodesEnabled = (root.getElementById("crystallized-nodes-enabled") as HTMLInputElement | null)?.checked ?? true;
+        const crystallizedOutlookEnabled = (root.getElementById("crystallized-outlook-enabled") as HTMLInputElement | null)?.checked ?? true;
+        const crystallizedPreferencesEnabled = (root.getElementById("crystallized-preferences-enabled") as HTMLInputElement | null)?.checked ?? true;
+        const crystallizedNpcMemoryEnabled = (root.getElementById("crystallized-npc-memory-enabled") as HTMLInputElement | null)?.checked ?? true;
+        const tcl = parseInt(thoughtCardLimitEl.value, 10);
+        const thoughtCardLimit = Number.isFinite(tcl) && tcl >= 100 ? tcl : 2000;
+
+        const settings: Settings = {
+          provider: provEl.value as Settings["provider"],
+          model: modelEl.value.trim() || undefined,
+          analyzeWindow: Number.isFinite(n) && n > 0 ? n : 20,
+          showDebug: showDbg,
+          theme: themeEl.value,
+          customPromptSection1: (root.getElementById("prompt-s1") as HTMLTextAreaElement).value,
+          customPromptSection2: (root.getElementById("prompt-s2") as HTMLTextAreaElement).value,
+          customPromptSection3: (root.getElementById("prompt-s3") as HTMLTextAreaElement).value,
+          customPromptSection4: (root.getElementById("prompt-s4") as HTMLTextAreaElement).value,
+          cardCommands,
+          useMemories: useMems,
+          formattingMode: fmtMode,
+          memoraidThoughtLookback,
+          memoraidPresenceLookback,
+          thoughtCardLimit,
+          autoRegenerateMemoryBankEntry: autoRegenMems,
+          interceptTimeout,
+          locationMode: locMode as Settings["locationMode"],
+          enableProperNounDetection: properNounDetect,
+          enableAutomaticUpdates,
+          enableMemorAID: enableMemoraid,
+          enableLivingCharacters: enableLcEl.checked,
+          livingCharactersTitlePrefix: lcTitlePrefixEl.value,
+          livingCharactersKeyPrefix: lcKeyPrefixEl.value,
+          groupThoughtsInRoster: groupThoughtsEl.checked,
+          enableCrystallized,
+          crystallizedInterval,
+          crystallizedEntryMaxChars,
+          crystallizedNodeCap,
+          crystallizedKnowsCap,
+          crystallizedRecallsCap,
+          crystallizedVividCap,
+          crystallizedOutlookCap,
+          crystallizedPreferencesCap,
+          crystallizedNpcMemoryCap,
+          crystallizedKnowsEnabled,
+          crystallizedNodesEnabled,
+          crystallizedOutlookEnabled,
+          crystallizedPreferencesEnabled,
+          crystallizedNpcMemoryEnabled,
+        };
+
+        const apiKey = keyEl.value.trim();
+        if (apiKey) {
+          settings.apiKeys = { [provEl.value]: apiKey };
+        }
+
+        safe(settings, protEl.value.trim());
         showTrackerView();
+      });
+
+      const lcSaveBtn = root.getElementById("lc-btn-save-config");
+      if (lcSaveBtn) {
+        lcSaveBtn.addEventListener("click", () => {
+          if (!lastState || !lastState.settings) return;
+          
+          const rosterEl = root.getElementById("lc-config-roster") as HTMLTextAreaElement | null;
+          const pressuresEl = root.getElementById("lc-config-pressures") as HTMLTextAreaElement | null;
+          const protagonistEl = root.getElementById("lc-config-protagonist") as HTMLInputElement | null;
+          const involvementEl = root.getElementById("lc-config-involvement") as HTMLSelectElement | null;
+          const intervalEl = root.getElementById("lc-config-interval") as HTMLInputElement | null;
+          const maxEl = root.getElementById("lc-config-max") as HTMLSelectElement | null;
+          const relevanceEl = root.getElementById("lc-config-relevance") as HTMLSelectElement | null;
+          const dormancyEl = root.getElementById("lc-config-dormancy") as HTMLInputElement | null;
+          const reseedEl = root.getElementById("lc-config-reseed-cooldown") as HTMLInputElement | null;
+          const staleEl = root.getElementById("lc-config-stale") as HTMLInputElement | null;
+          const maxLifetimeEl = root.getElementById("lc-config-max-lifetime") as HTMLInputElement | null;
+
+          const nInterval = intervalEl ? parseInt(intervalEl.value, 10) : 15;
+          const nMax = maxEl ? parseInt(maxEl.value, 10) : 2;
+          const nDormancy = dormancyEl ? parseInt(dormancyEl.value, 10) : 7;
+          const nReseed = reseedEl ? parseInt(reseedEl.value, 10) : 15;
+          const nStale = staleEl ? parseInt(staleEl.value, 10) : 14;
+          const nMaxLifetime = maxLifetimeEl ? parseInt(maxLifetimeEl.value, 10) : 4;
+
+          // Collect the pairing pools (rows with both characters + at least one pressure are kept).
+          const pairingContainerSave = root.getElementById("lc-pairing-pools");
+          const pressurePairs = pairingContainerSave
+            ? Array.from(pairingContainerSave.querySelectorAll(".lc-pairing-row")).map(row => ({
+                a: (row.querySelector(".lc-pair-a") as HTMLInputElement | null)?.value.trim() || "",
+                b: (row.querySelector(".lc-pair-b") as HTMLInputElement | null)?.value.trim() || "",
+                pressures: ((row.querySelector(".lc-pair-pressures") as HTMLInputElement | null)?.value || "")
+                  .split(",").map(s => s.trim()).filter(Boolean),
+              })).filter(p => p.a && p.b && p.pressures.length)
+            : [];
+
+          // Per-adventure simulation config.
+          const config = {
+            roster: rosterEl ? rosterEl.value.trim() : "",
+            pressures: pressuresEl ? pressuresEl.value.trim() : "",
+            pressurePairs,
+            protagonistInvolvement: involvementEl ? (involvementEl.value as LivingConfig["protagonistInvolvement"]) : "normal",
+            interval: Number.isFinite(nInterval) ? nInterval : 15,
+            maxActive: Number.isFinite(nMax) ? nMax : 2,
+            sceneRelevance: relevanceEl ? (relevanceEl.value as LivingConfig["sceneRelevance"]) : "strict",
+            dormancyTurns: Number.isFinite(nDormancy) ? nDormancy : 7,
+            reseedCooldown: Number.isFinite(nReseed) ? nReseed : 15,
+            staleTurns: Number.isFinite(nStale) ? nStale : 14,
+            maxActiveTurns: Number.isFinite(nMaxLifetime) && nMaxLifetime >= 0 ? nMaxLifetime : 4,
+            continueInjectionMode: ((root.getElementById("lc-config-continue-mode") as HTMLSelectElement | null)?.value as LivingConfig["continueInjectionMode"]) || "defer",
+          };
+          const protName = protagonistEl ? protagonistEl.value.trim() : "";
+
+          if (cbs.setLivingConfig) {
+            cbs.setLivingConfig(config, protName).then((res) => {
+              if (res?.error) showToast(res.error, true); else showToast("Simulation config saved!");
+            }).catch((err: any) => showToast(err?.message || String(err), true));
+          }
+        });
       }
-    }),
-    onThemeChange: (cb) => { themeChangeCb = cb; },
-    onApplyInstruction: (cb) => { applyInstructionCb = cb; },
-    onProposalDecision: (cb) => { decisionCb = cb; },
-    onPushVersion: (cb) => { pushCb = cb; },
-    onGenerateCard: (cb) => { genCardCb = cb; },
-    onUpdateMemoryBank: (cb) => { updateMemoryBankCb = cb; },
-    onCreateConfigCard: (cb) => { createConfigCb = cb; },
-    onCreateStoryCard: (cb) => { createStoryCardCb = cb; },
-    onSaveCardKeys: (cb) => { saveCardKeysCb = cb; },
-    onGrantPermissions: (cb) => {
-      $("grant-permissions")?.addEventListener("click", cb);
     },
-    onSetActiveLocation: (cb) => { setActiveLocationCb = cb; },
-    onRespondToProperNounSuggestion: (cb) => { respondToProperNounSuggestionCb = cb; },
-    onUpdateProperNounLog: (cb) => { updateProperNounLogCb = cb; },
-    onLinkProperNounToCard: (cb) => { linkProperNounToCardCb = cb; },
-    onDeleteProperNounLog: (cb) => { deleteProperNounLogCb = cb; },
-    onClearProperNounLogs: (cb) => { clearProperNounLogsCb = cb; },
-    onSaveGlobalAsset: (cb) => { saveGlobalAssetCb = cb; },
-    onDeleteGlobalAsset: (cb) => { deleteGlobalAssetCb = cb; },
-    onImportGlobalAsset: (cb) => { importGlobalAssetCb = cb; },
-    onRefresh: (cb) => { refreshCb = cb; },
-    onProviderChange: (cb) => { providerChangeCb = cb; },
-    onDismissMemoraidBanner: (cb) => { dismissMemoraidBannerCb = cb; },
-    onBackupAll: (cb) => { backupAllCb = cb; },
-    onRestoreAll: (cb) => { restoreAllCb = cb; },
-    onSaveCardValue: (cb) => { saveCardValueCb = cb; },
+    onGrantPermissions: (cb) => {
+      $("grant-permissions")?.addEventListener("click", safeCallback(cb));
+    },
+    on: registerPanelEvent,
+    onRefresh: (cb) => { refreshCb = safeCallback(cb); },
     updateActionCount: (count, lastAnalysisAction) => {
       // Keep lastState coherent so later full renders / handlers see the fresh counts.
       if (lastState) {
@@ -4878,12 +4485,8 @@ export function mountPanel(): PanelHandle {
     },
     updateMemories: (memories) => {
       if (!lastState) return; // nothing mounted yet — the first full render will include them
-      lastState.memoryBankEntries = memories ?? [];
+      lastState.aidMemories = memories ?? [];
       renderMemoriesSection(lastState);
-    },
-    updateMemoraidTiming: (stats) => {
-      if (lastState) lastState.memoraidTiming = stats;
-      applyMemoraidTiming(stats);
     },
 
     setModels: (models, current) => {
@@ -4893,27 +4496,20 @@ export function mountPanel(): PanelHandle {
         ? opts.map((m) => `<option value="${esc(m)}"${m === current ? " selected" : ""}>${esc(m)}</option>`).join("")
         : `<option value="">(enter API key, then reopen settings)</option>`);
       if (current) modelEl.value = current;
-      // Mirror the committed value into the searchable combobox input.
-      if (modelSearchEl) {
-        modelSearchEl.value = modelEl.value;
-        modelSearchEl.placeholder = opts.length ? "Search models…" : "(enter API key, then reopen settings)";
-      }
-      if (modelListEl && modelListEl.style.display === "block" && modelSearchEl) {
-        renderModelList(modelSearchEl.value);
-      }
     },
     showDebug: (d) => {
-      // Diagnostics: when "Log Raw Update Plot Essentials to Console" is enabled, emit the last
-      // Update Plot Essentials raw AI request/response to the browser Console (F12). This is its
-      // OWN setting — independent of showDebug verbose logging — so it logs only this, not everything.
-      if (d && lastState?.settings?.logPlotEssentials) {
-        console.log("[AID] Update Plot Essentials — raw analyze debug:", {
-          characters: d.characters,
-          narrativeChars: d.narrativeChars,
-          narrativeTail: d.narrativeTail,
-          rawResponse: d.rawSnippet,
-          windowN: d.windowN,
-        });
+      lastDebug = d;
+      const dbgContainer = root.getElementById("debug-container");
+      if (dbgContainer) {
+        if (d) {
+          setSafeHTML(dbgContainer, `<details open style="margin-top:8px;border-top:1px solid #333;padding-top:4px;"><summary style="cursor:pointer;color:#8a8;">🔍 Analyze debug</summary>` +
+            `<div class="note">characters: ${esc((d.characters || []).join(", "))}</div>` +
+            `<div class="note">narrative chars: ${esc(String(d.narrativeChars))}</div>` +
+            `<div class="note">narrative tail:</div><div>${esc(d.narrativeTail || "")}</div>` +
+            `<div class="note">raw response (truncated):</div><div>${esc(d.rawSnippet || "")}</div></details>`);
+        } else {
+          dbgContainer.textContent = "";
+        }
       }
     },
     render: (state) => {
@@ -4925,6 +4521,98 @@ export function mountPanel(): PanelHandle {
       // `prevState` for change-detection only.
       const prevState = lastState;
       lastState = state;
+
+      // Render active setup question widget if present
+      if (state.activeSetupQuestion) {
+        setupHelperContainer.style.display = "block";
+        const q = state.activeSetupQuestion;
+        
+        // Preserve open/collapsed drawer state
+        const prevDrawer = setupHelperContainer.querySelector(".setup-helper-drawer") as HTMLDetailsElement | null;
+        const wasOpen = prevDrawer ? prevDrawer.open : true;
+
+        // Preserve search input value and focus
+        const searchInput = setupHelperContainer.querySelector("#setup-favorites-search") as HTMLInputElement | null;
+        const searchVal = searchInput ? searchInput.value : "";
+        const activeEl = root.activeElement;
+        const wasSearchFocused = activeEl && activeEl.id === "setup-favorites-search";
+
+        // Query existing list element to preserve details drawer open states
+        const listEl = setupHelperContainer.querySelector("#setup-favorites-list") as HTMLElement | null;
+
+        setSafeHTML(setupHelperContainer, `
+          <details class="group-header setup-helper-drawer" ${wasOpen ? "open" : ""} style="--accent-color:#c084fc; --accent-glow:rgba(168,85,247,0.15); border-left-color:#c084fc !important; margin-bottom:8px;">
+            <summary style="color:#c084fc !important; font-weight:700;">
+              <span>🔮 Scenario Setup: ${q.type === "text" ? "Text Input" : "Multiple Choice"}</span>
+            </summary>
+            <div style="padding:10px 12px; display:flex; flex-direction:column; gap:8px; box-sizing:border-box; width:100%; background:rgba(168,85,247,0.02); border-top:1px solid rgba(168,85,247,0.15);">
+              <div style="font-size:11.5px; line-height:1.45; color:var(--text-primary); font-weight:500; word-break:break-word; max-height:80px; overflow-y:auto; border-left:2px solid rgba(168,85,247,0.3); padding-left:8px; margin-bottom:4px;">
+                ${esc(q.question)}
+              </div>
+              
+              ${q.type === "text" ? `
+                <div style="position:relative; margin-top:2px;">
+                  <input type="text" id="setup-favorites-search" placeholder="Search Favorites..." value="${esc(searchVal)}" style="width:100%; margin:0; padding:5px 8px; font-size:11px; background:rgba(0,0,0,0.3); color:var(--text-primary); border-radius:6px; border:1px solid rgba(255,255,255,0.08); box-sizing:border-box; font-family:inherit;" />
+                </div>
+                <div id="setup-favorites-list" style="margin-top:4px; padding-right:4px;">
+                  ${renderSetupFavorites(state.globalAssets || [], searchVal, q.question, listEl || undefined)}
+                </div>
+              ` : `
+                <div style="font-size:10px; color:var(--text-secondary); font-style:italic;">
+                  Select one of the numbered options on the page to proceed.
+                </div>
+              `}
+            </div>
+          </details>
+        `);
+
+        // Restore focus and cursor position if search was active
+        if (wasSearchFocused) {
+          const newSearch = root.getElementById("setup-favorites-search") as HTMLInputElement | null;
+          if (newSearch) {
+            newSearch.focus();
+            newSearch.setSelectionRange(searchVal.length, searchVal.length);
+          }
+        }
+      } else {
+        setupHelperContainer.style.display = "none";
+        setupHelperContainer.innerHTML = "";
+      }
+
+      // Setup phase: while a scenario-setup question is active — or the brand-new adventure
+      // still has fewer than 2 actions — collapse the Card Manager down to just the Scenario
+      // Setup widget. The tab nav, location banners and tracker roster only reappear once setup
+      // is complete and the story has reached 2+ actions.
+      const setupActionCount = state.actionCount ?? state.actionsCount ?? 0;
+      const inSetupPhase = isSetupPhase({
+        isManagerOnly: !!state.isManagerOnly,
+        hasActiveSetupQuestion: !!state.activeSetupQuestion,
+        actionCount: setupActionCount,
+      });
+      const mainTabNav = viewTracker.querySelector(".main-tab-nav") as HTMLElement | null;
+      const locationBanners = root.getElementById("location-banners-container");
+      const trackerScrollable = root.getElementById("view-tracker-scrollable");
+      const mainTabTracker = root.getElementById("main-tab-tracker");
+      if (mainTabNav) mainTabNav.style.display = inSetupPhase ? "none" : "";
+      if (locationBanners) locationBanners.style.display = inSetupPhase ? "none" : "";
+      if (trackerScrollable) trackerScrollable.style.display = inSetupPhase ? "none" : "";
+      // During setup the only visible child of the tracker pane is the (tall) setup widget. Let
+      // the pane itself scroll — it's a plain flex div whose height resolves cleanly from the box,
+      // unlike the <details>-nested favorites list (a <details> won't propagate a definite height
+      // to flex children, which is why an inner overflow-y:auto/max-height there silently fails).
+      if (mainTabTracker) mainTabTracker.style.overflowY = inSetupPhase ? "auto" : "";
+      // The Scenario Setup widget (Favorited Plot Essentials / character picker) lives inside the
+      // tracker pane. Since the Home tab became the default active main-tab pane, a brand-new
+      // scenario lands on Home and the widget would stay buried in the display:none tracker pane —
+      // so during setup we force the tracker pane visible, then hand control back to the user's
+      // active tab once setup ends. The tab nav is hidden above during setup, so this can't fight a
+      // user tab switch. (Skipped in manager-only mode, where viewTracker itself is hidden.)
+      if (!state.isManagerOnly) {
+        const targetPane = visibleMainTabPane(inSetupPhase, activeTabId);
+        root.querySelectorAll(".main-tab-pane").forEach((p) => {
+          (p as HTMLElement).style.display = p.id === targetPane ? "flex" : "none";
+        });
+      }
 
       // Adventures Manager rendering trigger
       const tabManagerPane = root.getElementById("tab-manager");
@@ -4938,49 +4626,23 @@ export function mountPanel(): PanelHandle {
         viewSettings.style.display = "flex";
         viewAnalyze.style.display = "none";
         
+        // Hide settings tab navigation and footer in manager-only mode
         const tabNav = viewSettings.querySelector(".tab-nav") as HTMLElement | null;
+        if (tabNav) tabNav.style.display = "none";
         const footer = root.getElementById("settings-footer");
+        if (footer) footer.style.display = "none";
         
-        if (managerShowSettings) {
-          if (tabNav) {
-            tabNav.style.display = "flex";
-            tabNav.querySelectorAll(".tab-btn").forEach((btn) => {
-              const tab = btn.getAttribute("data-tab");
-              if (tab === "tab-prov" || tab === "tab-debug") {
-                (btn as HTMLElement).style.display = "";
-              } else {
-                (btn as HTMLElement).style.display = "none";
-              }
-            });
+        // Hide all other panes in viewSettings
+        viewSettings.querySelectorAll(".tab-pane").forEach(pane => {
+          if (pane.id !== "tab-manager") {
+            (pane as HTMLElement).style.display = "none";
           }
-          if (footer) footer.style.display = "flex";
-          
-          const activeBtn = viewSettings.querySelector(".tab-btn.active") as HTMLElement | null;
-          const currentActiveTab = activeBtn?.getAttribute("data-tab");
-          if (currentActiveTab !== "tab-prov" && currentActiveTab !== "tab-debug") {
-            switchTab("tab-prov");
-          } else {
-            switchTab(currentActiveTab || "tab-prov");
-          }
-        } else {
-          if (tabNav) tabNav.style.display = "none";
-          if (footer) footer.style.display = "none";
-          
-          viewSettings.querySelectorAll(".tab-pane").forEach(pane => {
-            if (pane.id !== "tab-manager") {
-              (pane as HTMLElement).style.display = "none";
-            }
-          });
-          if (tabManagerPane) tabManagerPane.style.display = "flex";
-        }
+        });
+        
+        if (tabManagerPane) tabManagerPane.style.display = "flex";
       } else {
         const tabNav = viewSettings.querySelector(".tab-nav") as HTMLElement | null;
-        if (tabNav) {
-          tabNav.style.display = "flex";
-          tabNav.querySelectorAll(".tab-btn").forEach((btn) => {
-            (btn as HTMLElement).style.display = "";
-          });
-        }
+        if (tabNav) tabNav.style.display = "flex";
         const footer = root.getElementById("settings-footer");
         if (footer) footer.style.display = "flex";
         
@@ -5004,12 +4666,13 @@ export function mountPanel(): PanelHandle {
       // Window title: "AID Story Helper: <Scenario> - <Protagonist>"
       const titleTail = [state.scenario, state.protagonist].filter(Boolean).join(" - ");
       st.textContent = titleTail ? `AID Story Helper: ${titleTail}` : "AID Story Helper";
-      const shouldForceUpdate = isShortIdChanged || !prevState;
       if (isShortIdChanged) {
         protEl.value = state.protagonist || "";
-      } else if (root.activeElement !== protEl) {
+      } else if (document.activeElement !== protEl) {
         protEl.value = state.protagonist || "";
       }
+      const shouldForceUpdate = isShortIdChanged || !prevState;
+
       if (state.settings?.theme && (shouldForceUpdate || root.activeElement !== themeEl) && themeEl.value !== state.settings.theme) {
         themeEl.value = state.settings.theme;
         updateThemeClass();
@@ -5026,63 +4689,33 @@ export function mountPanel(): PanelHandle {
         updateProviderLabels();
       }
 
-      if (state.settings?.analyzeWindow && (shouldForceUpdate || root.activeElement !== winEl) && winEl.value !== String(state.settings.analyzeWindow)) {
+      if (state.settings?.analyzeWindow && (!winEl.value || shouldForceUpdate || root.activeElement !== winEl)) {
         winEl.value = String(state.settings.analyzeWindow);
       }
-      if (state.settings && (shouldForceUpdate || root.activeElement !== memoraidWinEl) && memoraidWinEl.value !== String(state.settings.memoraidLookback ?? 8)) {
-        memoraidWinEl.value = String(state.settings.memoraidLookback ?? 8);
+      if (state.settings && (!memoraidThoughtWinEl.value || shouldForceUpdate || root.activeElement !== memoraidThoughtWinEl)) {
+        memoraidThoughtWinEl.value = String(Math.max(1, state.settings.memoraidThoughtLookback ?? 1));
       }
-      if (state.settings && (shouldForceUpdate || root.activeElement !== memoraidThoughtWinEl) && memoraidThoughtWinEl.value !== String(state.settings.memoraidThoughtLookback ?? 1)) {
-        const val = state.settings.memoraidThoughtLookback ?? 1;
-        memoraidThoughtWinEl.value = String(val >= 1 ? val : 1);
-      }
-      if (state.settings && (shouldForceUpdate || root.activeElement !== memoraidPresenceWinEl) && memoraidPresenceWinEl.value !== String(state.settings.memoraidPresenceLookback ?? 5)) {
+      if (state.settings && (!memoraidPresenceWinEl.value || shouldForceUpdate || root.activeElement !== memoraidPresenceWinEl)) {
         memoraidPresenceWinEl.value = String(state.settings.memoraidPresenceLookback ?? 5);
       }
-      if (state.settings && (shouldForceUpdate || root.activeElement !== interceptTimeoutEl) && interceptTimeoutEl.value !== String(state.settings.interceptTimeout ?? 10)) {
-        interceptTimeoutEl.value = String(state.settings.interceptTimeout ?? 10);
+      if (state.settings && (!interceptTimeoutEl.value || shouldForceUpdate || root.activeElement !== interceptTimeoutEl)) {
+        interceptTimeoutEl.value = String(state.settings.interceptTimeout ?? 4);
       }
-      if (state.settings && (shouldForceUpdate || root.activeElement !== charCardLimitEl) && charCardLimitEl.value !== String(state.settings.characterCardLimit ?? 600)) {
-        charCardLimitEl.value = String(state.settings.characterCardLimit ?? 600);
-      }
-      if (state.settings && (shouldForceUpdate || root.activeElement !== thoughtCardLimitEl) && thoughtCardLimitEl.value !== String(state.settings.thoughtCardLimit ?? 2000)) {
-        thoughtCardLimitEl.value = String(state.settings.thoughtCardLimit ?? 2000);
-      }
-      applyMemoraidTiming(state.memoraidTiming);
       const locModeEl = root.getElementById("location-mode") as HTMLSelectElement;
-      if (locModeEl && state.settings && (shouldForceUpdate || root.activeElement !== locModeEl) && locModeEl.value !== (state.settings.locationMode || "optionA")) {
+      if (locModeEl && state.settings && (shouldForceUpdate || root.activeElement !== locModeEl)) {
         locModeEl.value = state.settings.locationMode || "optionA";
       }
       const properNounDetectEl = root.getElementById("enable-proper-noun-detection") as HTMLInputElement;
       if (properNounDetectEl && state.settings && (shouldForceUpdate || root.activeElement !== properNounDetectEl)) {
-        properNounDetectEl.checked = state.settings.enableProperNounDetection !== false;
+        properNounDetectEl.checked = state.settings.enableProperNounDetection !== false; // opt-out: checked unless explicitly disabled
       }
-      const hasConfigCard = (state.cards ?? []).some(
-        (c) => !c.deletedAt && (c.title || "").toLowerCase() === "configure memoraid"
-      );
-      const memoraidTabBannerContainer = root.getElementById("memoraid-tab-config-banner-container");
-      if (memoraidTabBannerContainer) {
-        if (!hasConfigCard) {
-          memoraidTabBannerContainer.innerHTML = `<div class="memoraid-config-banner" style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2);border-radius:8px;padding:10px;margin-bottom:12px;display:flex;flex-direction:column;gap:6px;box-sizing:border-box;width:100%;">` +
-            `<div style="font-weight:700;color:#fbbf24;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;">Enable MemorAID Thought Tracking</div>` +
-            `<div class="note" style="margin:0;font-size:11px;line-height:1.4;color:var(--text-secondary);">To automatically track NPC thoughts in memory cards, create the config card first.</div>` +
-            `<button id="create-memoraid-config-btn-tab" style="background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.3);padding:5px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:500;align-self:flex-start;transition:background 0.2s;width:auto;min-height:unset;">Create Config Card</button>` +
-          `</div>`;
-        } else {
-          memoraidTabBannerContainer.innerHTML = "";
-        }
-      }
-      const manualModeEl = root.getElementById("enable-manual-mode") as HTMLInputElement;
-      if (manualModeEl && state.settings && (shouldForceUpdate || root.activeElement !== manualModeEl)) {
-        manualModeEl.checked = !!state.settings.manualMode;
+      const autoUpdatesEl = root.getElementById("enable-automatic-updates") as HTMLInputElement;
+      if (autoUpdatesEl && state.settings && (shouldForceUpdate || root.activeElement !== autoUpdatesEl)) {
+        autoUpdatesEl.checked = !!state.settings.enableAutomaticUpdates;
       }
       const showDbgEl = root.getElementById("show-dbg") as HTMLInputElement;
       if (showDbgEl && state.settings && (shouldForceUpdate || root.activeElement !== showDbgEl)) {
         showDbgEl.checked = !!state.settings.showDebug;
-      }
-      const logPeEl = root.getElementById("log-pe-console") as HTMLInputElement;
-      if (logPeEl && state.settings && (shouldForceUpdate || root.activeElement !== logPeEl)) {
-        logPeEl.checked = !!state.settings.logPlotEssentials;
       }
       const useMemsEl = root.getElementById("use-memories") as HTMLInputElement;
       if (useMemsEl && state.settings && (shouldForceUpdate || root.activeElement !== useMemsEl)) {
@@ -5092,6 +4725,72 @@ export function mountPanel(): PanelHandle {
       if (autoRegenMemsEl && state.settings && (shouldForceUpdate || root.activeElement !== autoRegenMemsEl)) {
         autoRegenMemsEl.checked = !!state.settings.autoRegenerateMemoryBankEntry;
       }
+      if (enableLcEl && state.settings && (shouldForceUpdate || root.activeElement !== enableLcEl)) {
+        enableLcEl.checked = state.settings.enableLivingCharacters !== false;
+      }
+      if (lcTitlePrefixEl && state.settings && (shouldForceUpdate || root.activeElement !== lcTitlePrefixEl)) {
+        lcTitlePrefixEl.value = state.settings.livingCharactersTitlePrefix ?? "Life - ";
+      }
+      if (lcKeyPrefixEl && state.settings && (shouldForceUpdate || root.activeElement !== lcKeyPrefixEl)) {
+        lcKeyPrefixEl.value = state.settings.livingCharactersKeyPrefix ?? "chaos-v2:";
+      }
+      if (groupThoughtsEl && state.settings && (shouldForceUpdate || root.activeElement !== groupThoughtsEl)) {
+        groupThoughtsEl.checked = !!state.settings.groupThoughtsInRoster;
+      }
+      // Dummy inputs for screenshot purposes
+      if (charCardLimitEl && (!charCardLimitEl.value || shouldForceUpdate || root.activeElement !== charCardLimitEl)) {
+        charCardLimitEl.value = "600";
+      }
+      if (memoraidWinEl && (!memoraidWinEl.value || shouldForceUpdate || root.activeElement !== memoraidWinEl)) {
+        memoraidWinEl.value = "8";
+      }
+      if (thoughtCardLimitEl && state.settings && (shouldForceUpdate || root.activeElement !== thoughtCardLimitEl) && thoughtCardLimitEl.value !== String(state.settings.thoughtCardLimit ?? 2000)) {
+        thoughtCardLimitEl.value = String(state.settings.thoughtCardLimit ?? 2000);
+      }
+
+      const enableMemoraidEl = root.getElementById("enable-memoraid") as HTMLInputElement | null;
+      if (enableMemoraidEl) enableMemoraidEl.checked = state.settings?.enableMemorAID !== false;
+
+      const enableCrystallizedEl = root.getElementById("enable-crystallized") as HTMLInputElement | null;
+      if (enableCrystallizedEl) enableCrystallizedEl.checked = !!state.settings?.enableCrystallized;
+      if (crystallizedIntervalEl && (shouldForceUpdate || root.activeElement !== crystallizedIntervalEl)) {
+        crystallizedIntervalEl.value = String(state.settings?.crystallizedInterval ?? 20);
+      }
+      if (crystallizedEntryMaxCharsEl && (shouldForceUpdate || root.activeElement !== crystallizedEntryMaxCharsEl)) {
+        crystallizedEntryMaxCharsEl.value = String(state.settings?.crystallizedEntryMaxChars ?? 900);
+      }
+      if (crystallizedNodeCapEl && (shouldForceUpdate || root.activeElement !== crystallizedNodeCapEl)) {
+        crystallizedNodeCapEl.value = String(state.settings?.crystallizedNodeCap ?? 12);
+      }
+      if (crystallizedKnowsCapEl && (shouldForceUpdate || root.activeElement !== crystallizedKnowsCapEl)) {
+        crystallizedKnowsCapEl.value = String(state.settings?.crystallizedKnowsCap ?? 2);
+      }
+      if (crystallizedRecallsCapEl && (shouldForceUpdate || root.activeElement !== crystallizedRecallsCapEl)) {
+        crystallizedRecallsCapEl.value = String(state.settings?.crystallizedRecallsCap ?? 2);
+      }
+      if (crystallizedVividCapEl && (shouldForceUpdate || root.activeElement !== crystallizedVividCapEl)) {
+        crystallizedVividCapEl.value = String(state.settings?.crystallizedVividCap ?? 4);
+      }
+      if (crystallizedOutlookCapEl && (shouldForceUpdate || root.activeElement !== crystallizedOutlookCapEl)) {
+        crystallizedOutlookCapEl.value = String(state.settings?.crystallizedOutlookCap ?? 2);
+      }
+      if (crystallizedPreferencesCapEl && (shouldForceUpdate || root.activeElement !== crystallizedPreferencesCapEl)) {
+        crystallizedPreferencesCapEl.value = String(state.settings?.crystallizedPreferencesCap ?? 4);
+      }
+      if (crystallizedNpcMemoryCapEl && (shouldForceUpdate || root.activeElement !== crystallizedNpcMemoryCapEl)) {
+        crystallizedNpcMemoryCapEl.value = String(state.settings?.crystallizedNpcMemoryCap ?? 400);
+      }
+      // Per-pass LLM enable checkboxes (default on / opt-out — undefined reads as checked).
+      const crystKnowsEl = root.getElementById("crystallized-knows-enabled") as HTMLInputElement | null;
+      if (crystKnowsEl) crystKnowsEl.checked = state.settings?.crystallizedKnowsEnabled !== false;
+      const crystNodesEl = root.getElementById("crystallized-nodes-enabled") as HTMLInputElement | null;
+      if (crystNodesEl) crystNodesEl.checked = state.settings?.crystallizedNodesEnabled !== false;
+      const crystOutlookEnEl = root.getElementById("crystallized-outlook-enabled") as HTMLInputElement | null;
+      if (crystOutlookEnEl) crystOutlookEnEl.checked = state.settings?.crystallizedOutlookEnabled !== false;
+      const crystPrefsEnEl = root.getElementById("crystallized-preferences-enabled") as HTMLInputElement | null;
+      if (crystPrefsEnEl) crystPrefsEnEl.checked = state.settings?.crystallizedPreferencesEnabled !== false;
+      const crystNpcMemEnEl = root.getElementById("crystallized-npc-memory-enabled") as HTMLInputElement | null;
+      if (crystNpcMemEnEl) crystNpcMemEnEl.checked = state.settings?.crystallizedNpcMemoryEnabled !== false;
       if (state.settings) {
         const s1 = root.getElementById("prompt-s1") as HTMLTextAreaElement;
         const s2 = root.getElementById("prompt-s2") as HTMLTextAreaElement;
@@ -5114,15 +4813,6 @@ export function mountPanel(): PanelHandle {
 
       const curAction = state.actionCount ?? state.actionsCount ?? 0;
 
-      // Self-heal banner is purely state-driven: show ONLY when the local DB is genuinely empty
-      // (and not dismissed). This corrects the false positive where the initial empty-DB probe
-      // raced auto-backfill — once the adventure repopulates, isLocalDbEmpty(state) is false and
-      // the banner hides itself on the next render.
-      const selfHealBanner = root.getElementById("self-heal-banner");
-      if (selfHealBanner) {
-        selfHealBanner.style.display = isLocalDbEmpty(state) && !selfHealDismissed ? "block" : "none";
-      }
-
       if (statTurn) statTurn.textContent = String(curAction);
       if (statLastAuto) {
         statLastAuto.textContent = state.lastAutoUpdatedCard || "-";
@@ -5138,27 +4828,19 @@ export function mountPanel(): PanelHandle {
         charGroups.set(key, arr);
       }
 
+      // Surface active cards that have no version history yet, so a live card (e.g. a re-imported
+      // character never regenerated here) is still visible/manageable in the roster.
+      for (const missingKey of activeCardsMissingFromRoster(state.cards ?? [], charGroups.keys())) {
+        if (!charGroups.has(missingKey)) charGroups.set(missingKey, []);
+      }
+
       // Sort versions in each character group by createdAt ascending
-      for (const [name, list] of charGroups.entries()) {
+      for (const list of charGroups.values()) {
         list.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
       }
 
       let html = "";
-      
-      const hasConfigCardVal = (state.cards ?? []).some(
-        (c) => !c.deletedAt && (c.title || "").toLowerCase() === "configure memoraid"
-      );
-      if (!hasConfigCardVal && state.settings?.memoraidBannerDismissed !== true) {
-        html += `<div class="memoraid-config-banner" style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2);border-radius:8px;padding:10px;margin-bottom:12px;display:flex;flex-direction:column;gap:6px;box-sizing:border-box;width:100%;">` +
-          `<div style="font-weight:700;color:#fbbf24;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;">Enable MemorAID Thought Tracking</div>` +
-          `<div class="note" style="margin:0;font-size:11px;line-height:1.4;color:var(--text-secondary);">To automatically track NPC thoughts in memory cards, create the config card first.</div>` +
-          `<div style="display:flex;gap:8px;align-items:center;margin-top:4px;">` +
-            `<button id="create-memoraid-config-btn" style="background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.3);padding:5px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:500;transition:background 0.2s;width:auto;min-height:unset;">Create Config Card</button>` +
-            `<button id="dismiss-memoraid-banner-btn" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:11px;font-weight:500;padding:5px 10px;text-decoration:underline;margin:0;">Dismiss</button>` +
-          `</div>` +
-        `</div>`;
-      }
-      
+
       // Sort the character names: protagonist first, then other Plot Essentials characters in order, then others alphabetically.
       const allNames = Array.from(charGroups.keys());
       const sortedNames: string[] = [];
@@ -5209,7 +4891,7 @@ export function mountPanel(): PanelHandle {
       // Group entries by Story Card type; Plot Essentials entries form their own group.
       const cardTypeByName = new Map<string, string>();
       const cardIdByName = new Map<string, string>();
-      const deletedNames = new Set<string>();
+      const deletedNames = computeDeletedNames(state.cards ?? []);
       // Pass 1: Keys
       for (const c of (state.cards ?? [])) {
         const keysList = (c.keys || "").split(/[,;]+/).map(k => k.trim().toLowerCase()).filter(Boolean);
@@ -5217,26 +4899,12 @@ export function mountPanel(): PanelHandle {
           cardTypeByName.set(k, c.type || "character");
           cardIdByName.set(k + "::" + (c.type || "character").toLowerCase(), c.id);
           cardIdByName.set(k, c.id);
-          if (c.deletedAt) {
-            deletedNames.add(k + "::" + (c.type || "character").toLowerCase());
-            deletedNames.add(k);
-          } else {
-            deletedNames.delete(k + "::" + (c.type || "character").toLowerCase());
-            deletedNames.delete(k);
-          }
         }
         const fullKey = (c.title || c.keys || "").trim().toLowerCase();
         if (fullKey) {
           cardTypeByName.set(fullKey, c.type || "character");
           cardIdByName.set(fullKey + "::" + (c.type || "character").toLowerCase(), c.id);
           cardIdByName.set(fullKey, c.id);
-          if (c.deletedAt) {
-            deletedNames.add(fullKey + "::" + (c.type || "character").toLowerCase());
-            deletedNames.add(fullKey);
-          } else {
-            deletedNames.delete(fullKey + "::" + (c.type || "character").toLowerCase());
-            deletedNames.delete(fullKey);
-          }
         }
       }
       // Pass 2: Titles (titles take priority)
@@ -5246,13 +4914,6 @@ export function mountPanel(): PanelHandle {
           cardTypeByName.set(titleLower, c.type || "character");
           cardIdByName.set(titleLower + "::" + (c.type || "character").toLowerCase(), c.id);
           cardIdByName.set(titleLower, c.id);
-          if (c.deletedAt) {
-            deletedNames.add(titleLower + "::" + (c.type || "character").toLowerCase());
-            deletedNames.add(titleLower);
-          } else {
-            deletedNames.delete(titleLower + "::" + (c.type || "character").toLowerCase());
-            deletedNames.delete(titleLower);
-          }
         }
       }
       const plotNames = new Set<string>();
@@ -5265,21 +4926,114 @@ export function mountPanel(): PanelHandle {
         const parts = key.split("::");
         const name = parts[0] || "";
         const type = parts[1];
+
+        const titlePrefix = (state.settings?.livingCharactersTitlePrefix || "Life - ").toLowerCase();
+        const keyPrefix = (state.settings?.livingCharactersKeyPrefix || "chaos-v2:").toLowerCase();
+
+        // An entry with an explicit concrete card type is classified by that type directly — bypassing
+        // the fuzzy title-OR-keys lookups below, which can mis-file it under an auto-card group whose
+        // KEYS include this name (real bug: "Life - Veya Vallois" keys include "Veya Vallois", filing the
+        // character entry under Life instead of Characters). See explicitTypeLabel.
+        const explicit = explicitTypeLabel(name, type, titlePrefix);
+        if (explicit) return explicit;
+
+        const isLifeCard = () => {
+          if (type && type.toLowerCase() === "life") return true;
+          const nameLower = name.trim().toLowerCase();
+          if (nameLower.startsWith(titlePrefix)) return true;
+
+          const card = (state.cards ?? []).find(c => !c.deletedAt && (
+            c.title?.toLowerCase() === nameLower ||
+            c.keys?.split(/[,;]+/).map(k => k.trim().toLowerCase()).includes(nameLower)
+          ));
+          if (card) {
+            if ((card.type || "").toLowerCase() === "life") return true;
+            if ((card.title || "").toLowerCase().startsWith(titlePrefix)) return true;
+            const keysList = (card.keys || "").split(/[,;]+/).map(k => k.trim().toLowerCase()).filter(Boolean);
+            if (keysList.some(k => k.startsWith(keyPrefix))) return true;
+          }
+          return false;
+        };
+
+        if (isLifeCard()) {
+          return "Life";
+        }
+
+        const isThoughtCard = () => {
+          if (!state.settings?.groupThoughtsInRoster) return false;
+          if (type && (type.toLowerCase() === "memory" || type.toLowerCase() === "thoughts")) return true;
+          const nameLower = name.trim().toLowerCase();
+          if (nameLower.endsWith(" (memory)") || nameLower.endsWith(" - thoughts")) return true;
+
+          const card = (state.cards ?? []).find(c => !c.deletedAt && (
+            c.title?.toLowerCase() === nameLower ||
+            c.keys?.split(/[,;]+/).map(k => k.trim().toLowerCase()).includes(nameLower)
+          ));
+          if (card) {
+            const cardTypeLower = (card.type || "").toLowerCase();
+            if (cardTypeLower === "memory" || cardTypeLower === "thoughts") return true;
+            const cardTitleLower = (card.title || "").toLowerCase();
+            if (cardTitleLower.endsWith(" (memory)") || cardTitleLower.endsWith(" - thoughts")) return true;
+          }
+          return false;
+        };
+
+        const isCrystallizedCard = () => {
+          const nameLower = name.trim().toLowerCase();
+          if (nameLower.endsWith(" - crystallized")) return true;
+          if (type && type.toLowerCase() === "crystallized") return true;
+          const exactTitleCard = (state.cards ?? []).find(c => !c.deletedAt && (c.title || "").trim().toLowerCase() === nameLower);
+          if (!exactTitleCard) return false;
+          const cardTypeLower = (exactTitleCard.type || "").toLowerCase();
+          if (cardTypeLower === "crystallized") return true;
+          return (exactTitleCard.title || "").trim().toLowerCase().endsWith(" - crystallized");
+        };
+
+        if (isCrystallizedCard()) {
+          return "Crystallized";
+        }
+
+        if (isThoughtCard()) {
+          return "Thoughts";
+        }
+
         if (type) {
-          return TYPE_LABELS[type.toLowerCase()] ?? type;
+          const lowerType = type.toLowerCase();
+          if (TYPE_LABELS[lowerType]) return TYPE_LABELS[lowerType];
+          return type.charAt(0).toUpperCase() + type.slice(1);
         }
         const lower = name.trim().toLowerCase();
         const t = cardTypeByName.get(lower);
-        if (t) return TYPE_LABELS[t.toLowerCase()] ?? t; // custom types keep their own label, e.g. "Test"
+        if (t) {
+          const lowerT = t.toLowerCase();
+          if (TYPE_LABELS[lowerT]) return TYPE_LABELS[lowerT];
+          return t.charAt(0).toUpperCase() + t.slice(1);
+        }
         if (plotNames.has(lower)) return "Plot Essentials";
         return "Other";
       };
+      // A LIVE card supersedes an archived one of the same name+type. After delete-then-re-import,
+      // both an archived and an active card carry the title; a name with any active card must render
+      // as active (Characters), never Archived — independent of card iteration order.
+      const activeNames = new Set<string>();
+      for (const c of (state.cards ?? [])) {
+        if (c.deletedAt) continue;
+        const type = (c.type || "character").toLowerCase();
+        const add = (n: string) => {
+          const k = n.trim().toLowerCase();
+          if (k) { activeNames.add(k); activeNames.add(`${k}::${type}`); }
+        };
+        if (c.title) add(c.title);
+        for (const k of (c.keys || "").split(/[,;]+/)) add(k);
+      }
       const isArchived = (key: string): boolean => {
         const parts = key.split("::");
         const name = parts[0] || "";
         const type = parts[1];
-        const lookupKey = type ? `${name.trim().toLowerCase()}::${type.toLowerCase()}` : name.trim().toLowerCase();
-        return deletedNames.has(lookupKey) || deletedNames.has(name.trim().toLowerCase());
+        const bareName = name.trim().toLowerCase();
+        const lookupKey = type ? `${bareName}::${type.toLowerCase()}` : bareName;
+        if (activeNames.has(lookupKey) || activeNames.has(bareName)) return false; // live card wins
+        return deletedNames.has(lookupKey) || deletedNames.has(bareName);
       };
 
       // Split entries into active vs archived; each side is grouped by Story Card type.
@@ -5289,14 +5043,20 @@ export function mountPanel(): PanelHandle {
       // Pre-populate "Plot Essentials" in activeGrouped so it's always rendered (prevents chicken-and-egg problem)
       activeGrouped.set("Plot Essentials", []);
 
+      // MemorAID config is per-adventure (state.memoraidCharacters), surfaced as a pinned section
+      // below; gated by the global enable toggle (default on). Any stray legacy "Configure MemorAID"
+      // card is kept out of the normal grouping (it's mid-migration to per-adventure storage).
+      const memoraidEnabled = state.settings?.enableMemorAID !== false;
+      const memoraidNames: string[] = state.memoraidCharacters ?? [];
       for (const entry of sortedChars) {
+        if ((entry[0].split("::")[0] || "").trim().toLowerCase() === "configure memoraid") continue;
         const lbl = typeLabelFor(entry[0]);
         const target = isArchived(entry[0]) ? archivedGrouped : activeGrouped;
         const arr = target.get(lbl) ?? [];
         arr.push(entry);
         target.set(lbl, arr);
       }
-      const LABEL_ORDER = ["Plot Essentials", "Characters", "Classes", "Races", "Locations", "Factions"];
+      const LABEL_ORDER = ["Plot Essentials", "Characters", "Thoughts", "Crystallized", "Life", "Classes", "Races", "Locations", "Factions"];
       const rank = (l: string) => (l === "Other" ? 1000 : (LABEL_ORDER.indexOf(l) === -1 ? 500 : LABEL_ORDER.indexOf(l)));
       const orderLabels = (keys: Iterable<string>) => [...keys].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
 
@@ -5305,7 +5065,8 @@ export function mountPanel(): PanelHandle {
       const openGroups = new Set<string>();
       const hasExistingGroups = results.querySelectorAll("details[data-group]").length > 0;
       if (!hasExistingGroups) {
-        openGroups.add("active-Plot Essentials");
+        // MemorAID is the first thing open when it has characters; otherwise Plot Essentials.
+        openGroups.add(memoraidEnabled && memoraidNames.length ? "memoraid-config" : "active-Plot Essentials");
       } else {
         results.querySelectorAll("details[data-group]").forEach((d) => {
           if ((d as HTMLDetailsElement).open) openGroups.add(d.getAttribute("data-group") || "");
@@ -5342,23 +5103,36 @@ export function mountPanel(): PanelHandle {
             }
           }
 
-          out += `<details class="char-card"${isCharOpen}${stateStyles ? ` style="${stateStyles}"` : ""}>` +
+          out += `<details class="char-card" data-card-title="${esc(displayName)}"${isCharOpen}${stateStyles ? ` style="${stateStyles}"` : ""}>` +
             `<summary${titleColor ? ` style="${titleColor}"` : ""}><span>${esc(displayName)}${actionText}` +
               (hasPending ? ` <span style="background:rgba(239, 68, 68, 0.2);color:#fca5a5;font-size:9px;padding:2px 6px;border-radius:4px;margin-left:6px;display:inline-block;vertical-align:middle;font-weight:bold;">Proposal</span>` : "") +
               (isArchivedSection ? ` <span style="background:rgba(255, 255, 255, 0.06);color:var(--text-secondary);font-size:9px;padding:2px 6px;border-radius:4px;margin-left:6px;display:inline-block;vertical-align:middle;">Archived</span>` : "") +
             `</span></summary>` +
             `<div class="char-card-body">`;
 
-          // ⚡ Generate (AID): replays AI Dungeon's native Story Card Command for this card.
+          // ⚡ Generate Core Character: generates this card through the configured AI provider.
           const lookupKey = type ? `${displayName.trim().toLowerCase()}::${type.toLowerCase()}` : displayName.trim().toLowerCase();
           const genCardId = cardIdByName.get(lookupKey) ?? cardIdByName.get(displayName.trim().toLowerCase());
           if (genCardId && !isArchivedSection) {
-            const providerKey = state.settings?.provider || "claude";
-            let providerLabel = "Claude";
-            if (providerKey === "openai") providerLabel = "OpenAI";
-            else if (providerKey === "gemini") providerLabel = "Gemini";
-            else if (providerKey === "ollama") providerLabel = "Ollama";
-            out += `<button class="action-btn" data-gen-card="${esc(genCardId)}" style="margin-bottom:8px;background:rgba(245,158,11,0.12);color:#fbbf24;border-color:rgba(245,158,11,0.3);">⚡ Generate (${providerLabel})</button>`;
+            const isCrystallized = displayName.toLowerCase().endsWith(" - crystallized") || (type && type.toLowerCase() === "crystallized");
+            if (isCrystallized) {
+              const charName = displayName.replace(/\s*-\s*crystallized$/i, "");
+              // Knows editor + Backfill memories moved to Memory Bank → NPC (single home).
+              out += `<button class="action-btn distill-now-btn" data-card-id="${esc(genCardId)}" data-char-name="${esc(charName)}" style="margin-bottom:8px;margin-right:6px;background:rgba(59,130,246,0.12);color:#60a5fa;border-color:rgba(59,130,246,0.3);">Distill now</button>` +
+                `<button class="action-btn consolidate-crystallized-btn" data-card-id="${esc(genCardId)}" style="margin-bottom:8px;margin-right:6px;background:rgba(168,85,247,0.12);color:#c084fc;border-color:rgba(168,85,247,0.3);">Consolidate</button>` +
+                `<button class="action-btn consolidate-outlook-btn" data-char-name="${esc(charName)}" title="Fold this character's settled beliefs (Outlook) into their character card as a proposed revision, then clear them from Crystallized" style="margin-bottom:8px;background:rgba(245,158,11,0.12);color:#fbbf24;border-color:rgba(245,158,11,0.3);">Consolidate Outlook</button>`;
+            } else {
+              const isCharacterType = (type || "").toLowerCase() === "character";
+              const genLabel = isCharacterType ? "⚡ Generate Core Character" : "⚡ Generate (AID)";
+              out += `<button class="action-btn" data-gen-card="${esc(genCardId)}" style="margin-bottom:8px;background:rgba(245,158,11,0.12);color:#fbbf24;border-color:rgba(245,158,11,0.3);">${genLabel}</button>`;
+              // Character cards also get a compact background-character generator (tight, behavior-first ~600-char card).
+              if (isCharacterType) {
+                out += `<button class="action-btn" data-gen-compact="${esc(genCardId)}" style="margin-bottom:8px;margin-left:6px;background:rgba(34,211,238,0.12);color:#22d3ee;border-color:rgba(34,211,238,0.3);" title="Generate a shorter side-character card — details without high resolution">✨ Generate Side Character</button>`;
+                out += `<button class="action-btn" data-reroll-card="${esc(genCardId)}" style="margin-bottom:8px;margin-left:6px;background:rgba(168,85,247,0.12);color:#c084fc;border-color:rgba(168,85,247,0.3);" title="Re-sample this character's body and rewrite their physical description (keeps personality)">🎲 Re-roll Body</button>`;
+              }
+            }
+            // Delete (any card type): native delete + user-delete tombstone (won't repropagate/regenerate).
+            out += `<button class="action-btn card-delete-btn" data-card-id="${esc(genCardId)}" style="margin-bottom:8px;margin-left:6px;background:rgba(239,68,68,0.12);color:#f87171;border-color:rgba(239,68,68,0.3);">Delete</button>`;
           }
 
           // 1. Pending Proposals Section
@@ -5401,25 +5175,14 @@ export function mountPanel(): PanelHandle {
             `</details>`;
 
             if (genCardId && !isArchivedSection) {
-              const card = state.cards?.find(c => c.id === genCardId);
-              const currentTriggers = card?.keys || "";
-              out += `<div class="triggers-section" style="margin-top:10px;margin-bottom:10px;padding:8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:8px;">` +
-                `<label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;display:block;margin-bottom:4px;">Triggers</label>` +
-                `<div style="display:flex;gap:6px;align-items:center;">` +
-                  `<input class="triggers-input" data-card-id="${esc(genCardId)}" type="text" value="${esc(currentTriggers)}" style="margin:0;flex:1;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:5px 8px;border-radius:6px;font-size:11px;font-family:inherit;box-sizing:border-box;" />` +
-                  `<button class="triggers-submit-btn" data-card-id="${esc(genCardId)}" style="margin:0;padding:5px 8px;background:rgba(16, 185, 129, 0.15);color:#10b981;border-color:rgba(16, 185, 129, 0.3);border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;width:24px;height:24px;" title="Save Triggers">✓</button>` +
-                `</div>` +
+              // Triggers + Entry editing moved to the full-panel editor view (Phase B) — one button
+              // takes over the panel instead of two cramped inline widgets in the drawer.
+              out += `<div style="margin-top:10px;margin-bottom:10px;">` +
+                `<button class="open-card-editor action-btn" data-card-id="${esc(genCardId)}" style="background:rgba(255,255,255,0.04);color:var(--text-primary);border-color:var(--border-color);">✏️ Edit Card (entry &amp; triggers)</button>` +
               `</div>`;
 
-              // Manual entry editor — pushes via the extension's own GraphQL replay (bypasses
-              // page interception), so it never depends on AID's GUI card-editor DOM.
-              out += `<div class="entry-section" style="margin-top:10px;margin-bottom:10px;padding:8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:8px;">` +
-                `<label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;display:block;margin-bottom:4px;">Entry</label>` +
-                `<div style="display:flex;gap:6px;align-items:flex-start;">` +
-                  `<textarea class="entry-input" data-card-id="${esc(genCardId)}" rows="5" style="margin:0;flex:1;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:5px 8px;border-radius:6px;font-size:11px;font-family:SFMono-Regular,Consolas,monospace;box-sizing:border-box;resize:vertical;">${esc(card?.value || "")}</textarea>` +
-                  `<button class="entry-submit-btn" data-card-id="${esc(genCardId)}" style="margin:0;padding:5px 8px;background:rgba(16, 185, 129, 0.15);color:#10b981;border-color:rgba(16, 185, 129, 0.3);border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;width:24px;height:24px;" title="Save Entry">✓</button>` +
-                `</div>` +
-              `</div>`;
+              // The Knows (schema) editor for Crystallized cards has moved to Memory Bank → NPC
+              // (single home). See renderNpcMemoryBank.
             }
 
             // 3. History & Rewrites (all applied versions)
@@ -5488,7 +5251,7 @@ export function mountPanel(): PanelHandle {
             const curAction = state.actionCount ?? state.actionsCount ?? 0;
             const lastAnAction = state.lastAnalysisAction ?? 0;
             const sinceLastUpdate = lastAnAction > 0 ? String(curAction - lastAnAction) : "-";
-            prefixHtml = `<button id="an" style="width:100%;margin-bottom:6px;">⟳ Update Plot Essentials</button>` +
+            prefixHtml = `<button id="an" class="btn-primary" style="width:100%;margin-bottom:6px;">⟳ Update Plot Essentials</button>` +
               `<div style="font-size:9.5px;color:var(--text-secondary);margin-bottom:10px;text-align:center;font-family:SFMono-Regular,Consolas,monospace;display:flex;justify-content:space-around;gap:8px;box-sizing:border-box;width:100%;">` +
                 `<div>Since Last Update Check: <span id="stat-since" style="color:var(--accent-color);font-weight:bold;">${sinceLastUpdate}</span></div>` +
                 `<div>Action Lookback Window: <span id="stat-lookback" style="color:var(--accent-color);font-weight:bold;">${lookbackVal}</span></div>` +
@@ -5498,8 +5261,13 @@ export function mountPanel(): PanelHandle {
           const hasPending = pendingCount > 0;
           const proposalsClass = hasPending ? " has-proposals" : "";
 
-          sectionHtml += `<details class="group-header${proposalsClass}" data-group="${esc(groupKey)}"${openAttr}>` +
-            `<summary><span>${esc(lbl)}${countBadge}${pendingBadge}</span></summary>` +
+          // Crystallized gets a distinct crystalline treatment (cyan/gem accent + 💎) so it reads as
+          // its own thing directly under MemorAID/Thoughts.
+          const isCrystal = lbl === "Crystallized";
+          const groupStyle = isCrystal ? ` style="--accent-color:#22d3ee; --accent-glow:rgba(34,211,238,0.18); border-left-color:#22d3ee !important;"` : "";
+          const lblHtml = isCrystal ? `💎 ${esc(lbl)}` : esc(lbl);
+          sectionHtml += `<details class="group-header${proposalsClass}" data-group="${esc(groupKey)}"${openAttr}${groupStyle}>` +
+            `<summary><span>${lblHtml}${countBadge}${pendingBadge}</span></summary>` +
             `<div style="padding:4px 8px 8px;">` +
               prefixHtml +
               renderChars(chars, isArchivedSection) +
@@ -5508,6 +5276,20 @@ export function mountPanel(): PanelHandle {
         }
         return sectionHtml;
       };
+
+      // --- MemorAID config section (pinned first; per-adventure character list) ---
+      if (memoraidEnabled) {
+        const mOpen = openGroups.has("memoraid-config") ? " open" : "";
+        html += `<details class="group-header" data-group="memoraid-config"${mOpen} style="--accent-color:#fbbf24; --accent-glow:rgba(245,158,11,0.15); border-left-color:#fbbf24 !important;">` +
+          `<summary><span>🧠 MemorAID</span></summary>` +
+          `<div style="padding:6px 8px 8px;">` +
+            `<div class="note" style="margin:0 0 6px;">Characters listed here get NPC thought tracking (MemorAID memory cards). One name per line.</div>` +
+            `<label style="font-weight:600;font-size:11px;color:var(--text-primary);">Important Characters</label>` +
+            `<textarea class="memoraid-chars-input input-dark" placeholder="e.g.\nAnna\nBob" style="width:100%;min-height:90px;margin:4px 0 8px;box-sizing:border-box;resize:vertical;">${esc(memoraidNames.join("\n"))}</textarea>` +
+            `<button class="memoraid-save-btn btn-primary" style="width:100%;">💾 Save Characters</button>` +
+          `</div>` +
+        `</details>`;
+      }
 
       // --- Active entries ---
       html += renderSection(activeGrouped, "active");
@@ -5531,143 +5313,65 @@ export function mountPanel(): PanelHandle {
       // --- Banners Container ---
       const bannersContainer = root.getElementById("location-banners-container");
       const locationCards = (state.cards ?? []).filter(
-        c => !c.deletedAt && c.type.toLowerCase() === "location"
+        c => !c.deletedAt && (c.type || "").toLowerCase() === "location"
       );
-      const pendingSuggestions = (state.locationSuggestions ?? []).filter(s => s.status === "pending");
 
       let bannersHtml = "";
       if (locationCards.length > 0) {
         const activeId = state.activeLocationId || "";
+        // Collapsible on mobile (screen real estate): default CLOSED at <=600px, OPEN on desktop;
+        // a user's explicit toggle survives re-renders (the whole banner is rebuilt every state
+        // refresh, so the previous <details> open state is captured first). The summary always shows
+        // the active location name, so the collapsed row still tells you where you are.
+        const prevAlm = root.getElementById("alm-banner") as HTMLDetailsElement | null;
+        const almOpen = prevAlm ? prevAlm.open : window.innerWidth > 600;
+        const activeName = activeId ? (locationCards.find(c => c.id === activeId)?.title || "?") : "";
         bannersHtml += `
-          <div class="location-manager-banner" style="background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15);border-radius:8px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;gap:6px;box-sizing:border-box;">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-              <span style="font-weight:700;color:var(--theme-text-color);font-size:11px;text-transform:uppercase;letter-spacing:0.03em;">Active Location Manager</span>
-              ${activeId ? `<button id="clear-active-location" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Clear</button>` : ""}
+          <details id="alm-banner" class="location-manager-banner"${almOpen ? " open" : ""} style="background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15);border-radius:8px;padding:8px 10px;margin-bottom:8px;box-sizing:border-box;">
+            <summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:6px;list-style:none;">
+              <span style="font-weight:700;color:var(--theme-text-color);font-size:11px;text-transform:uppercase;letter-spacing:0.03em;white-space:nowrap;">Active Location</span>
+              <span style="font-size:11px;color:${activeId ? "var(--accent-color)" : "var(--text-secondary)"};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;text-align:right;">${activeId ? esc(activeName) : "none"}</span>
+            </summary>
+            <div style="display:flex;gap:6px;align-items:center;margin-top:6px;">
+              <select id="active-location-select" style="margin:0;padding:4px 8px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);flex:1;min-width:0;">
+                <option value="" ${!activeId ? "selected" : ""}>-- Select Active Location --</option>
+                ${locationCards.map(c => `
+                  <option value="${esc(c.id)}"${c.id === activeId ? " selected" : ""}>${esc(c.title || c.keys)}</option>
+                `).join("")}
+              </select>
+              ${activeId ? `<button id="clear-active-location" class="btn-micro btn-micro--red" style="flex-shrink:0;">Clear</button>` : ""}
             </div>
-            <select id="active-location-select" style="margin:2px 0 0 0;padding:4px 8px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);width:100%;">
-              <option value="" ${!activeId ? "selected" : ""}>-- Select Active Location --</option>
-              ${locationCards.map(c => `
-                <option value="${esc(c.id)}"${c.id === activeId ? " selected" : ""}>${esc(c.title || c.keys)}</option>
-              `).join("")}
-            </select>
-          </div>
+          </details>
         `;
       }
 
-      if (pendingSuggestions.length > 0) {
-        const sug = pendingSuggestions[0]!;
-        const properNoun = sug.properNoun;
-        
-        const defaultTypes = new Set(["character", "location", "faction", "class", "race", "memory"]);
-        const existingCustomTypes = Array.from(new Set(
-          (state.cards ?? [])
-            .filter(c => c.type && !defaultTypes.has(c.type.toLowerCase()))
-            .map(c => c.type)
-        ));
-
-        bannersHtml += `
-          <div class="location-suggestion-banner" style="background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.20);border-radius:8px;padding:10px;margin-bottom:8px;display:flex;flex-direction:column;gap:8px;box-sizing:border-box;">
-            <div style="font-weight:700;color:var(--theme-text-color);font-size:11px;text-transform:uppercase;letter-spacing:0.03em;">New Noun Detected: "${esc(properNoun)}"</div>
-            <div class="note" style="margin:0;font-size:11.5px;line-height:1.4;">Detected in action: <em>"${esc(sug.actionText)}"</em></div>
-            
-            <div style="display:flex;flex-direction:column;gap:4px;">
-              <div style="display:flex;gap:6px;align-items:center;">
-                <label style="font-size:11px;color:var(--text-secondary);white-space:nowrap;">This is a:</label>
-                <select id="suggestion-type-select" style="padding:4px 6px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);flex-grow:1;">
-                  <option value="character">Character</option>
-                  <option value="location">Location</option>
-                  <option value="faction">Faction</option>
-                  <option value="class">Class</option>
-                  <option value="race">Race</option>
-                  <option value="custom">Custom...</option>
-                </select>
-                
-                <input type="text" id="suggestion-custom-type-input" list="existing-custom-types" placeholder="Enter type..." style="display:none;padding:4px 6px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);width:100px;box-sizing:border-box;" />
-                
-                <datalist id="existing-custom-types">
-                  ${existingCustomTypes.map(t => `<option value="${esc(t)}"></option>`).join("")}
-                </datalist>
-              </div>
-            </div>
-            
-            <div style="display:flex;gap:6px;margin-top:2px;">
-              <button id="sug-accept-btn" style="background:rgba(16,185,129,0.15);color:#34d399;border-color:rgba(16,185,129,0.3);padding:4px 10px;font-size:10.5px;border-radius:4px;border:1px solid;cursor:pointer;">Add Card</button>
-              <button id="sug-ignore-btn" style="background:rgba(239,68,68,0.15);color:#fca5a5;border-color:rgba(239,68,68,0.3);padding:4px 10px;font-size:10.5px;border-radius:4px;border:1px solid;cursor:pointer;">Ignore</button>
-            </div>
-
-            <div style="display:flex;gap:6px;align-items:center;margin-top:2px;border-top:1px solid rgba(255,255,255,0.06);padding-top:6px;">
-              <label style="font-size:11px;color:var(--text-secondary);white-space:nowrap;">Already tracked?</label>
-              <select id="sug-link-select" style="padding:4px 6px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);flex-grow:1;min-width:0;">${buildCardPickerOptions(state.cards)}</select>
-              <button id="sug-link-btn" style="background:rgba(59,130,246,0.15);color:#93c5fd;border-color:rgba(59,130,246,0.3);padding:4px 10px;font-size:10.5px;border-radius:4px;border:1px solid;cursor:pointer;white-space:nowrap;">Link</button>
-            </div>
-          </div>
-        `;
-      }
-
+      // The "New Noun Detected" suggestion UI moved to the Home tab (panel-home.ts, Phase A §2) —
+      // the banners container now carries ONLY the Active Location Manager.
       if (bannersContainer) {
         setSafeHTML(bannersContainer, bannersHtml);
-        
+
         const selectEl = root.getElementById("active-location-select") as HTMLSelectElement | null;
         selectEl?.addEventListener("change", () => {
           const cardId = selectEl.value || null;
-          if (setActiveLocationCb) {
-            setActiveLocationCb(cardId);
+          if (cbs.setActiveLocation) {
+            cbs.setActiveLocation(cardId);
           }
         });
-        
+
         const clearBtn = root.getElementById("clear-active-location");
         clearBtn?.addEventListener("click", () => {
-          if (setActiveLocationCb) {
-            setActiveLocationCb(null);
-          }
-        });
-
-        const sugTypeSelect = root.getElementById("suggestion-type-select") as HTMLSelectElement | null;
-        const sugCustomInput = root.getElementById("suggestion-custom-type-input") as HTMLInputElement | null;
-        
-        sugTypeSelect?.addEventListener("change", () => {
-          if (sugCustomInput) {
-            sugCustomInput.style.display = sugTypeSelect.value === "custom" ? "inline-block" : "none";
-            if (sugTypeSelect.value === "custom") {
-              sugCustomInput.focus();
-            }
-          }
-        });
-
-        const acceptBtn = root.getElementById("sug-accept-btn");
-        acceptBtn?.addEventListener("click", () => {
-          if (!pendingSuggestions.length) return;
-          const sug = pendingSuggestions[0]!;
-          let selectedType = sugTypeSelect?.value || "character";
-          if (selectedType === "custom") {
-            selectedType = sugCustomInput?.value.trim() || "custom";
-          }
-          if (respondToProperNounSuggestionCb) {
-            respondToProperNounSuggestionCb(sug.properNoun, true, selectedType);
-          }
-        });
-
-        const ignoreBtn = root.getElementById("sug-ignore-btn");
-        ignoreBtn?.addEventListener("click", () => {
-          if (!pendingSuggestions.length) return;
-          const sug = pendingSuggestions[0]!;
-          if (respondToProperNounSuggestionCb) {
-            respondToProperNounSuggestionCb(sug.properNoun, false, "character");
-          }
-        });
-
-        const linkSelect = root.getElementById("sug-link-select") as HTMLSelectElement | null;
-        const linkBtn = root.getElementById("sug-link-btn");
-        linkBtn?.addEventListener("click", () => {
-          if (!pendingSuggestions.length) return;
-          const cardId = linkSelect?.value || "";
-          if (!cardId) { showToast("Pick a card to link to", true); return; }
-          const sug = pendingSuggestions[0]!;
-          if (linkProperNounToCardCb) {
-            linkProperNounToCardCb(sug.properNoun, cardId);
+          if (cbs.setActiveLocation) {
+            cbs.setActiveLocation(null);
           }
         });
       }
+
+      // Home tab: pending-decisions queue (incl. the relocated noun suggestion) + recent proposals.
+      renderHome(root, state, {
+        respondToProperNounSuggestion: cbs.respondToProperNounSuggestion,
+        linkProperNounToCard: cbs.linkProperNounToCard,
+        proposalDecision: cbs.proposalDecision,
+      }, { esc, setSafeHTML, buildCardPickerOptions, showToast });
 
       // --- Proper Noun Log Editor ---
       const pnLogsList = root.getElementById("pn-logs-list");
@@ -5708,8 +5412,8 @@ export function mountPanel(): PanelHandle {
               const item = sel.closest(".pn-log-item");
               const pn = item?.getAttribute("data-pn") || "";
               const val = (sel as HTMLSelectElement).value; // "" = None, else the chosen card type
-              if (updateProperNounLogCb) {
-                updateProperNounLogCb(pn, val);
+              if (cbs.updateProperNounLog) {
+                cbs.updateProperNounLog(pn, val);
               }
             });
           });
@@ -5727,8 +5431,8 @@ export function mountPanel(): PanelHandle {
               const item = sel.closest(".pn-log-item");
               const pn = item?.getAttribute("data-pn") || "";
               const cardId = (sel as HTMLSelectElement).value;
-              if (cardId && linkProperNounToCardCb) {
-                linkProperNounToCardCb(pn, cardId);
+              if (cardId && cbs.linkProperNounToCard) {
+                cbs.linkProperNounToCard(pn, cardId);
               }
             });
           });
@@ -5737,8 +5441,8 @@ export function mountPanel(): PanelHandle {
             btn.addEventListener("click", () => {
               const item = btn.closest(".pn-log-item");
               const pn = item?.getAttribute("data-pn") || "";
-              if (deleteProperNounLogCb) {
-                deleteProperNounLogCb(pn);
+              if (cbs.deleteProperNounLog) {
+                cbs.deleteProperNounLog(pn);
               }
             });
           });
@@ -5752,35 +5456,91 @@ export function mountPanel(): PanelHandle {
         const newBtn = clearPnLogsBtn.cloneNode(true);
         clearPnLogsBtn.parentNode?.replaceChild(newBtn, clearPnLogsBtn);
         newBtn.addEventListener("click", () => {
-          if (clearProperNounLogsCb) {
-            clearProperNounLogsCb();
+          if (cbs.clearProperNounLogs) {
+            cbs.clearProperNounLogs();
           }
         });
       }
 
-      // Render AID memories timeline + unread badge (extracted; shared with updateMemories())
-      renderMemoriesSection(state);
+      const dbgContainer = root.getElementById("debug-container");
+      if (dbgContainer) {
+        dbgContainer.style.display = state.settings?.showDebug ? "block" : "none";
+        if (state.settings?.showDebug && lastDebug) {
+          setSafeHTML(dbgContainer, `<details open style="margin-top:8px;border-top:1px solid #333;padding-top:4px;"><summary style="cursor:pointer;color:#8a8;">🔍 Analyze debug</summary>` +
+            `<div class="note">characters: ${esc((lastDebug.characters || []).join(", "))}</div>` +
+            `<div class="note">narrative chars: ${esc(String(lastDebug.narrativeChars))}</div>` +
+            `<div class="note">narrative tail:</div><div>${esc(lastDebug.narrativeTail || "")}</div>` +
+            `<div class="note">raw response (truncated):</div><div>${esc(lastDebug.rawSnippet || "")}</div></details>`);
+        } else if (!state.settings?.showDebug) {
+          dbgContainer.textContent = "";
+        }
+      }
 
-      // Handle Progression Tracker proposals badge
-      const pendingCount = state.versions.filter((v) => v.status === "pending").length;
-      const proposalsBadge = root.getElementById("tracker-proposals-badge");
-      if (proposalsBadge) {
-        if (activeTabId === "main-tab-tracker") {
-          proposalsBadge.style.display = "none";
-          proposalsBadge.className = "";
-        } else if (pendingCount > 0) {
-          proposalsBadge.textContent = `+${pendingCount}`;
-          proposalsBadge.style.display = "inline-block";
-          proposalsBadge.className = "badge-new-proposals";
+      // Render Memory Bank timeline + unread badge (extracted; shared with updateMemories())
+      renderMemoriesSection(state);
+      // Render the Memory Bank → NPC sub-pane (per-NPC Knows editor + memory-bank viewer).
+      renderNpcMemoryBank(state);
+
+      // Render Living Characters section
+      renderLivingCharactersSection(state);
+
+      // Home pending-decisions badge: proposals + noun suggestions (Mobile Rethink Phase A §1/§4).
+      const pendingTotal = pendingDecisionsCount(state.locationSuggestions, state.versions);
+      const homeBadge = root.getElementById("home-pending-badge");
+      if (homeBadge) {
+        if (activeTabId === "main-tab-home" || pendingTotal === 0) {
+          homeBadge.style.display = "none";
+          homeBadge.className = "";
         } else {
-          proposalsBadge.style.display = "none";
-          proposalsBadge.className = "";
+          homeBadge.textContent = `+${pendingTotal}`;
+          homeBadge.style.display = "inline-block";
+          homeBadge.className = "badge-new-proposals";
         }
       }
 
       // Sync minimized toggle button dot
       updateMinState();
     },
+    clearCrystallizedSchemaCache: (cardId) => {
+      crystallizedSchemaCache.delete(cardId);
+      // Distillation rewrites schema AND preferences in the same state, so drop both caches together —
+      // otherwise the Preferences editor would keep showing the pre-distillation snapshot.
+      crystallizedPreferencesCache.delete(cardId);
+    },
+    refreshNpcMemory: (charName, generated, remaining, done, block) => {
+      // Surgically splice the new block in (no full re-render → no flicker/scroll-jump). Fall back to
+      // a full render only if the list DOM isn't present yet.
+      if (block && !insertNpcMemBlock(charName, block as NpcMemBlock)) {
+        npcMemoryCache.delete(charName.toLowerCase());
+        if (lastState) renderNpcMemoryBank(lastState);
+      }
+      const setBtn = (text: string | null) => {
+        root.querySelectorAll(".backfill-npc-memories-btn").forEach((b) => {
+          if (b.getAttribute("data-char-name") === charName) {
+            (b as HTMLButtonElement).disabled = !!text;
+            b.textContent = text ?? "Backfill memories";
+          }
+        });
+      };
+      if (npcBackfillWatchdog) { clearTimeout(npcBackfillWatchdog); npcBackfillWatchdog = null; }
+      if (done) {
+        setBtn(null); // reset without a re-render
+        if (typeof generated === "number") {
+          panelHandle.showToast(remaining && remaining > 0
+            ? `Backfilled ${generated} — ${remaining} left, click again to continue.`
+            : `Backfilled ${generated} memories — ${charName} up to date.`);
+        }
+        return;
+      }
+      if (typeof generated === "number") {
+        setBtn(remaining && remaining > 0 ? `⏳ ${generated} done, ${remaining} left…` : `⏳ ${generated}…`);
+      }
+      npcBackfillWatchdog = setTimeout(() => {
+        npcBackfillWatchdog = null;
+        setBtn(null);
+        panelHandle.showToast(`Backfill for ${charName} stopped responding — refresh to see what landed.`, true);
+      }, 60000);
+    },
   };
-  return api;
+  return panelHandle;
 }

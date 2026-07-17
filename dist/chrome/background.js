@@ -47,9 +47,16 @@ FORCING FUNCTION: You MUST account for EVERY character in \`characters\`. In \`p
     );
     return { system, user };
   }
+  function normalizeSuggestedTriggers(v2) {
+    if (v2 == null) return void 0;
+    if (typeof v2 === "string") return v2;
+    if (Array.isArray(v2)) return v2.map((t3) => String(t3).trim()).filter(Boolean).join(", ");
+    return String(v2);
+  }
   function triggerWarning(p5) {
-    if (!p5.suggestedTriggers) return null;
-    const tokens = p5.suggestedTriggers.split(",").map((t3) => t3.trim().toLowerCase()).filter(Boolean);
+    const triggers = normalizeSuggestedTriggers(p5.suggestedTriggers);
+    if (!triggers) return null;
+    const tokens = triggers.split(",").map((t3) => t3.trim().toLowerCase()).filter(Boolean);
     for (const t3 of tokens) {
       if (t3.length <= 2 || COMMON_WORDS.includes(t3)) {
         return `Trigger "${t3}" for ${p5.name} may over-fire (too short or a common word).`;
@@ -77,7 +84,7 @@ FORCING FUNCTION: You MUST account for EVERY character in \`characters\`. In \`p
         continue;
       }
       const source = hit.source;
-      const p5 = { ...raw, name: hit.name, source };
+      const p5 = { ...raw, name: hit.name, source, suggestedTriggers: normalizeSuggestedTriggers(raw.suggestedTriggers) };
       const isProtagonist = protagonistName && p5.name.trim().toLowerCase() === protagonistName.trim().toLowerCase();
       const limit = isProtagonist ? 3500 : 2e3;
       if (p5.newEntry.length > limit) {
@@ -154,6 +161,7 @@ FORCING FUNCTION: You MUST account for EVERY character in \`characters\`. In \`p
     defaultCommandForType: () => defaultCommandForType,
     hasTitleToken: () => hasTitleToken,
     parseProtagonistName: () => parseProtagonistName,
+    pickCommandTemplate: () => pickCommandTemplate,
     resolveCommand: () => resolveCommand
   });
   function defaultCommandForType(type) {
@@ -164,6 +172,9 @@ FORCING FUNCTION: You MUST account for EVERY character in \`characters\`. In \`p
   }
   function resolveCommand(template, protagonist) {
     return template.replace(/\{protagonist\}/g, protagonist);
+  }
+  function pickCommandTemplate(stored, fallback2) {
+    return stored && hasTitleToken(stored) ? stored : fallback2;
   }
   function parseProtagonistName(memory) {
     if (!memory) return null;
@@ -176,42 +187,52 @@ FORCING FUNCTION: You MUST account for EVERY character in \`characters\`. In \`p
       "use strict";
       init_engine();
       DEFAULT_CARD_COMMANDS = {
-        character: `Generate an information card entry for {{title}} in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. Update based strictly on concrete narrative changes, preserving existing labeled fields on their own lines. Keep it high-density and under 600 characters total to prevent server truncation. Focus on psychological realism by structuring the entry into these three fields:
+        character: `Generate an information card entry for {{title}} in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. The entry is injected into the story WITHOUT its card title, so it MUST self-identify: begin with the field Name: {{title}} on its own first line, then a Type: line stating what {{title}} is (role, species, or station). Then continue with these labeled fields, each on its own line:
 Appearance: 1-2 sentences on enduring physical features and style.
 Complexity (Paradox & Filters): 1-2 sentences on their central internal contradiction/repressed vulnerability and how they screen reality.
-Dynamic ({protagonist}): 1-2 sentences on their psychological friction or evolving attitude toward {protagonist}.
-[CRITICAL RELATIONSHIP PACING DIRECTIVE] Enforce realistic psychological inertia in "Dynamic ({protagonist})": relationships cannot leap from strangers or casual acquaintances to deep intimacy, unearned trust, or intense codependency\u2014nor to absolute hatred, permanent enmity, or extreme paranoia\u2014within a handful of turns. Transition updates must capture the messy, realistic friction of changes (e.g. emotional whiplash, caution, or cognitive dissonance) and show progressive organic softening or hardening, rather than sudden extreme swings or total psychological submission. Focus on the immediate realistic increment of their interaction.
-Forbid narrative fluff, scene recaps, and empty lines. Treat this as a high-density roleplay guide, not a story timeline.`,
-        class: `Generate an information card entry for {{title}}, a character class or archetype in the D&D/MMO sense, in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. Update based strictly on concrete narrative changes, preserving existing labeled fields (e.g., Role:, Abilities:, Progression:) on their own lines and revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Focus on the class's defining role, signature abilities and skills, mechanics, and how it has progressed or changed \u2014 not story events or scenes. Forbid narrative fluff, dialogue summaries, scene recaps, transient details, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
-        race: `Generate an information card entry for {{title}}, a species or race, in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. Update based strictly on concrete narrative changes, preserving existing labeled fields (e.g., Traits:, Culture:, Lore:) on their own lines and revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Focus on innate traits, culture, and lore \u2014 what the story reveals about the group as a whole \u2014 not individual scenes or transient events. Forbid narrative fluff, dialogue summaries, scene recaps, transient details, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
+Goals: 1-2 sentences on their primary desires, motivations, and what they seek or fear in the current situation.
+Update based strictly on concrete narrative changes, preserving existing labeled fields on their own lines. Keep it high-density and under 600 characters total to prevent server truncation. Forbid narrative fluff, scene recaps, and empty lines. Treat this as a high-density roleplay guide, not a story timeline.`,
+        class: `Generate an information card entry for {{title}}, a character class or archetype in the D&D/MMO sense, in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. The entry is injected into the story WITHOUT its card title, so it MUST self-identify: begin with the field Name: {{title}} on its own first line, then a Type: line (e.g. Type: Class / Archetype). Then continue with labeled fields (e.g., Role:, Abilities:, Progression:) on their own lines, revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Focus on the class's defining role, signature abilities and skills, mechanics, and how it has progressed or changed \u2014 not story events or scenes. Forbid narrative fluff, dialogue summaries, scene recaps, transient details, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
+        race: `Generate an information card entry for {{title}}, a species or race, in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. The entry is injected into the story WITHOUT its card title, so it MUST self-identify: begin with the field Name: {{title}} on its own first line, then a Type: line (e.g. Type: Species / Race). Then continue with labeled fields (e.g., Traits:, Culture:, Lore:) on their own lines, revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Focus on innate traits, culture, and lore \u2014 what the story reveals about the group as a whole \u2014 not individual scenes or transient events. Forbid narrative fluff, dialogue summaries, scene recaps, transient details, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
         location: `Generate an information card entry for {{title}}, a place or location, in an interactive, second-person, present-tense story. Write the entry strictly in the third person about {{title}}: never use "you" or "your". The entry MUST begin with the field Name: {{title}} on its own first line \u2014 the entry text is injected into the story without its card title, so it must self-identify which place it describes. Then continue with the fields Type:, Located In:, and Ownership:. The Located In: field is MANDATORY and must trace the spatial containment hierarchy from the immediate parent outward to the largest relevant container (room > building/structure > settlement/town > region/realm or border), separated by " > ", in the exact form: Located In: [immediate parent structure] > [settlement or town] > [region, realm, or border]. Always reuse the exact names of places already established in the story or on other location cards so hierarchies stay consistent and their triggers fire; if a parent place is not yet named, state the most specific container the narrative supports rather than omitting the field. Then continue with these labeled fields, each on its own line, without markdown or empty lines:
 Description: what the place IS and its enduring strategic or narrative purpose \u2014 what it is suited for and why it matters.
 Inhabitants: who lives in, works in, or frequents the place (peoples, professions, factions) and any enduring social dynamic among them (e.g., an uneasy truce).
 Atmosphere: 1-2 sentences on the place's lasting character and how it is experienced, including defining contrasts (e.g., intimidating from outside but warm and livable within).
 Features: permanent structural features and layout.
 Notable Items: specific permanent contents. You must preserve the literal names of specific books, exact instrument models, and unique trophies from the source text; never generalize or substitute them with generic placeholders. Keep the entry high-density and well under the absolute emergency ceiling of 2,000 characters; do not pad. Prune transient scene recaps, story events, and redundant decorative wording, but PRESERVE the enduring flavor that defines the place \u2014 its atmosphere, social fabric, and narrative role are required content, not fluff. The entry must serve as both a spatial and a narrative guide for the AI engine.`,
-        faction: `Generate an information card entry for {{title}}, a group, organization, or faction, in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. Update based strictly on concrete narrative changes, preserving existing labeled fields (e.g., Goals:, Membership:, Leadership:, Status:) on their own lines and revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Focus on the faction's goals, membership, leadership, alliances and rivalries, and shifts in power or status \u2014 not individual scenes. Forbid narrative fluff, dialogue summaries, scene recaps, transient details, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
-        custom: `Generate an information card entry for {{title}} in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant to {{title}}. Update based strictly on concrete narrative changes, preserving existing labeled fields on their own lines and revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Track whatever is most salient and enduring for this kind of entry as the story reveals it; capture lasting state, not transient scenes. Forbid narrative fluff, dialogue summaries, scene recaps, transient settings, item logs, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
-        memoraid: `Generate {{title}}'s immediate, first-person thoughts as a short, high-impact bulleted list in their own distinct voice. Focus heavily on their specific background, social standing, and behavioral defense mechanisms. For romantic, high-tension, or attraction-based dynamics, express interest through psychological, verbal, or tactical engagement rather than defaulting to physical proximity. Characters must maintain realistic personal space and adhere to their internal boundaries unless a physical escalation is explicitly earned by the immediate narrative context.
+        faction: `Generate an information card entry for {{title}}, a group, organization, or faction, in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. The entry is injected into the story WITHOUT its card title, so it MUST self-identify: begin with the field Name: {{title}} on its own first line, then a Type: line stating what kind of group it is (e.g. Type: Mercenary company). Then continue with labeled fields (e.g., Goals:, Membership:, Leadership:, Status:) on their own lines, revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Focus on the faction's goals, membership, leadership, alliances and rivalries, and shifts in power or status \u2014 not individual scenes. Forbid narrative fluff, dialogue summaries, scene recaps, transient details, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
+        custom: `Generate an information card entry for {{title}} in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant to {{title}}. The entry is injected into the story WITHOUT its card title, so it MUST self-identify: begin with the field Name: {{title}} on its own first line, then a Type: line stating what kind of thing {{title}} is. Then continue with labeled fields capturing whatever is most salient and enduring for this kind of entry, each on its own line, revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Capture lasting state, not transient scenes. Forbid narrative fluff, dialogue summaries, scene recaps, transient settings, item logs, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
+        memoraid: `Generate {{title}}'s immediate, first-person interiority for the current moment, written as {{title}} living their own story (the player character {protagonist} is just one more person in {{title}}'s world). First decide whether {{title}} is actually present in the current scene: if {{title}} has been absent for a while, or is only mentioned by others without being there, output exactly OFFSTAGE and nothing else. Otherwise, produce EXACTLY two labeled bullets in {{title}}'s distinct voice:
+- Intake: [1 plain sentence naming what {{title}} actually notices right now \u2014 concrete and specific, in ordinary words. State the observation flatly; do NOT reach for imagery, simile, or literary phrasing, and this is not a mood piece. It is filtered by what THIS person would clock or ignore, but it is still just an observation.]
+- Thought: [EXACTLY 1 sentence of unresolved internal reaction \u2014 a reflex, a gripe, an itch of doubt, a mundane aside, a half-thought, or something slightly off-topic. It must NOT resolve, conclude, or tie itself up: forbid the "\u2026, but\u2026" insight-turn that lands on a tidy realization, forbid summarizing {{title}}'s worldview or their feelings about a person, and forbid a metaphor standing in for an emotion. Leave it partial and specific \u2014 the kind of thing a person half-thinks and then moves on from.]
+For romantic, high-tension, or attraction-based dynamics, let interest surface through what {{title}} notices and how they react rather than physical proximity; keep realistic personal space and boundaries unless a physical escalation is earned by the immediate narrative. Do not use markdown, headers besides the two labels, or empty lines. Wrap the entire response in square brackets: [
+- Intake: ...
+- Thought: ...
+].`,
+        backgroundCharacter: `Generate a COMPACT background-character shell card for {{title}} in an interactive, second-person, present-tense story where "you" is the player character {protagonist}. Write in third person about {{title}}; never use "you"/"your", and mention {protagonist} only if directly involved. The entry is injected without its title, so it MUST self-identify. Output EXACTLY these five labeled lines, each on its own line, NO markdown, NO empty lines, and NO other fields:
+Name: the character's first and last name only \u2014 strip any scenario, event, or venue suffix from the title (e.g. "Jane Doe - Winter Formal" becomes "Jane Doe").
+Appearance: 1-2 sentences of distinct, memorable physical anchors \u2014 build, features, signature style.
+Personality: a single comma-separated list of 4-6 vivid descriptors mixing GOOD and BAD traits; never use the word "analytical".
+Quirks: one sentence of concrete, action-usable habits, tells, or nervous mannerisms.
+Voice: one sentence on how they speak \u2014 tone, pace, and speech style.
+This is a lean behavioral shell for the AI to roleplay from: capture only the outward mask. Do NOT include a Type, Psychology, Worldview, Goals, backstory, relationships, or scene recaps. Keep the whole entry well under 600 characters; do not pad.`,
+        crystallized: `You are distilling long-term memories for {{title}} in a story where the player character is named {protagonist}. Given the recent story actions and thoughts (the buffer), the current permanent SCHEMA (Section I), and a list of dying/fading memories (dying nodes), output a revised card in the following format:
 
-CRITICAL FOCUS DIRECTIVE: Generate {{title}}'s reaction strictly and exclusively to the VERY LATEST action shown in the context. Ignore earlier events and characters who have exited the scene. If {{title}} is not present, mentioned, or active in the latest action, output exactly [none] and nothing else.
+### I. SCHEMA
+Write a compact, evolving bulleted list of permanent semantic knowledge, one block per subject (facts do not fade). When the buffer or a fading memory reveals an enduring fact you have no subject for yet, ADD a new subject line. When it sharpens something you already know, rewrite that subject's line in place. Do not delete active subjects.
 
-OUTPUT: Write EXACTLY three lines, wrapped in square brackets, formatted like the example below \u2014 a "- Intake:" line, a "- Thought:" line, and a "- Action:" line. Each line is ONE concrete sentence written in {{title}}'s own first-person voice reacting to the latest action (the player character is named {protagonist}), grounded only in facts from the provided context.
+### II. NEW NODES
+Provide 1-2 new vivid, first-person episodic snapshot memories (text only, prefix each with "- Snapshot: ") representing the most vivid/important moments from the recent buffer.
 
-Example of the required format (illustrative only \u2014 write your OWN content; do NOT reuse these words or facts):
-[
-- Intake: She slides the sealed letter across the table to me without a word.
-- Thought: This is a test of my discretion as much as it is an errand.
-- Action: I take it, tuck it into my sleeve, and hold her gaze evenly.
-]
-
-HARD RULES (weaker models break these \u2014 do not):
-- Write real, specific content \u2014 NOT a description of what each line should contain \u2014 and do NOT copy the example.
-- You are writing three momentary thoughts, NOT a character profile. NEVER output a profile field or any label other than "- Intake:", "- Thought:", "- Action:" \u2014 no "Appearance:", "Personality:", "Psychology:", "Worldview:", "Dynamic:", "Character:", "Goal:", "Latest Action:", or "Stimulus:".
-- Base every line ONLY on facts in the provided context; do not invent events, objects, or actions.
-- Do NOT restate, summarize, plan, or narrate the action, the scene, the character, or your task.
-- Do NOT use markdown, asterisks (*), bold, headings, indentation, or blank lines. Each line starts with "- ".
-- Output nothing before the opening "[" or after the closing "]".`
+Never output vibrancy scores or node IDs. Output only the SCHEMA and the NEW NODES sections.`,
+        crystallizedSchema: `Update {{title}}'s knowledge of the OTHER people, places, and things in their world (including the player character {protagonist}, who is simply one more person in the story). Subjects are not only significant people: also track the topics, foods, media, activities, and objects {{title}} has formed a genuine opinion, preference, or attachment to \u2014 the everyday things they would actually remember and care about (a film they love, a food they hate, a pet theory), never an exhaustive catalog of whatever happens to be present. This card IS {{title}}'s own memory, so NEVER add a "- [{{title}}]" line about {{title}} themselves. For each subject, write ONE concise line combining the key facts AND how {{title}} currently FEELS about them \u2014 factual + emotional, in {{title}}'s first-person voice, one sentence (e.g. "- [Smoke] The stranger who stopped an attack and asked nothing; I feel unexpectedly safe with him."). As the story develops a subject, REWRITE that subject's single line in place to reflect what they have become \u2014 never add a second line for the same subject. Every line MUST follow the EXACT form "- [Subject] one concise factual+emotional sentence". Format exactly as:
+### I. SCHEMA
+- [Subject] ...
+- [Subject] ...
+Output only the SCHEMA section.`,
+        crystallizedNodes: 'You are {{title}}. This is your story, and you live it as its main character. The player character is {protagonist}. The context lists "Your current Vivid Memories" (it may be empty) followed by the recent story actions and thoughts. Reply with your COMPLETE updated list of Vivid Memories: ONE concise first-person line per distinct scene \u2014 the emotional heart of the moment, feeling over factual detail, each under 140 characters. MERGE lines that describe the same scene into a single refined line; if recent events continue a scene you already remember, refine its line instead of adding another. Keep lines still vivid to you, drop what has faded, add a line for each genuinely new scene. Maximum 7 lines. Format each on its own line prefixed with "- Snapshot: ". Output nothing else.',
+        crystallizedOutlook: `You are {{title}}. This is your story, and you live it as its main character. The player character is {protagonist}. The context lists "Your current Beliefs" (it may be empty) followed by the recent story actions and thoughts. Reply with your COMPLETE updated list of beliefs: first-person, GENERALIZED views of yourself or the world \u2014 never about a specific named person (those belong in your knowledge of them, not here). Re-state (refined if needed) every belief that still holds, drop what no longer holds, and add at most 2 new ones only if recent events genuinely shifted something. Maximum 5. Format a first line reading exactly "Beliefs:" followed by each belief on its own line prefixed with "- " (e.g. "- I don't have to perform to be safe.").`,
+        crystallizedPreferences: `You are {{title}}. This is your story, and you live it as its main character. The player character is {protagonist}. The context lists "Your current Preferences" (it may be empty) followed by the recent story actions and thoughts. Reply with your COMPLETE updated list of concrete personal preferences and quirks \u2014 the ordinary TEXTURE of a person: tastes (foods, drinks, films, music, styles), habits, pet peeves, little rituals, and small opinions about particular things. Each line is first-person and CONCRETE (e.g. "- I always order dessert even when I am full.", "- The first fifteen minutes of a surrealist film are the only part I love.", "- I can't stand it when someone tries to fix a problem I only wanted to vent about."). Re-state (refined if needed) every preference that still fits, drop any that no longer do, and add at most 2 new ones only if recent events revealed them. FORBIDDEN: emotional themes, generalized life-philosophy, feelings ABOUT a specific named person, and anything about your relationships, trauma, or personal growth \u2014 those belong in other layers, NOT here. Keep them small, specific, and mundane. Maximum 6. Format a first line reading exactly "Preferences:" followed by each preference on its own line prefixed with "- ".`
       };
       DEFAULT_FORMATTING_MODE = "squareBrackets";
     }
@@ -20032,7 +20053,7 @@ HARD RULES (weaker models break these \u2014 do not):
   var _dbPromise = null;
   function openAidDb() {
     if (_dbPromise) return _dbPromise;
-    _dbPromise = openDB("aid-tracker", 4, {
+    _dbPromise = openDB("aid-tracker", 10, {
       async upgrade(db, oldVersion, _newVersion, tx) {
         if (!db.objectStoreNames.contains("adventures")) {
           db.createObjectStore("adventures", { keyPath: "shortId" });
@@ -20065,13 +20086,39 @@ HARD RULES (weaker models break these \u2014 do not):
           const s3 = db.createObjectStore("globalAssets", { keyPath: "id" });
           s3.createIndex("by-type", "type");
         }
+        if (!db.objectStoreNames.contains("crystallizedLog")) {
+          const s3 = db.createObjectStore("crystallizedLog", { keyPath: "id" });
+          s3.createIndex("by-shortId", "shortId");
+          s3.createIndex("by-char", ["shortId", "characterKey"]);
+        }
+        if (!db.objectStoreNames.contains("injectionLog")) {
+          const s3 = db.createObjectStore("injectionLog", { keyPath: "id" });
+          s3.createIndex("by-shortId", "shortId");
+        }
+        if (!db.objectStoreNames.contains("crystallizedState")) {
+          const s3 = db.createObjectStore("crystallizedState", { keyPath: ["shortId", "characterKey"] });
+          s3.createIndex("by-shortId", "shortId");
+        }
+        if (!db.objectStoreNames.contains("crystallizedArchive")) {
+          const s3 = db.createObjectStore("crystallizedArchive", { keyPath: "id" });
+          s3.createIndex("by-shortId", "shortId");
+        }
+        if (!db.objectStoreNames.contains("phenotype")) {
+          const s3 = db.createObjectStore("phenotype", { keyPath: ["shortId", "characterKey"] });
+          s3.createIndex("by-shortId", "shortId");
+        }
+        if (!db.objectStoreNames.contains("npcMemoryBank")) {
+          const s3 = db.createObjectStore("npcMemoryBank", { keyPath: ["shortId", "characterKey", "blockId"] });
+          s3.createIndex("by-shortId", "shortId");
+          s3.createIndex("by-char", ["shortId", "characterKey"]);
+        }
       }
     });
     return _dbPromise;
   }
 
   // src/storage/repo.ts
-  var BACKUP_STORES = ["adventures", "actions", "operations", "cards", "versions", "settings", "globalAssets"];
+  var BACKUP_STORES = ["adventures", "actions", "operations", "cards", "versions", "settings", "globalAssets", "crystallizedLog", "injectionLog", "crystallizedState", "crystallizedArchive", "phenotype", "npcMemoryBank"];
   function byCreatedAt(a2, b) {
     const ta = a2.createdAt ?? "", tb = b.createdAt ?? "";
     if (ta !== tb) return ta < tb ? -1 : 1;
@@ -20142,7 +20189,7 @@ HARD RULES (weaker models break these \u2014 do not):
     }
     async deleteAdventure(shortId) {
       const db = await openAidDb();
-      const tx = db.transaction(["adventures", "actions", "cards", "versions"], "readwrite");
+      const tx = db.transaction(["adventures", "actions", "cards", "versions", "crystallizedLog", "injectionLog", "crystallizedState", "crystallizedArchive", "phenotype", "npcMemoryBank"], "readwrite");
       await tx.objectStore("adventures").delete(shortId);
       const actionKeys = await tx.objectStore("actions").index("by-shortId").getAllKeys(shortId);
       for (const key of actionKeys) {
@@ -20156,6 +20203,18 @@ HARD RULES (weaker models break these \u2014 do not):
       for (const key of versionKeys) {
         await tx.objectStore("versions").delete(key);
       }
+      const logKeys = await tx.objectStore("crystallizedLog").index("by-shortId").getAllKeys(shortId);
+      for (const key of logKeys) await tx.objectStore("crystallizedLog").delete(key);
+      const injKeys = await tx.objectStore("injectionLog").index("by-shortId").getAllKeys(shortId);
+      for (const key of injKeys) await tx.objectStore("injectionLog").delete(key);
+      const csKeys = await tx.objectStore("crystallizedState").index("by-shortId").getAllKeys(shortId);
+      for (const key of csKeys) await tx.objectStore("crystallizedState").delete(key);
+      const caKeys = await tx.objectStore("crystallizedArchive").index("by-shortId").getAllKeys(shortId);
+      for (const key of caKeys) await tx.objectStore("crystallizedArchive").delete(key);
+      const phKeys = await tx.objectStore("phenotype").index("by-shortId").getAllKeys(shortId);
+      for (const key of phKeys) await tx.objectStore("phenotype").delete(key);
+      const nmbKeys = await tx.objectStore("npcMemoryBank").index("by-shortId").getAllKeys(shortId);
+      for (const key of nmbKeys) await tx.objectStore("npcMemoryBank").delete(key);
       await tx.done;
     }
     async putActions(shortId, actions) {
@@ -20281,6 +20340,14 @@ HARD RULES (weaker models break these \u2014 do not):
         console.log("[AID repo] Migrating autoRegenerateNativeMemories ->", settings.autoRegenerateMemoryBankEntry, "(autoRegenerateMemoryBankEntry).");
         await this.setSettings(settings);
       }
+      if (settings.manualMode !== void 0) {
+        if (settings.enableAutomaticUpdates === void 0) {
+          settings.enableAutomaticUpdates = settings.manualMode === false;
+        }
+        delete settings.manualMode;
+        console.log("[AID repo] Migrating manualMode ->", settings.enableAutomaticUpdates, "(enableAutomaticUpdates).");
+        await this.setSettings(settings);
+      }
       if (settings.cardCommands?.memoraid) {
         const HISTORICAL_MEMORAID_DEFAULTS = [
           "Generate thoughts for {{title}} in the first-person perspective, capturing their subjective reactions and internal feelings about recent events, especially in relation to {protagonist}. Format the output strictly as a bulleted list inside square brackets, e.g. [\n- thought\n- thought\n]. Write exactly how {{title}} would think in this moment, using their profile and voice. Keep it under 300 characters total.",
@@ -20329,10 +20396,32 @@ Example of a correctly formatted response (illustrative only \u2014 do NOT reuse
 - Intake: She slides the sealed letter across the table to me without a word.
 - Thought: This is a test of my discretion as much as it is an errand.
 - Action: I take it, tuck it into my sleeve, and hold her gaze evenly.
-]`
+]`,
+          // Prior public-fork default: worked-example + hard-rules 3-line Intake/Thought/Action block
+          // (superseded by the two-bullet Intake/Thought + OFFSTAGE lens/monologue template).
+          `Generate {{title}}'s immediate, first-person thoughts as a short, high-impact bulleted list in their own distinct voice. Focus heavily on their specific background, social standing, and behavioral defense mechanisms. For romantic, high-tension, or attraction-based dynamics, express interest through psychological, verbal, or tactical engagement rather than defaulting to physical proximity. Characters must maintain realistic personal space and adhere to their internal boundaries unless a physical escalation is explicitly earned by the immediate narrative context.
+
+CRITICAL FOCUS DIRECTIVE: Generate {{title}}'s reaction strictly and exclusively to the VERY LATEST action shown in the context. Ignore earlier events and characters who have exited the scene. If {{title}} is not present, mentioned, or active in the latest action, output exactly [none] and nothing else.
+
+OUTPUT: Write EXACTLY three lines, wrapped in square brackets, formatted like the example below \u2014 a "- Intake:" line, a "- Thought:" line, and a "- Action:" line. Each line is ONE concrete sentence written in {{title}}'s own first-person voice reacting to the latest action (the player character is named {protagonist}), grounded only in facts from the provided context.
+
+Example of the required format (illustrative only \u2014 write your OWN content; do NOT reuse these words or facts):
+[
+- Intake: She slides the sealed letter across the table to me without a word.
+- Thought: This is a test of my discretion as much as it is an errand.
+- Action: I take it, tuck it into my sleeve, and hold her gaze evenly.
+]
+
+HARD RULES (weaker models break these \u2014 do not):
+- Write real, specific content \u2014 NOT a description of what each line should contain \u2014 and do NOT copy the example.
+- You are writing three momentary thoughts, NOT a character profile. NEVER output a profile field or any label other than "- Intake:", "- Thought:", "- Action:" \u2014 no "Appearance:", "Personality:", "Psychology:", "Worldview:", "Dynamic:", "Character:", "Goal:", "Latest Action:", or "Stimulus:".
+- Base every line ONLY on facts in the provided context; do not invent events, objects, or actions.
+- Do NOT restate, summarize, plan, or narrate the action, the scene, the character, or your task.
+- Do NOT use markdown, asterisks (*), bold, headings, indentation, or blank lines. Each line starts with "- ".
+- Output nothing before the opening "[" or after the closing "]".`
         ];
         if (HISTORICAL_MEMORAID_DEFAULTS.includes(settings.cardCommands.memoraid)) {
-          console.log("[AID repo] Migrating old memoraid card command to the new Intake-Thought-Action template.");
+          console.log("[AID repo] Migrating old memoraid card command to the two-bullet (Intake/Thought + OFFSTAGE) template.");
           const { DEFAULT_CARD_COMMANDS: DEFAULT_CARD_COMMANDS2 } = await Promise.resolve().then(() => (init_card_command(), card_command_exports));
           settings.cardCommands.memoraid = DEFAULT_CARD_COMMANDS2.memoraid;
           await this.setSettings(settings);
@@ -20428,14 +20517,130 @@ Notable Items: specific permanent contents. You must preserve the literal names 
       const db = await openAidDb();
       await db.delete("globalAssets", id);
     }
+    /** Force-archive (soft-delete) specific local cards by id, e.g. tombstoned Life cards the server
+     *  still lists. Idempotent: already-deleted cards keep their original deletedAt. */
+    async markCardsDeleted(shortId, ids) {
+      if (!ids.length) return;
+      const db = await openAidDb();
+      const want = new Set(ids);
+      const tx = db.transaction("cards", "readwrite");
+      let cursor = await tx.store.index("by-shortId").openCursor(shortId);
+      while (cursor) {
+        const c2 = cursor.value;
+        if (want.has(c2.id) && c2.deletedAt == null) {
+          await cursor.update({ ...c2, deletedAt: (/* @__PURE__ */ new Date()).toISOString() });
+        }
+        cursor = await cursor.continue();
+      }
+      await tx.done;
+    }
+    /** Hard-delete soft-deleted mirror rows that duplicate a PRESENT live card by (title, type) under a
+     *  different id — leftover rows from an id divergence that would otherwise mask the live card in the
+     *  roster. Genuine archives (no live same-title twin) and active rows are left untouched. Versions
+     *  are keyed by cardId separately and are not affected. */
+    async purgeStaleDeletedDuplicates(shortId, live) {
+      const norm = (s3) => String(s3 || "").trim().toLowerCase();
+      const key = (title, type) => `${norm(title)}::${norm(type) || "character"}`;
+      const liveByKey = /* @__PURE__ */ new Map();
+      for (const c2 of live) {
+        const t3 = norm(c2.title);
+        if (t3) liveByKey.set(key(c2.title, c2.type), c2.id);
+      }
+      const db = await openAidDb();
+      const tx = db.transaction("cards", "readwrite");
+      let cursor = await tx.store.index("by-shortId").openCursor(shortId);
+      while (cursor) {
+        const c2 = cursor.value;
+        if (c2.deletedAt) {
+          const liveId = liveByKey.get(key(c2.title, c2.type));
+          if (liveId && liveId !== c2.id) await cursor.delete();
+        }
+        cursor = await cursor.continue();
+      }
+      await tx.done;
+    }
+    // ── Crystallized / Living Characters / phenotype / NPC memory stores ──
+    async appendVividMemories(entries) {
+      const db = await openAidDb();
+      const tx = db.transaction("crystallizedLog", "readwrite");
+      for (const entry of entries) {
+        await tx.store.put(entry);
+      }
+      await tx.done;
+    }
+    async getVividMemoryLog(shortId, characterKey) {
+      const db = await openAidDb();
+      if (characterKey) {
+        return db.getAllFromIndex("crystallizedLog", "by-char", [shortId, characterKey]);
+      } else {
+        return db.getAllFromIndex("crystallizedLog", "by-shortId", shortId);
+      }
+    }
+    async appendInjectionLog(entries) {
+      const db = await openAidDb();
+      const tx = db.transaction("injectionLog", "readwrite");
+      for (const entry of entries) await tx.store.put(entry);
+      await tx.done;
+    }
+    async getInjectionLog(shortId) {
+      const db = await openAidDb();
+      return db.getAllFromIndex("injectionLog", "by-shortId", shortId);
+    }
+    async getCrystallizedState(shortId, characterKey) {
+      const db = await openAidDb();
+      const row = await db.get("crystallizedState", [shortId, characterKey]);
+      return row?.state;
+    }
+    async putCrystallizedState(shortId, characterKey, state) {
+      const db = await openAidDb();
+      await db.put("crystallizedState", { shortId, characterKey, state });
+    }
+    async appendCrystallizedArchive(entries) {
+      if (!entries.length) return;
+      const db = await openAidDb();
+      const tx = db.transaction("crystallizedArchive", "readwrite");
+      for (const e2 of entries) await tx.store.put(e2);
+      await tx.done;
+    }
+    async getCrystallizedArchive(shortId) {
+      const db = await openAidDb();
+      return db.getAllFromIndex("crystallizedArchive", "by-shortId", shortId);
+    }
+    async getPhenotype(shortId, characterKey) {
+      const db = await openAidDb();
+      return db.get("phenotype", [shortId, characterKey]);
+    }
+    async putPhenotype(rec) {
+      const db = await openAidDb();
+      await db.put("phenotype", rec);
+    }
+    async getNpcMemoryBlocks(shortId, characterKey) {
+      const db = await openAidDb();
+      return db.getAllFromIndex("npcMemoryBank", "by-char", [shortId, characterKey]);
+    }
+    async putNpcMemoryBlock(block) {
+      const db = await openAidDb();
+      await db.put("npcMemoryBank", block);
+    }
+    async deleteNpcMemoryBlocks(shortId) {
+      const db = await openAidDb();
+      const tx = db.transaction("npcMemoryBank", "readwrite");
+      const keys = await tx.store.index("by-shortId").getAllKeys(shortId);
+      for (const key of keys) await tx.store.delete(key);
+      await tx.done;
+    }
+    async deleteNpcMemoryBlock(shortId, characterKey, blockId) {
+      const db = await openAidDb();
+      await db.delete("npcMemoryBank", [shortId, characterKey, blockId]);
+    }
   };
 
   // src/storage/export.ts
-  async function exportAdventure(repo2, shortId) {
-    const adventure = await repo2.getAdventure(shortId) ?? { shortId };
-    const actions = await repo2.getActions(shortId);
-    const cards = await repo2.getCards(shortId);
-    const versions = await repo2.getVersions(shortId);
+  async function exportAdventure(repo4, shortId) {
+    const adventure = await repo4.getAdventure(shortId) ?? { shortId };
+    const actions = await repo4.getActions(shortId);
+    const cards = await repo4.getCards(shortId);
+    const versions = await repo4.getVersions(shortId);
     return {
       schema: "aid-tracker/export@1",
       exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -20591,30 +20796,6 @@ Notable Items: specific permanent contents. You must preserve the literal names 
     }
     return false;
   }
-  function matchedTriggers(text, title, keys) {
-    const escapeRegex = (s3) => s3.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
-    const rawCandidates = [title, ...keys.split(/[,;]+/)].map((s3) => stripPossessive(s3.trim())).filter(Boolean);
-    const candidates = [];
-    for (const c2 of rawCandidates) {
-      candidates.push(c2);
-      if (c2.includes(" and ") || c2.includes(" & ")) {
-        const parts = c2.split(/\s+(?:and|&)\s+/i);
-        for (const p5 of parts) {
-          const trimmed = p5.trim();
-          if (trimmed) candidates.push(trimmed);
-        }
-      }
-    }
-    const out2 = [];
-    const seen = /* @__PURE__ */ new Set();
-    for (const cand of candidates) {
-      const low = cand.toLowerCase();
-      if (seen.has(low)) continue;
-      seen.add(low);
-      if (new RegExp(`\\b${escapeRegex(low)}\\b`, "i").test(text)) out2.push(cand);
-    }
-    return out2;
-  }
   function stripPossessive(s3) {
     return s3.replace(/['’]s?$/i, "").trim();
   }
@@ -20700,36 +20881,6 @@ Notable Items: specific permanent contents. You must preserve the literal names 
   }
 
   // src/inference/gather.ts
-  function isMetaCard(c2) {
-    const t3 = (c2.title || "").toLowerCase().trim();
-    if (!t3) return false;
-    return t3 === "configure memoraid" || t3 === "active location anchor" || t3.endsWith("(memory)");
-  }
-  function detectPresentCards(text, cards) {
-    const out2 = [];
-    for (const c2 of cards) {
-      if (c2.deletedAt || isMetaCard(c2)) continue;
-      const triggers = matchedTriggers(text, c2.title || "", c2.keys || "");
-      if (triggers.length) out2.push({ title: c2.title || triggers[0], type: c2.type, triggers });
-    }
-    return out2;
-  }
-  function buildMemoraidPrompt(opts2) {
-    const roster = opts2.presentEntities.length ? opts2.presentEntities.map((e2) => `- ${e2.title} (${e2.type}; matched: ${e2.triggers.join(", ")})`).join("\n") : "(none detected)";
-    const cachePrefix = `Story cards present in the current scene (by matched trigger):
-${roster}
-
-Prior context (older actions, for reference only):
-${opts2.priorActionsText || "(none yet)"}
-
-Latest action:
-${opts2.latestActionText}
-
-`;
-    const user = `${opts2.charProfile}Instructions:
-${opts2.instructions}`;
-    return { cachePrefix, user };
-  }
   function buildLocationContext(card, cards, parentBudget = 1200) {
     if (!card.value) return "";
     let ctx = `Current entry for this location (authoritative base \u2014 update it with new narrative facts and condense, but NEVER drop established inhabitants, social dynamics, atmosphere, or named details merely because recent scenes do not feature them):
@@ -21314,6 +21465,15 @@ ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText
       }
     });
   }
+  function buildCardDelete(endpoint, query, token, cardId, shortId) {
+    return buildGraphQLMutation(endpoint, query, token, "UseDeleteStoryCard", {
+      input: {
+        id: cardId,
+        shortId,
+        contentType: "adventure"
+      }
+    });
+  }
   var DEFAULT_GQL_QUERIES = {
     SaveQueueStoryCard: `
     mutation SaveQueueStoryCard($input: UpdateStoryCardInput!) {
@@ -21396,6 +21556,20 @@ ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText
         }
         message
         success
+        __typename
+      }
+    }
+  `,
+    UseDeleteStoryCard: `
+    mutation UseDeleteStoryCard($input: DeleteStoryCardInput!) {
+      deleteStoryCard(input: $input) {
+        success
+        message
+        storyCard {
+          id
+          deletedAt
+          __typename
+        }
         __typename
       }
     }
@@ -21599,6 +21773,31 @@ ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText
 
   // src/inference/memoraid-notes.ts
   var LOG = "[THOUGHT LOG]";
+  function parseImportantCharacters(description) {
+    const match2 = String(description || "").match(/IMPORTANT_CHARACTERS\s*:\s*([\s\S]+?)(?=\n\s*[A-Z_]+:|$)/i);
+    if (!match2 || !match2[1]) return [];
+    return match2[1].split(/[,\r\n]+/).map((name) => name.trim()).filter((name) => name.length > 0);
+  }
+  function isLeakedPrompt(text) {
+    const t3 = (text || "").toLowerCase();
+    return t3.includes("this is your story") || t3.includes("live it as its own main character") || t3.includes("live this story as its own main character") || t3.includes("never a minor figure") || t3.includes("respond with exactly offstage") || t3.includes("strict cognitive loop") || t3.includes("sensory, physical, or verbal stimulus") || t3.includes("intake:") && t3.includes("thought:") && t3.includes("action:") && t3.includes("1 sentence") || // Two-bullet lens/monologue prompts (Action dropped). Distinctive literal phrases that survive
+    // {{title}}/{protagonist} substitution, so an echoed prompt is still recognised — covers both the
+    // first lens/monologue version (LENS_V1) and the current resist-resolution refinement.
+    t3.includes("not a neutral camera") || t3.includes("unfiltered internal monologue") || t3.includes("polished thesis") || t3.includes("produce exactly two labeled bullets") || t3.includes("not a mood piece") || t3.includes("unresolved internal reaction") || t3.includes("insight-turn");
+  }
+  function isSceneNovel(prevText, nextText, threshold = 0.9) {
+    const prev = String(prevText || "").trim();
+    const next = String(nextText || "").trim();
+    if (!prev || !next) return true;
+    const tok = (s3) => new Set(s3.toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/).filter((w) => w.length >= 3));
+    const a2 = tok(prev);
+    const b = tok(next);
+    if (!a2.size || !b.size) return true;
+    let inter = 0;
+    for (const t3 of a2) if (b.has(t3)) inter++;
+    const union = a2.size + b.size - inter;
+    return union === 0 ? false : inter / union < threshold;
+  }
   function parseMemoNotes(description) {
     const out2 = { thoughtLog: [] };
     if (!description) return out2;
@@ -21610,6 +21809,7 @@ ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText
       const text = (m3[3] || "").trim();
       const action = (m3[2] || "").trim();
       if (!text && !action) continue;
+      if (isLeakedPrompt(text)) continue;
       const entry = { turn: Number(m3[1]), text };
       if (action) entry.action = action;
       out2.thoughtLog.push(entry);
@@ -21637,6 +21837,24 @@ ${body}`;
     const deduped = log3.filter((e2) => e2.text !== text);
     return [{ ...entry, text }, ...deduped].slice(0, maxEntries);
   }
+  function isWrappedThoughtEntry(value) {
+    return /\bthoughts\b\s*(?:\(newest to oldest\)\s*)?:/i.test(String(value || ""));
+  }
+  function repairThoughtEntry(name, value, description, lookback, turn) {
+    const v2 = String(value || "");
+    const desc = String(description || "");
+    if (!v2.trim() || isWrappedThoughtEntry(v2)) return { value: v2, description: desc, changed: false };
+    const inner = v2.replace(/^\[?\s*[^\n\]]*\bThoughts:\s*/i, "").replace(/^[\s[]+/, "").replace(/[\s\]]+$/, "").trim();
+    let log3 = parseMemoNotes(desc).thoughtLog;
+    if (inner) log3 = pushThought(log3, { turn, text: `[${name}'s Thoughts:
+${inner}
+]` });
+    const rendered = renderThoughtWindow(log3, Math.max(lookback, 1), name, 6e3) || (inner ? `[${name}'s Thoughts:
+${inner}
+]` : v2);
+    const newDesc = log3.length ? buildMemoNotes({ thoughtLog: log3 }) : desc;
+    return { value: rendered, description: newDesc, changed: rendered !== v2 || newDesc !== desc };
+  }
   function thoughtsSince(log3, sinceTurn, maxChars) {
     const parts = [];
     let len = 0;
@@ -21656,16 +21874,16 @@ ${e2.text}` : e2.text;
     inner = inner.replace(/^[\s[]+/, "").replace(/[\s\]]+$/, "").trim();
     return inner;
   }
-  function renderThoughtBlock(log3, n3, label, order, maxChars) {
+  function renderThoughtBlock(log3, n3, label2, order, maxChars) {
     if (!Array.isArray(log3) || n3 <= 0) return "";
     let selected = log3.slice(0, n3);
     while (selected.length > 0) {
       const inners = selected.map((e2) => extractThoughtInner(e2.text)).filter((s3) => s3.length > 0);
       if (inners.length === 0) return "";
       const ordered = order === "oldest-first" ? [...inners].reverse() : inners;
-      const body = ordered.join("\n");
-      const full = `[${label}
-{${body}}
+      const body = ordered.map((t3) => `{${t3}}`).join("\n\n");
+      const full = `[${label2}
+${body}
 ]`;
       if (full.length <= maxChars) return full;
       selected = selected.slice(0, -1);
@@ -21678,9 +21896,3875 @@ ${e2.text}` : e2.text;
   function renderThoughtWindow(log3, n3, name, maxChars) {
     return renderThoughtBlock(log3, n3, `${name}'s Thoughts (newest to oldest):`, "newest-first", maxChars);
   }
+  function isOnOffstageCooldown(cooldownUntil, currentTurn) {
+    return typeof cooldownUntil === "number" && currentTurn < cooldownUntil;
+  }
+  function classifyMemoraidPresence(output) {
+    const cleaned = (output || "").trim().replace(/^[[{]+/, "").replace(/[\]}]+$/, "").trim();
+    if (cleaned === "") return "offstage";
+    if (/^offstage[.!]*$/i.test(cleaned)) return "offstage";
+    return "present";
+  }
+  function buildEarsBurningThought() {
+    return [
+      "- Intake: My ears are suddenly burning \u2014 the old sign that someone, somewhere, is talking about me.",
+      "- Thought: I wonder who, and what they're saying. Nothing to do about it from here but keep going."
+    ].join("\n");
+  }
+
+  // src/background/bg-infra.ts
+  var repo = new Repo();
+  var auth = {
+    sessionToken: null,
+    gqlEndpoint: null
+  };
+  var debugEnabled = false;
+  var _log = console.log.bind(console);
+  function dlog(...args) {
+    if (debugEnabled) _log(...args);
+  }
+  function setDebugEnabled(v2) {
+    debugEnabled = v2;
+  }
+  var _originalFetch = globalThis.fetch;
+  var AID_FETCH_TIMEOUT_MS = 3e4;
+  async function fetchWithTimeout(url, init) {
+    if (init?.signal) return _originalFetch(url, init);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), AID_FETCH_TIMEOUT_MS);
+    try {
+      return await _originalFetch(url, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  async function fetchWithRelay(url, init) {
+    try {
+      return await fetchWithTimeout(url, init);
+    } catch (err) {
+      const isNetworkError = err && (err.name === "TypeError" || err.message?.includes("NetworkError") || err.message?.includes("fetch"));
+      if (isNetworkError && url && (url.includes("aidungeon.com") || url === auth.gqlEndpoint)) {
+        let shortId = null;
+        if (init?.body) {
+          try {
+            const bodyObj = JSON.parse(init.body);
+            const batch = Array.isArray(bodyObj) ? bodyObj : [bodyObj];
+            for (const item of batch) {
+              const vars = item.variables || {};
+              shortId = vars.shortId || vars.input?.shortId || vars.adventureId || vars.input?.adventureId;
+              if (shortId) break;
+            }
+          } catch {
+          }
+        }
+        if (shortId) {
+          dlog(`[AID bg] Background fetch to ${url} failed. Relaying request via content script for adventure ${shortId}...`);
+          try {
+            const tabs = await browser.tabs.query({ url: "*://*.aidungeon.com/*" }).catch(() => []);
+            let targetTabId = null;
+            for (const tab of tabs) {
+              if (tab.id && tab.url && tab.url.includes(shortId)) {
+                targetTabId = tab.id;
+                break;
+              }
+            }
+            if (!targetTabId && tabs.length > 0 && tabs[0]?.id !== void 0) {
+              targetTabId = tabs[0].id;
+            }
+            if (targetTabId) {
+              const res = await browser.tabs.sendMessage(targetTabId, {
+                kind: "relayFetch",
+                url,
+                init: {
+                  method: init.method,
+                  headers: init.headers,
+                  body: init.body
+                }
+              });
+              if (res && typeof res === "object") {
+                if (!res.error) {
+                  dlog("[AID bg] Relay fetch successful.");
+                  return {
+                    ok: res.ok,
+                    status: res.status,
+                    statusText: res.statusText,
+                    headers: new Headers(res.headers || {}),
+                    text: async () => res.body,
+                    json: async () => JSON.parse(res.body),
+                    clone() {
+                      return this;
+                    }
+                  };
+                } else {
+                  console.error("[AID bg] Content script returned relay error:", res.error);
+                  throw new Error(res.error);
+                }
+              }
+            }
+          } catch (fallbackErr) {
+            console.error("[AID bg] Relay fetch fallback failed:", fallbackErr);
+          }
+        }
+      }
+      throw err;
+    }
+  }
+  var aidFetch = fetchWithRelay;
+  var sessionStore = browser.storage.session;
+  async function ensureAuth() {
+    if (auth.sessionToken && auth.gqlEndpoint) return;
+    if (!sessionStore) return;
+    try {
+      const s3 = await sessionStore.get(["aidToken", "aidEndpoint"]);
+      if (!auth.sessionToken && s3?.aidToken) auth.sessionToken = s3.aidToken;
+      if (!auth.gqlEndpoint && s3?.aidEndpoint) auth.gqlEndpoint = s3.aidEndpoint;
+    } catch {
+    }
+  }
+  function isSafeEndpoint(url) {
+    if (!url) return false;
+    try {
+      const u2 = new URL(url);
+      return (u2.hostname === "aidungeon.com" || u2.hostname.endsWith(".aidungeon.com")) && u2.pathname === "/graphql";
+    } catch {
+      return false;
+    }
+  }
+  async function broadcastToTabs(msg) {
+    try {
+      const tabs = await browser.tabs.query({ url: "*://*.aidungeon.com/*" }).catch(() => []);
+      for (const tab of tabs) {
+        if (tab.id) {
+          browser.tabs.sendMessage(tab.id, msg).catch(() => {
+          });
+        }
+      }
+    } catch (err) {
+      console.error("[AID bg] Failed to broadcast message to tabs:", err);
+    }
+  }
+
+  // src/inference/injection.ts
+  function formatLivingCharactersDirective(pair) {
+    return `[${pair.owner} now feels ${pair.pressure} toward ${pair.target} (momentum: ${pair.momentum}); let this surface naturally.]`;
+  }
+  function buildInjectionText(directives) {
+    return directives.filter(Boolean).join(" ");
+  }
+  function canInjectOnAction(actionType) {
+    return actionType === "do" || actionType === "say" || actionType === "story";
+  }
+  function shouldFireLcOnAction(actionType, mode) {
+    return canInjectOnAction(actionType) || mode === "defer";
+  }
+  function pressureKey(owner, pressure) {
+    return `${String(owner || "").trim().toLowerCase()}|${String(pressure || "").trim().toLowerCase()}`;
+  }
+  function coercePending(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw.map((e2) => typeof e2 === "string" ? { owner: "", target: "", pressure: "", momentum: "", text: e2 } : { owner: e2?.owner || "", target: e2?.target || "", pressure: e2?.pressure || "", momentum: e2?.momentum || "", text: e2?.text || "" }).filter((p5) => p5.text);
+  }
+  function filterLiveDirectives(pending, activePressureKeys) {
+    return pending.filter((p5) => !p5.owner && !p5.pressure ? true : activePressureKeys.has(pressureKey(p5.owner, p5.pressure)));
+  }
+  function planInjection(actionType, fresh, held) {
+    const heldF = (held || []).filter((p5) => p5.text);
+    const freshF = (fresh || []).filter((p5) => p5.text);
+    if (canInjectOnAction(actionType)) {
+      return { injectText: buildInjectionText([...heldF, ...freshF].map((p5) => p5.text)), nextPending: [] };
+    }
+    return { injectText: "", nextPending: [...heldF, ...freshF] };
+  }
+  var INJECTION_DIRECTIVE_PATTERN = /\s*\[[^\]]*?let this surface naturally\.\]/gi;
+  function stripInjectedDirectives(text) {
+    return (text || "").replace(INJECTION_DIRECTIVE_PATTERN, "").trim();
+  }
+
+  // src/inference/living-characters.ts
+  /*! @license MIT
+   * The Living Characters engine (relationship "Life Cards", pressures, momentum, and the social
+   * lifecycle modeled across this module and ./bg-life.ts) is adapted WITH EXPLICIT PERMISSION from the
+   * LivingCharacters project by LivingNarratives (aka nerdgrl450 in the AI Dungeon Discord) —
+   * https://github.com/LivingNarratives/LivingCharacters — and used under the terms of its MIT license:
+   *
+   *   Copyright (c) 2026 LivingNarratives
+   *
+   *   Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+   *   associated documentation files (the "Software"), to deal in the Software without restriction,
+   *   including without limitation the rights to use, copy, modify, merge, publish, distribute,
+   *   sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+   *   furnished to do so, subject to the following conditions:
+   *
+   *   The above copyright notice and this permission notice shall be included in all copies or
+   *   substantial portions of the Software.
+   *
+   *   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+   *   NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+   *   NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+   *   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
+   *   OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+   */
+  var DEFAULT_LC_PRESSURES = "attraction\nfondness\nfriendship\nprotectiveness\ncuriosity\nenvy\njealousy\nrivalry\nbetrayal\nresentment\ntrust\nsuspicion";
+  function rollMomentum(rng = Math.random) {
+    const roll = rng();
+    if (roll < 0.65) return "low";
+    if (roll < 0.93) return "medium";
+    return "high";
+  }
+  function cleanName(value) {
+    let s3 = String(value || "").replace(/[^A-Za-z0-9 _'-]/g, " ").trim();
+    s3 = s3.replace(/\s+/g, " ");
+    return s3.slice(0, 50);
+  }
+  function keyName(name) {
+    return cleanName(name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  }
+  function buildLifeCardValue(args) {
+    const owner = cleanName(args.owner) || args.owner.trim();
+    const target = cleanName(args.target) || args.target.trim();
+    const pressure = String(args.pressure || "friendship").trim();
+    const occurrence = String(args.occurrence || "none").trim();
+    const momentum = String(args.momentum || "low").trim();
+    const status = String(args.status || "seedling").trim();
+    return [
+      `[`,
+      `${owner} Immediate Life Event:`,
+      `- Target: ${target}`,
+      `- Pressure: ${pressure}`,
+      `- Relationship: ${owner} feels ${pressure} toward ${target}`,
+      `- Urgency: ${momentum}`,
+      `- Latest Occurrence driving pressure: ${occurrence}`,
+      `- Status: ${status}`,
+      `]`
+    ].join("\n");
+  }
+  function parseLifeCardEntry(entry) {
+    if (!entry) return {};
+    const lines = entry.replace(/\r/g, "").split("\n");
+    const data = {};
+    for (const line of lines) {
+      const idx = line.indexOf(":");
+      if (idx !== -1) {
+        const key = line.slice(0, idx).replace(/^\s*-\s*/, "").trim().toLowerCase();
+        const value = line.slice(idx + 1).trim();
+        if (key === "target") data.target = value;
+        else if (key === "pressure") data.pressure = value;
+        else if (key === "occurrence" || key === "latest occurrence" || key === "latest occurrence driving pressure") data.occurrence = value;
+        else if (key === "momentum" || key === "urgency") data.momentum = value;
+        else if (key === "status") {
+          data.status = value.replace(/^🌱\s*/, "").trim();
+        }
+      }
+    }
+    return data;
+  }
+  function shouldArchiveLifeCard(status, dormantTurns, dormancyThreshold) {
+    const s3 = String(status || "").toLowerCase().trim();
+    if (s3 === "resolved") return true;
+    if (dormancyThreshold > 0 && s3 === "dormant" && dormantTurns >= dormancyThreshold) return true;
+    return false;
+  }
+  function shouldFadeStale(lastEventTurn, turnCount, staleTurns) {
+    if (staleTurns <= 0) return false;
+    return turnCount - lastEventTurn >= staleTurns;
+  }
+  function shouldRetireByAge(seededTurn, turnCount, maxActiveTurns) {
+    if (maxActiveTurns <= 0) return false;
+    return turnCount - seededTurn >= maxActiveTurns;
+  }
+  function setLifeCardStatusValue(value, status) {
+    const v2 = String(value || "").replace(/\r/g, "");
+    const statusLine = `Status: ${status}`;
+    if (/^\s*-?\s*status:.*$/im.test(v2)) {
+      return v2.replace(/^(\s*-?\s*)status:.*$/im, `$1${statusLine}`);
+    }
+    return v2.length ? `${v2}
+${statusLine}` : statusLine;
+  }
+  var LIFE_HISTORY_HEADER = "Social Relationship History:";
+  var LIFE_HISTORY_MAX_LINES = 12;
+  function buildSeededDescription(priorHistory, seedLine, maxLines = LIFE_HISTORY_MAX_LINES) {
+    const strip3 = (l2) => l2.replace(/^[-\s]+/, "").trim();
+    const isHeader = (l2) => /^(social|prior) relationship history:/i.test(l2);
+    const prior = String(priorHistory || "").split("\n").map((l2) => l2.trim()).filter(Boolean).filter((l2) => !isHeader(l2)).map(strip3).filter(Boolean);
+    const newLine2 = strip3(String(seedLine || ""));
+    const all4 = newLine2 ? [...prior, newLine2] : prior;
+    const seen = /* @__PURE__ */ new Set();
+    const deduped = all4.filter((l2) => {
+      const k2 = l2.toLowerCase();
+      if (seen.has(k2)) return false;
+      seen.add(k2);
+      return true;
+    });
+    const capped = deduped.slice(-Math.max(1, maxLines));
+    return [LIFE_HISTORY_HEADER, ...capped.map((l2) => `- ${l2}`)].join("\n");
+  }
+  function buildLifeHistoryLine(owner, pressure, target, momentum) {
+    return `${owner} feels ${pressure} towards ${target} (momentum: ${momentum})`;
+  }
+  function shouldAttemptSeed(args) {
+    const { liveCount, maxActive, seedCount, turnCount, lastSeedTurn, interval } = args;
+    if (interval <= 0) return false;
+    if (turnCount < 1) return false;
+    if (liveCount >= maxActive) return false;
+    if (seedCount <= 0) return true;
+    return turnCount - (lastSeedTurn || 0) >= interval;
+  }
+  function pick(list4, rng) {
+    if (!list4.length) return void 0;
+    return list4[Math.floor(rng() * list4.length) % list4.length];
+  }
+  function weightedPick(pairs3, rng) {
+    let total = 0;
+    for (const [, w] of pairs3) total += Math.max(0, w) || 0;
+    if (total <= 0) return pairs3.length ? pairs3[0][0] : "";
+    let roll = rng() * total;
+    for (const [name, w] of pairs3) {
+      roll -= Math.max(0, w) || 0;
+      if (roll <= 0) return name;
+    }
+    return pairs3[pairs3.length - 1][0];
+  }
+  function normalizeNameForMatch(name) {
+    return cleanName(name).toLowerCase();
+  }
+  function firstNameAlias(name) {
+    const normalized = normalizeNameForMatch(name);
+    const first = normalized.split(/\s+/)[0] || "";
+    const blockedFirstNameAliases = /* @__PURE__ */ new Set([
+      "captain",
+      "dame",
+      "dr",
+      "guildmaster",
+      "king",
+      "lady",
+      "lord",
+      "mr",
+      "mrs",
+      "ms",
+      "prince",
+      "princess",
+      "queen",
+      "sir",
+      "the"
+    ]);
+    return first.length >= 3 && !blockedFirstNameAliases.has(first) ? first : "";
+  }
+  function isSameLivingCharacterName(a2, b) {
+    const left = normalizeNameForMatch(a2);
+    const right = normalizeNameForMatch(b);
+    if (!left || !right) return false;
+    if (left === right) return true;
+    const leftFirst = firstNameAlias(left);
+    const rightFirst = firstNameAlias(right);
+    if (leftFirst && leftFirst === right) return true;
+    if (rightFirst && rightFirst === left) return true;
+    return false;
+  }
+  function selectPressurePool(owner, target, pairs3, defaultPool) {
+    for (const p5 of pairs3 || []) {
+      const match2 = isSameLivingCharacterName(p5.a, owner) && isSameLivingCharacterName(p5.b, target) || isSameLivingCharacterName(p5.a, target) && isSameLivingCharacterName(p5.b, owner);
+      if (!match2) continue;
+      const pool = (p5.pressures || []).map((s3) => String(s3 || "").trim()).filter(Boolean);
+      if (pool.length) return pool;
+    }
+    return defaultPool;
+  }
+  function chooseTarget(owner, npcRoster, protagonist, involvement, rng) {
+    const pool = [protagonist, ...npcRoster].filter((n3) => n3 && !isSameLivingCharacterName(n3, owner));
+    if (!pool.length) return "";
+    const protagInPool = !!protagonist && pool.some((n3) => isSameLivingCharacterName(n3, protagonist));
+    if (involvement === "off") {
+      return pick(pool.filter((n3) => !isSameLivingCharacterName(n3, protagonist)), rng) || "";
+    }
+    if (involvement === "always" && protagInPool) return protagonist;
+    if (involvement === "high" && protagInPool) {
+      return weightedPick(pool.map((n3) => [n3, isSameLivingCharacterName(n3, protagonist) ? 3 : 1]), rng);
+    }
+    return pick(pool, rng) || "";
+  }
+  function chooseSeedPair(args, rng = Math.random) {
+    const { sceneNPCs, eligibleOwners, npcRoster, protagonist, mode, involvement } = args;
+    let owner = "";
+    let target = "";
+    if (mode === "strict") {
+      if (!sceneNPCs.length) return null;
+      const inSceneOwners = eligibleOwners.filter((n3) => sceneNPCs.indexOf(n3) !== -1);
+      const anchor = pick(sceneNPCs, rng) || "";
+      const anchorCanOwn = inSceneOwners.indexOf(anchor) !== -1;
+      const otherOwners = inSceneOwners.filter((n3) => n3 !== anchor);
+      const anchorAsOwner = anchorCanOwn && (involvement === "always" || otherOwners.length === 0 || rng() < 0.5);
+      if (anchorAsOwner) {
+        owner = anchor;
+        target = chooseTarget(owner, sceneNPCs, protagonist, involvement, rng);
+      } else if (otherOwners.length) {
+        target = anchor;
+        owner = pick(otherOwners, rng) || "";
+      } else if (anchorCanOwn) {
+        owner = anchor;
+        target = chooseTarget(owner, sceneNPCs, protagonist, involvement, rng);
+      }
+    } else {
+      if (!eligibleOwners.length) return null;
+      owner = pick(eligibleOwners, rng) || "";
+      target = chooseTarget(owner, npcRoster, protagonist, involvement, rng);
+    }
+    if (!owner || !target) return null;
+    return { owner, target };
+  }
+  function findLifeCardForCharacter(cards, characterName, settings) {
+    const keyPrefix = settings?.livingCharactersKeyPrefix || "chaos-v2:";
+    const titlePrefix = settings?.livingCharactersTitlePrefix || "Life - ";
+    const targetKey = `${keyPrefix}${keyName(characterName)}`.toLowerCase();
+    const targetTitle = `${titlePrefix}${characterName}`.toLowerCase();
+    return cards.find((c2) => {
+      if (c2.deletedAt) return false;
+      const titleLower = (c2.title || "").toLowerCase();
+      const typeLower = (c2.type || "").toLowerCase();
+      const keysList = (c2.keys || "").split(/[,;]+/).map((k2) => k2.trim().toLowerCase()).filter(Boolean);
+      return titleLower === targetTitle || keysList.includes(targetKey) || typeLower === "life" && titleLower.includes(characterName.toLowerCase());
+    });
+  }
+  function buildLifeCardContext(cards, characterName, settings) {
+    const lifeCard = findLifeCardForCharacter(cards, characterName, settings);
+    if (!lifeCard) return "";
+    const parsed = parseLifeCardEntry(lifeCard.value);
+    let block = `[Active Social Pressure for ${characterName}]
+`;
+    if (parsed.target || parsed.pressure) {
+      block += `Relationship Direction: ${characterName} feels ${parsed.pressure || "an unnamed pressure"} toward ${parsed.target || "someone else"}.
+`;
+    }
+    block += `This direction is one-way unless the story separately establishes reciprocity.
+`;
+    if (parsed.target) block += `Target: ${parsed.target}
+`;
+    if (parsed.pressure) block += `Pressure: ${parsed.pressure}
+`;
+    if (parsed.momentum) block += `Urgency: ${parsed.momentum}
+`;
+    if (parsed.occurrence) block += `Latest Occurrence driving pressure: ${parsed.occurrence}
+`;
+    if (parsed.status) block += `Status: ${parsed.status}
+`;
+    const desc = lifeCard.description || "";
+    if (desc.trim()) {
+      block += `
+Social Relationship History:
+${desc.trim()}
+`;
+    }
+    return block.trim();
+  }
+  function buildSceneText(actionTexts, pendingText) {
+    const parts = actionTexts.map((t3) => stripInjectedDirectives(t3 || ""));
+    if (pendingText) parts.push(stripInjectedDirectives(pendingText));
+    return parts.join("\n").toLowerCase();
+  }
+  function computeInScene(sceneText, roster) {
+    return roster.filter((r2) => isCharacterTriggered(sceneText, r2.name, r2.keys)).map((r2) => r2.name);
+  }
+
+  // src/background/bg-scene.ts
+  var cachedRecentActions = /* @__PURE__ */ new Map();
+  var cachedSceneText = /* @__PURE__ */ new Map();
+  async function updateRecentActionsCache(shortId, actions) {
+    try {
+      const actList = actions || await repo.getActions(shortId);
+      const sliced = actList.slice(-30);
+      cachedRecentActions.set(shortId, sliced);
+      const lookback = (await repo.getSettings())?.memoraidPresenceLookback ?? 5;
+      cachedSceneText.set(shortId, buildSceneText(sliced.slice(-lookback).map((a2) => a2.text || "")));
+      dlog(`[AID bg] Updated cached recent actions count for ${shortId}:`, sliced.length);
+    } catch (err) {
+      console.error("[AID bg] Failed to update actions cache:", err);
+    }
+  }
+  async function getSceneText(shortId, pendingText) {
+    const lookback = (await repo.getSettings())?.memoraidPresenceLookback ?? 5;
+    let recent = cachedRecentActions.get(shortId);
+    if (!recent) {
+      await updateRecentActionsCache(shortId);
+      recent = cachedRecentActions.get(shortId) || [];
+    }
+    const sliced = recent.slice(-lookback).map((a2) => a2.text || "");
+    const text = buildSceneText(sliced, pendingText);
+    if (!pendingText) cachedSceneText.set(shortId, text);
+    return text;
+  }
+
+  // src/inference/deleted-cards.ts
+  function addUserDeletedCards(existing, entries) {
+    const out2 = [];
+    const index3 = /* @__PURE__ */ new Map();
+    for (const e2 of [...existing || [], ...entries]) {
+      const id = String(e2?.id || "");
+      if (!id) continue;
+      const title = String(e2?.title || "");
+      if (index3.has(id)) {
+        out2[index3.get(id)].title = title;
+      } else {
+        index3.set(id, out2.length);
+        out2.push({ id, title });
+      }
+    }
+    return out2;
+  }
+  function isAutoCardTitle(title, lifePrefix = "Life - ") {
+    const t3 = String(title || "").trim().toLowerCase();
+    if (!t3) return false;
+    return t3.endsWith(" (memory)") || t3.endsWith(" - crystallized") || t3.startsWith(String(lifePrefix || "").toLowerCase());
+  }
+  function isTitleUserDeleted(list4, title) {
+    const t3 = String(title || "").trim().toLowerCase();
+    if (!t3) return false;
+    return (list4 || []).some((e2) => e2.title.trim().toLowerCase() === t3);
+  }
+  function removeUserDeletedTitles(list4, titles) {
+    const drop = new Set(titles.map((t3) => String(t3 || "").trim().toLowerCase()).filter(Boolean));
+    return (list4 || []).filter((e2) => !drop.has(e2.title.trim().toLowerCase()));
+  }
+
+  // src/background/bg-crystallized.ts
+  init_card_command();
+
+  // src/inference/native.ts
+  var repo2 = new Repo();
+  async function activeProvider() {
+    const settings = await repo2.getSettings();
+    const providerName = settings?.provider || "claude";
+    const apiKey = settings?.apiKeys?.[providerName];
+    if (!settings || !apiKey && providerName !== "ollama") {
+      return { error: `Set your API key/endpoint for ${providerName} in settings.` };
+    }
+    const model5 = settings.model || "";
+    if (providerName === "openai") return new OpenAIProvider(apiKey || "", model5 || "gpt-4o-mini");
+    if (providerName === "gemini") return new GeminiProvider(apiKey || "", model5 || "gemini-1.5-pro");
+    if (providerName === "ollama") return new OllamaProvider(apiKey || "http://localhost:11434", model5 || "llama3");
+    return new ClaudeProvider(apiKey || "", model5 || "claude-3-5-sonnet-latest");
+  }
+  function resolveTitleToken(template, title) {
+    return template.replace(/\{\{\s*title\s*\}\}/g, title);
+  }
+  function cleanCompletion(text) {
+    let cleaned = text.trim();
+    const match2 = cleaned.match(/^```[a-zA-Z]*\n([\s\S]*?)\n```$/) || cleaned.match(/^```[a-zA-Z]*\s*([\s\S]*?)\s*```$/);
+    if (match2) cleaned = match2[1].trim();
+    return cleaned;
+  }
+  async function generateCard(card, command, _formattingMode, opts2) {
+    const prov = await activeProvider();
+    if ("error" in prov) return { ok: false, value: "", message: prov.error };
+    const title = card.title || card.keys || "this entry";
+    const resolvedCommand = resolveTitleToken(command, title);
+    const system = `You are a creative writing assistant generating a Story Card entry for "${title}". Follow the format and instructions exactly, and output only the entry content.`;
+    const parts = [];
+    if (opts2?.includeStorySummary !== false && card.shortId) {
+      try {
+        const adv = await repo2.getAdventure(card.shortId);
+        const summary = (adv?.memory || "").trim();
+        if (summary) parts.push(`Story summary:
+${summary}`);
+      } catch {
+      }
+    }
+    const ctx = (opts2?.storyInformation || "").trim();
+    if (ctx) parts.push(`Narrative Context:
+${ctx}`);
+    const user = parts.length ? `${parts.join("\n\n")}
+
+Instructions:
+${resolvedCommand}` : `Instructions:
+${resolvedCommand}`;
+    try {
+      const raw = await prov.complete(system, user);
+      return { ok: true, value: cleanCompletion(raw) };
+    } catch (err) {
+      return { ok: false, value: "", message: err?.message || String(err) };
+    }
+  }
+
+  // src/inference/crystallized.ts
+  function parseSubjectLabel(raw) {
+    const s3 = String(raw || "");
+    const bar = s3.indexOf("|");
+    if (bar === -1) return { subject: s3.trim(), aliases: [] };
+    const subject = s3.slice(0, bar).trim();
+    const aliases3 = s3.slice(bar + 1).split(",").map((a2) => a2.trim()).filter(Boolean);
+    return { subject, aliases: aliases3 };
+  }
+  function formatSubjectLabel(item) {
+    const aliases3 = (item.aliases || []).filter(Boolean);
+    return aliases3.length ? `${item.subject} | ${aliases3.join(", ")}` : item.subject;
+  }
+  function subjectTokens(name) {
+    return String(name || "").split(/[\/,]/).map((t3) => t3.trim().toLowerCase()).filter(Boolean);
+  }
+  function schemaItemTokens(item) {
+    const out2 = /* @__PURE__ */ new Set();
+    for (const t3 of subjectTokens(item.subject)) out2.add(t3);
+    for (const a2 of item.aliases || []) for (const t3 of subjectTokens(a2)) out2.add(t3);
+    return out2;
+  }
+  var KINSHIP_NOUNS = /* @__PURE__ */ new Set([
+    "father",
+    "mother",
+    "mom",
+    "mum",
+    "dad",
+    "papa",
+    "daddy",
+    "mommy",
+    "parent",
+    "parents",
+    "brother",
+    "sister",
+    "sibling",
+    "son",
+    "daughter",
+    "child",
+    "children",
+    "kid",
+    "husband",
+    "wife",
+    "spouse",
+    "partner",
+    "uncle",
+    "aunt",
+    "auntie",
+    "cousin",
+    "nephew",
+    "niece",
+    "grandfather",
+    "grandmother",
+    "grandpa",
+    "grandma",
+    "granddad",
+    "grandmom",
+    "granddaughter",
+    "grandson"
+  ]);
+  var SUBJECT_LEADING_STRIP = /* @__PURE__ */ new Set(["the", "a", "an", "my", "your", "his", "her", "their", "our", "its"]);
+  var SYNONYM_CLUSTERS = [
+    ["relationship", "connection", "bond"],
+    ["home", "house", "apartment", "flat"],
+    ["job", "work", "career"],
+    ["past", "history", "backstory"]
+  ];
+  var SYNONYM_CANON = /* @__PURE__ */ new Map();
+  for (const cluster of SYNONYM_CLUSTERS) for (const w of cluster) SYNONYM_CANON.set(w, cluster[0]);
+  var OWN_POSSESSIVES = /* @__PURE__ */ new Set(["the", "a", "an", "my", "your", "our", "its"]);
+  function subjectAliasKeys(name) {
+    const out2 = /* @__PURE__ */ new Set();
+    let s3 = String(name || "").toLowerCase().replace(/[’]/g, "'");
+    s3 = s3.replace(/[^a-z0-9'\s]/g, " ").replace(/\s+/g, " ").trim();
+    if (!s3) return out2;
+    const words = s3.split(" ");
+    let i3 = 0;
+    let ownerSlot = "own";
+    while (i3 < words.length - 1) {
+      const w = words[i3];
+      if (SUBJECT_LEADING_STRIP.has(w)) {
+        ownerSlot = OWN_POSSESSIVES.has(w) ? ownerSlot : w;
+        i3++;
+        continue;
+      }
+      if (/'s?$/.test(w)) {
+        ownerSlot = w.replace(/'s?$/, "");
+        i3++;
+        continue;
+      }
+      break;
+    }
+    const cleaned = words.slice(i3).map((w) => w.replace(/'/g, ""));
+    const phrase = cleaned.join(" ").trim();
+    if (phrase) out2.add(phrase);
+    const head = cleaned[cleaned.length - 1] || "";
+    if (KINSHIP_NOUNS.has(head)) out2.add("kin:" + head);
+    if (cleaned.length === 1) {
+      const canon = SYNONYM_CANON.get(head) || SYNONYM_CANON.get(head.replace(/s$/, ""));
+      if (canon) out2.add(`syn:${ownerSlot}:${canon}`);
+    }
+    return out2;
+  }
+  function schemaItemMatchKeys(item) {
+    const out2 = schemaItemTokens(item);
+    for (const k2 of subjectAliasKeys(item.subject)) out2.add(k2);
+    for (const a2 of item.aliases || []) for (const k2 of subjectAliasKeys(a2)) out2.add(k2);
+    return out2;
+  }
+  function nameWords(s3) {
+    return String(s3 || "").toLowerCase().replace(/["'’.,]/g, "").split(/\s+/).filter(Boolean);
+  }
+  function isSelfSubject(item, ownerName) {
+    const owner = nameWords(ownerName || "");
+    if (!owner.length) return false;
+    for (const cand of [item.subject, ...item.aliases || []]) {
+      const w = nameWords(cand);
+      if (!w.length) continue;
+      const [short, long] = w.length <= owner.length ? [w, owner] : [owner, w];
+      if (short.every((x) => long.includes(x))) return true;
+    }
+    return false;
+  }
+  function looksTruncated(text) {
+    const t3 = String(text || "").trim();
+    if (!t3) return true;
+    return !/[.!?…][)"'’\]]?$/.test(t3);
+  }
+  function unionAliases(...lists) {
+    const seen = /* @__PURE__ */ new Set();
+    const out2 = [];
+    for (const list4 of lists) for (const a2 of list4 || []) {
+      const key = a2.trim().toLowerCase();
+      if (a2.trim() && !seen.has(key)) {
+        seen.add(key);
+        out2.push(a2.trim());
+      }
+    }
+    return out2;
+  }
+  function dedupeSchema(schema) {
+    const result = [];
+    const sets = [];
+    for (const item of schema) {
+      const tokens = schemaItemMatchKeys(item);
+      let idx = -1;
+      for (let i3 = 0; i3 < result.length; i3++) {
+        for (const t3 of tokens) {
+          if (sets[i3]?.has(t3)) {
+            idx = i3;
+            break;
+          }
+        }
+        if (idx !== -1) break;
+      }
+      if (idx === -1) {
+        const copy2 = { ...item, aliases: unionAliases(item.aliases) };
+        result.push(copy2);
+        sets.push(schemaItemMatchKeys(copy2));
+      } else {
+        const s3 = result[idx];
+        s3.text = item.text;
+        const extra = [item.subject, ...item.aliases || []].flatMap((label2) => label2.split(/[\/,]/)).map((sub) => sub.trim()).filter((sub) => sub && sub.toLowerCase() !== s3.subject.toLowerCase());
+        s3.aliases = unionAliases(s3.aliases, extra);
+        s3.retired = (s3.retired ?? false) && (item.retired ?? false);
+        sets[idx] = schemaItemMatchKeys(s3);
+      }
+    }
+    return result;
+  }
+  function extractThoughtInner2(text) {
+    let inner = (text || "").trim();
+    inner = inner.replace(/^\[?\s*[^\n\]]*\bThoughts:\s*/i, "");
+    inner = inner.replace(/^[\s[]+/, "").replace(/[\s\]]+$/, "").trim();
+    return inner;
+  }
+  function parseCrystallized(notes) {
+    const state = {
+      schema: [],
+      nodes: [],
+      unreferencedPasses: {},
+      outlook: [],
+      preferences: []
+    };
+    if (!notes) return state;
+    const header = "[CRYSTALLIZED MEMORY]";
+    const idx = notes.indexOf(header);
+    const block = idx !== -1 ? notes.slice(idx + header.length) : notes;
+    const sections = block.split(/\n###\s+/);
+    for (const sec of sections) {
+      const lines = sec.split("\n");
+      const firstLine = lines[0];
+      const titleLine = firstLine ? firstLine.trim().toLowerCase() : "";
+      if (titleLine.includes("i. schema")) {
+        for (let i3 = 1; i3 < lines.length; i3++) {
+          const rawLine = lines[i3];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (!line.startsWith("- ")) continue;
+          const match2 = line.match(/^-\s*\[([^\]]+)\]\s*(.*)$/);
+          if (match2 && match2[1] !== void 0 && match2[2] !== void 0) {
+            const { subject, aliases: aliases3 } = parseSubjectLabel(match2[1]);
+            let text = match2[2].trim();
+            const retired = text.endsWith("(retired)");
+            if (retired) {
+              text = text.slice(0, -9).trim();
+              if (text.endsWith(";")) text = text.slice(0, -1).trim();
+              if (text.endsWith("-")) text = text.slice(0, -1).trim();
+              text = text.trim();
+            }
+            state.schema.push({ subject, text, retired, aliases: aliases3 });
+          }
+        }
+      } else if (titleLine.includes("ii. nodes")) {
+        let currentNode = null;
+        for (let i3 = 1; i3 < lines.length; i3++) {
+          const rawLine = lines[i3];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (line.startsWith("- Node_ID:")) {
+            if (currentNode && currentNode.id) {
+              state.nodes.push(currentNode);
+            }
+            currentNode = {
+              id: line.slice(10).trim(),
+              vibrancy: 3,
+              snapshot: "",
+              links: []
+            };
+          } else if (currentNode) {
+            if (line.startsWith("Vibrancy:")) {
+              const vMatch = line.match(/Vibrancy:\s*(\d+)\/3/);
+              if (vMatch && vMatch[1] !== void 0) {
+                currentNode.vibrancy = parseInt(vMatch[1]);
+              }
+            } else if (line.startsWith("Snapshot:")) {
+              let snap = line.slice(9).trim();
+              if (snap.endsWith("]")) snap = snap.slice(0, -1).trim();
+              currentNode.snapshot = snap;
+            } else if (line.startsWith("Links:")) {
+              const linksStr = line.slice(6).trim();
+              currentNode.links = linksStr ? linksStr.split(/[,;\s]+/).map((s3) => s3.trim()).filter(Boolean) : [];
+            } else if (line.startsWith("  ") || line.startsWith("	")) {
+              if (currentNode.snapshot) {
+                currentNode.snapshot += " " + line.trim();
+              }
+            }
+          }
+        }
+        if (currentNode && currentNode.id) {
+          state.nodes.push(currentNode);
+        }
+      } else if (titleLine.includes("iii. bookkeeping") || titleLine.includes("bookkeeping")) {
+        for (let i3 = 1; i3 < lines.length; i3++) {
+          const rawLine = lines[i3];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (line.startsWith("- SubjectUnreferencedPasses:")) {
+            const val = line.slice(28).trim();
+            const pairs3 = val.split(/[,;]+/);
+            for (const p5 of pairs3) {
+              const parts = p5.split("=");
+              if (parts.length === 2) {
+                const p0 = parts[0];
+                const p1 = parts[1];
+                if (p0 && p1) {
+                  state.unreferencedPasses[p0.trim()] = parseInt(p1.trim()) || 0;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return state;
+  }
+  function effectiveCrystallizedCaps(adv, settings) {
+    const pick2 = (k2, d2) => adv?.[k2] ?? settings?.[k2] ?? d2;
+    return {
+      knows: pick2("crystallizedKnowsCap", 2),
+      recalls: pick2("crystallizedRecallsCap", 2),
+      vivid: pick2("crystallizedVividCap", 4),
+      outlook: pick2("crystallizedOutlookCap", 2),
+      preferences: pick2("crystallizedPreferencesCap", 4)
+    };
+  }
+  function renderCrystallizedEntry(state, name, maxChars) {
+    const activeSchema = state.schema.filter((item) => !item.retired && !isSelfSubject(item, name));
+    let schemaItems = activeSchema.slice();
+    const highVibrancyNodes = state.nodes.map((node, index3) => ({ node, index: index3 })).filter((item) => item.node.vibrancy >= 2).sort((a2, b) => {
+      if (b.node.vibrancy !== a2.node.vibrancy) {
+        return b.node.vibrancy - a2.node.vibrancy;
+      }
+      return b.index - a2.index;
+    });
+    let nodesToRender = [...highVibrancyNodes];
+    let outlookLines = (state.outlook || []).filter((b) => b.strength >= 2).sort((a2, b) => b.strength - a2.strength).map((b) => b.text);
+    let preferenceLines = (state.preferences || []).slice().sort((a2, b) => b.strength - a2.strength).map((b) => b.text);
+    while (true) {
+      const value = buildRenderedString(name, schemaItems, nodesToRender.map((n3) => n3.node.snapshot), outlookLines, [], preferenceLines);
+      if (value.length <= maxChars) return value;
+      if (outlookLines.length > 0) {
+        outlookLines.pop();
+        continue;
+      }
+      if (preferenceLines.length > 0) {
+        preferenceLines.pop();
+        continue;
+      }
+      if (nodesToRender.length > 0) {
+        nodesToRender.pop();
+        continue;
+      }
+      if (schemaItems.length === 0) {
+        return value;
+      }
+      schemaItems.pop();
+    }
+  }
+  function renderCrystallizedEntryScene(state, name, opts2) {
+    const sceneToks = opts2.sceneTokens || /* @__PURE__ */ new Set();
+    const active = state.schema.filter((i3) => !i3.retired && !isSelfSubject(i3, name));
+    const isPresent = (i3) => {
+      for (const t3 of schemaItemTokens(i3)) if (opts2.presentSubjectTokens.has(t3)) return true;
+      return false;
+    };
+    const knowsRelevance = (i3) => {
+      const kt = snapshotTokens(`${i3.subject} ${i3.text}`);
+      let rel = 0;
+      for (const t3 of kt) if (sceneToks.has(t3)) rel++;
+      return rel;
+    };
+    const byRelevance = (a2, b) => knowsRelevance(b) - knowsRelevance(a2);
+    const presentChars = active.filter((i3) => isPresent(i3) && opts2.isCharacterSubject(i3)).sort(byRelevance);
+    const presentOther = active.filter((i3) => isPresent(i3) && !opts2.isCharacterSubject(i3)).sort(byRelevance);
+    const absentChars = active.filter((i3) => !isPresent(i3) && opts2.isCharacterSubject(i3)).sort(byRelevance);
+    const absentOther = active.filter((i3) => !isPresent(i3) && !opts2.isCharacterSubject(i3)).sort(byRelevance);
+    let schemaItems = [...presentChars, ...presentOther, ...absentChars, ...absentOther].slice(0, Math.max(0, opts2.caps.knows));
+    let vivid = state.nodes.map((node, index3) => ({ node, index: index3 })).filter((x) => x.node.vibrancy >= 2).sort((a2, b) => b.node.vibrancy - a2.node.vibrancy || b.index - a2.index).slice(0, Math.max(0, opts2.caps.vivid)).map((x) => x.node.snapshot);
+    let recalls = opts2.recalls.slice(0, Math.max(0, opts2.caps.recalls));
+    let outlook = (state.outlook || []).filter((b) => b.strength >= 2).sort((a2, b) => b.strength - a2.strength).map((b) => b.text).slice(0, Math.max(0, opts2.caps.outlook));
+    let preferences = (state.preferences || []).map((b) => {
+      const pt = snapshotTokens(b.text);
+      let rel = 0;
+      for (const t3 of pt) if (sceneToks.has(t3)) rel++;
+      return { text: b.text, rel, strength: b.strength };
+    }).sort((a2, b) => b.rel - a2.rel || b.strength - a2.strength).slice(0, Math.max(0, opts2.caps.preferences)).map((p5) => p5.text);
+    while (true) {
+      const value = buildRenderedString(name, schemaItems, vivid, outlook, recalls, preferences);
+      if (value.length <= opts2.maxChars) return value;
+      if (recalls.length > 0) {
+        recalls.pop();
+        continue;
+      }
+      if (vivid.length > 0) {
+        vivid.pop();
+        continue;
+      }
+      if (schemaItems.length > 1) {
+        schemaItems.pop();
+        continue;
+      }
+      if (outlook.length > 1) {
+        outlook.pop();
+        continue;
+      }
+      if (preferences.length > 1) {
+        preferences.pop();
+        continue;
+      }
+      return value;
+    }
+  }
+  function jsonEscape(s3) {
+    return String(s3 || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  }
+  var KNOWS_ENTRY_MAXCHARS = 240;
+  function capKnowsText(text) {
+    return text.length > KNOWS_ENTRY_MAXCHARS ? text.slice(0, KNOWS_ENTRY_MAXCHARS - 1).trimEnd() + "\u2026" : text;
+  }
+  function buildRenderedString(name, schema, snapshots, outlookLines = [], recallLines = [], preferenceLines = []) {
+    const lines = [`[${name}'s Crystallized Memory`];
+    if (schema.length > 0) {
+      lines.push("Knows:");
+      schema.forEach((item, i3) => {
+        const comma = i3 < schema.length - 1 ? "," : "";
+        const label2 = [item.subject, ...item.aliases || []].map((s3) => String(s3 || "").trim()).filter(Boolean).join(" | ");
+        lines.push(`{"${jsonEscape(label2)}": "${jsonEscape(capKnowsText(item.text))}"}${comma}`);
+      });
+    }
+    if (recallLines.length > 0) {
+      lines.push("Recalls:");
+      recallLines.forEach((t3, i3) => {
+        const comma = i3 < recallLines.length - 1 ? "," : "";
+        lines.push(`{${jsonEscape(t3)}}${comma}`);
+      });
+    }
+    if (snapshots.length > 0) {
+      lines.push("Vivid Memories:");
+      snapshots.forEach((snap, i3) => {
+        const comma = i3 < snapshots.length - 1 ? "," : "";
+        lines.push(`{${snap}}${comma}`);
+      });
+    }
+    if (preferenceLines.length > 0) {
+      lines.push("Preferences:");
+      preferenceLines.forEach((t3, i3) => {
+        const comma = i3 < preferenceLines.length - 1 ? "," : "";
+        lines.push(`{${jsonEscape(t3)}}${comma}`);
+      });
+    }
+    if (outlookLines.length > 0) {
+      lines.push("Outlook:");
+      outlookLines.forEach((t3, i3) => {
+        const comma = i3 < outlookLines.length - 1 ? "," : "";
+        lines.push(`{${jsonEscape(t3)}}${comma}`);
+      });
+    }
+    lines.push("]");
+    return lines.join("\n");
+  }
+  function reinforceAndDecay(state, buffer) {
+    const combinedText = buffer.map((item) => `${item.actionText} ${item.thoughtText || ""}`).join("\n");
+    const dyingNodeIds = [];
+    const nextNodes = state.nodes.map((node) => {
+      const suffix = node.id.replace(/^\d+_(.*)$/, "$1");
+      const isTriggered = isCharacterTriggered(combinedText, suffix, node.id);
+      let nextVibrancy = node.vibrancy;
+      if (isTriggered) {
+        nextVibrancy = 3;
+      } else {
+        nextVibrancy = Math.max(0, node.vibrancy - 1);
+      }
+      if (nextVibrancy === 0 && node.vibrancy > 0) {
+        dyingNodeIds.push(node.id);
+      }
+      return {
+        ...node,
+        vibrancy: nextVibrancy
+      };
+    });
+    const nextUnreferenced = { ...state.unreferencedPasses };
+    const nextSchema = state.schema.map((item) => {
+      const isSubjTriggered = isCharacterTriggered(combinedText, item.subject, "");
+      let retired = item.retired;
+      if (isSubjTriggered) {
+        nextUnreferenced[item.subject] = 0;
+        retired = false;
+      } else {
+        nextUnreferenced[item.subject] = (nextUnreferenced[item.subject] || 0) + 1;
+      }
+      return {
+        ...item,
+        retired
+      };
+    });
+    return {
+      state: {
+        ...state,
+        schema: nextSchema,
+        nodes: nextNodes,
+        unreferencedPasses: nextUnreferenced
+      },
+      dyingNodeIds
+    };
+  }
+  function parseLlmOutput(output) {
+    let cleaned = output.trim();
+    if (cleaned.startsWith("[")) cleaned = cleaned.slice(1);
+    if (cleaned.endsWith("]")) cleaned = cleaned.slice(0, -1);
+    if (cleaned.startsWith("{")) cleaned = cleaned.slice(1);
+    if (cleaned.endsWith("}")) cleaned = cleaned.slice(0, -1);
+    cleaned = cleaned.trim();
+    const result = {
+      schema: [],
+      newSnapshots: []
+    };
+    const sections = cleaned.split(/\n###\s+/);
+    for (const sec of sections) {
+      const lines = sec.split("\n");
+      const firstLine = lines[0];
+      const titleLine = firstLine ? firstLine.trim().toLowerCase() : "";
+      if (titleLine.includes("i. schema") || titleLine.includes("schema")) {
+        for (let i3 = 1; i3 < lines.length; i3++) {
+          const rawLine = lines[i3];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (!line.startsWith("- ")) continue;
+          const match2 = line.match(/^-\s*\[([^\]]+)\]\s*(.*)$/);
+          if (match2 && match2[1] !== void 0 && match2[2] !== void 0) {
+            const { subject, aliases: aliases3 } = parseSubjectLabel(match2[1]);
+            result.schema.push({
+              subject,
+              text: match2[2].trim(),
+              aliases: aliases3
+            });
+          }
+        }
+      } else if (titleLine.includes("ii. new nodes") || titleLine.includes("new nodes") || titleLine.includes("nodes")) {
+        for (let i3 = 1; i3 < lines.length; i3++) {
+          const rawLine = lines[i3];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (!line.startsWith("- ")) continue;
+          let text = line.slice(2).trim();
+          if (text.startsWith("Snapshot:")) {
+            text = text.slice(9).trim();
+          }
+          if (text.endsWith("]")) {
+            text = text.slice(0, -1).trim();
+          }
+          if (text) {
+            result.newSnapshots.push(text);
+          }
+        }
+      }
+    }
+    if (result.schema.length === 0 && result.newSnapshots.length === 0) {
+      const lines = output.split("\n");
+      let inSchema = false;
+      let inNodes = false;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        const lower = trimmed.toLowerCase();
+        if (lower.includes("schema")) {
+          inSchema = true;
+          inNodes = false;
+          continue;
+        }
+        if (lower.includes("new nodes") || lower.includes("nodes")) {
+          inNodes = true;
+          inSchema = false;
+          continue;
+        }
+        if (trimmed.startsWith("- ")) {
+          if (inSchema) {
+            const match2 = trimmed.match(/^-\s*\[([^\]]+)\]\s*(.*)$/);
+            if (match2 && match2[1] !== void 0 && match2[2] !== void 0) {
+              const { subject, aliases: aliases3 } = parseSubjectLabel(match2[1]);
+              result.schema.push({
+                subject,
+                text: match2[2].trim(),
+                aliases: aliases3
+              });
+            }
+          } else if (inNodes) {
+            let text = trimmed.slice(2).trim();
+            if (text.startsWith("Snapshot:")) {
+              text = text.slice(9).trim();
+            }
+            if (text.endsWith("]")) {
+              text = text.slice(0, -1).trim();
+            }
+            if (text) {
+              result.newSnapshots.push(text);
+            }
+          }
+        }
+      }
+    }
+    const haveSubjects = new Set(result.schema.map((s3) => s3.subject.toLowerCase()));
+    for (const rawLine of cleaned.split("\n")) {
+      const m3 = rawLine.trim().match(/^-\s*\[([^\]]+)\]\s*(.+)$/);
+      if (!m3 || m3[1] === void 0 || m3[2] === void 0) continue;
+      const { subject, aliases: aliases3 } = parseSubjectLabel(m3[1]);
+      if (!subject || haveSubjects.has(subject.toLowerCase())) continue;
+      result.schema.push({ subject, text: m3[2].trim(), aliases: aliases3 });
+      haveSubjects.add(subject.toLowerCase());
+    }
+    return result;
+  }
+  function extractKeyword(snapshot) {
+    const clean2 = snapshot.replace(/[^\w\s]/g, "");
+    const words = clean2.split(/\s+/).filter(Boolean);
+    const stops = /* @__PURE__ */ new Set([
+      "the",
+      "a",
+      "an",
+      "he",
+      "she",
+      "it",
+      "they",
+      "we",
+      "i",
+      "you",
+      "in",
+      "on",
+      "at",
+      "to",
+      "for",
+      "with",
+      "of",
+      "and",
+      "but",
+      "or",
+      "is",
+      "was",
+      "were",
+      "am",
+      "are",
+      "have",
+      "has",
+      "had",
+      "do",
+      "does",
+      "did",
+      "his",
+      "her",
+      "their",
+      "my",
+      "your",
+      "our",
+      "him",
+      "them",
+      "us",
+      "me",
+      "this",
+      "that",
+      "these",
+      "those",
+      "then",
+      "there",
+      "here",
+      "when",
+      "where",
+      "why",
+      "how",
+      "so",
+      "no",
+      "not",
+      "yes",
+      "up",
+      "out",
+      "about",
+      "into"
+    ]);
+    for (const word of words) {
+      const lower = word.toLowerCase();
+      if (!stops.has(lower) && word.length > 2) {
+        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+      }
+    }
+    return "Memory";
+  }
+  var SNAPSHOT_STOPWORDS = /* @__PURE__ */ new Set([
+    "the",
+    "and",
+    "that",
+    "with",
+    "from",
+    "this",
+    "have",
+    "were",
+    "was",
+    "for",
+    "his",
+    "her",
+    "him",
+    "she",
+    "they",
+    "into",
+    "onto",
+    "over",
+    "under",
+    "then",
+    "than",
+    "them",
+    "their",
+    "been",
+    "being",
+    "would",
+    "could",
+    "first",
+    "time",
+    "when",
+    "what",
+    "which",
+    "while",
+    "about",
+    "against",
+    "still",
+    "just",
+    "like",
+    "some",
+    "only",
+    "more"
+  ]);
+  function snapshotTokens(s3) {
+    return new Set(
+      String(s3 || "").toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/).filter((w) => w.length >= 4 && !SNAPSHOT_STOPWORDS.has(w))
+    );
+  }
+  var OUTLOOK_CAP = 5;
+  function isEntitySpecific(line) {
+    const body = line.replace(/^\s*[-*•]\s*/, "").trim();
+    const words = body.split(/\s+/).slice(1);
+    return words.some((w) => /^[A-Z][a-z]{2,}/.test(w));
+  }
+  function parseOutlook(nodesOutput) {
+    const lines = String(nodesOutput || "").replace(/\r/g, "").split("\n");
+    const start2 = lines.findIndex((l2) => /^\s*beliefs\s*:/i.test(l2));
+    if (start2 === -1) return [];
+    const out2 = [];
+    for (let i3 = start2 + 1; i3 < lines.length; i3++) {
+      const raw = lines[i3].trim();
+      if (!raw) continue;
+      if (/^[A-Za-z .]+:\s*$/.test(raw)) break;
+      const text = raw.replace(/^\s*[-*•]\s*/, "").trim();
+      if (!text || !/[a-z]/i.test(text)) continue;
+      if (!isEntitySpecific(text)) out2.push(text);
+    }
+    return out2;
+  }
+  var PREFERENCES_STORE_CAP = 200;
+  var MANUAL_PREFERENCE_STRENGTH = 4;
+  function parsePreferences(prefsOutput) {
+    const lines = String(prefsOutput || "").replace(/\r/g, "").split("\n");
+    const start2 = lines.findIndex((l2) => /^\s*preferences\s*:/i.test(l2));
+    if (start2 === -1) return [];
+    const out2 = [];
+    for (let i3 = start2 + 1; i3 < lines.length; i3++) {
+      const raw = lines[i3].trim();
+      if (!raw) continue;
+      if (/^[A-Za-z .]+:\s*$/.test(raw)) break;
+      const text = raw.replace(/^\s*[-*•]\s*/, "").trim();
+      if (!text || !/[a-z]/i.test(text)) continue;
+      out2.push(text);
+    }
+    return out2;
+  }
+  function reconcilePreferences(existing, fresh) {
+    const kept = existing.map((b) => ({ text: b.text, strength: b.strength }));
+    const keptTokens = kept.map((k2) => snapshotTokens(k2.text));
+    for (const line of fresh) {
+      const ft = snapshotTokens(line);
+      let matched = -1;
+      for (let i3 = 0; i3 < kept.length; i3++) {
+        const kt = keptTokens[i3];
+        let inter = 0;
+        for (const t3 of kt) if (ft.has(t3)) inter++;
+        if (kt.size > 0 && inter / kt.size >= 0.6) {
+          matched = i3;
+          break;
+        }
+      }
+      if (matched >= 0) {
+        kept[matched] = { text: line, strength: Math.min(kept[matched].strength + 1, 5) };
+        keptTokens[matched] = ft;
+      } else {
+        kept.push({ text: line, strength: 3 });
+        keptTokens.push(ft);
+      }
+    }
+    return kept.slice(0, PREFERENCES_STORE_CAP);
+  }
+  function applyManualPreferences(existing, texts) {
+    const byText = new Map((existing || []).map((b) => [b.text.trim().toLowerCase(), b.strength]));
+    const out2 = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const raw of texts || []) {
+      const text = String(raw || "").trim();
+      if (!text) continue;
+      const key = text.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out2.push({ text, strength: byText.get(key) ?? MANUAL_PREFERENCE_STRENGTH });
+    }
+    return out2;
+  }
+  function reconcileOutlook(existing, fresh) {
+    const freshTokenSets = fresh.map(snapshotTokens);
+    const kept = [];
+    for (const b of existing) {
+      const bt = snapshotTokens(b.text);
+      const reinforced = freshTokenSets.some((ft) => {
+        let inter = 0;
+        for (const t3 of bt) if (ft.has(t3)) inter++;
+        return bt.size > 0 && inter / bt.size >= 0.6;
+      });
+      const strength = reinforced ? 3 : b.strength - 1;
+      if (strength > 0) kept.push({ text: b.text, strength });
+    }
+    for (let i3 = 0; i3 < fresh.length; i3++) {
+      const ft = freshTokenSets[i3];
+      const already = kept.some((k2) => {
+        const kt = snapshotTokens(k2.text);
+        let inter = 0;
+        for (const t3 of kt) if (ft.has(t3)) inter++;
+        return kt.size > 0 && inter / kt.size >= 0.6;
+      });
+      if (!already) kept.push({ text: fresh[i3], strength: 3 });
+    }
+    return kept.sort((a2, b) => b.strength - a2.strength).slice(0, OUTLOOK_CAP);
+  }
+  function reconcile(state, llmOutput, nodeCap = 12, retirementThreshold = 3, ownerName, allowNewSubject) {
+    const parsedLlm = parseLlmOutput(llmOutput);
+    const genSchema = parsedLlm.schema.slice();
+    if (genSchema.length >= 2 && looksTruncated(genSchema[genSchema.length - 1].text) && genSchema.slice(0, -1).some((p5) => !looksTruncated(p5.text))) {
+      genSchema.pop();
+    }
+    const cleanGenSchema = genSchema.filter((p5) => !isSelfSubject({ subject: p5.subject, text: p5.text, retired: false, aliases: p5.aliases }, ownerName));
+    const newSchema = state.schema.map((e2) => ({ ...e2, aliases: (e2.aliases || []).slice() }));
+    const sets = newSchema.map(schemaItemMatchKeys);
+    for (const parsed of cleanGenSchema) {
+      const pkeys = schemaItemMatchKeys({ subject: parsed.subject, text: parsed.text, retired: false, aliases: parsed.aliases });
+      let idx = -1;
+      for (let i3 = 0; i3 < newSchema.length; i3++) {
+        for (const t3 of pkeys) {
+          if (sets[i3]?.has(t3)) {
+            idx = i3;
+            break;
+          }
+        }
+        if (idx !== -1) break;
+      }
+      if (idx >= 0) {
+        newSchema[idx].text = parsed.text;
+      } else {
+        if (allowNewSubject && !allowNewSubject(parsed.subject, parsed.aliases || [])) continue;
+        const item = { subject: parsed.subject, text: parsed.text, retired: false, aliases: (parsed.aliases || []).slice() };
+        newSchema.push(item);
+        sets.push(schemaItemMatchKeys(item));
+        state.unreferencedPasses[parsed.subject] = 0;
+      }
+    }
+    state.schema = dedupeSchema(newSchema).filter((item) => !isSelfSubject(item, ownerName));
+    let activeNodes = state.nodes.filter((n3) => n3.vibrancy > 0);
+    const newSnapshots = parsedLlm.newSnapshots.slice();
+    if (newSnapshots.length >= 2 && looksTruncated(newSnapshots[newSnapshots.length - 1]) && newSnapshots.slice(0, -1).some((s3) => !looksTruncated(s3))) {
+      newSnapshots.pop();
+    }
+    if (newSnapshots.length > 0) {
+      let nextSeq = Math.max(0, ...activeNodes.map((n3) => {
+        const match2 = n3.id.match(/^(\d+)_/);
+        return match2 && match2[1] !== void 0 ? parseInt(match2[1]) : 0;
+      })) + 1;
+      const norm = (s3) => s3.replace(/\s+/g, " ").trim().toLowerCase();
+      const seen = /* @__PURE__ */ new Set();
+      const replaced = [];
+      for (const snap of newSnapshots) {
+        const line = snap.replace(/\s+/g, " ").trim();
+        if (!line || seen.has(norm(line))) continue;
+        seen.add(norm(line));
+        const existing = activeNodes.find((n3) => norm(n3.snapshot) === norm(line));
+        if (existing) {
+          replaced.push({ ...existing, vibrancy: 3, snapshot: line });
+        } else {
+          const keyword = extractKeyword(line);
+          replaced.push({ id: `${String(nextSeq).padStart(2, "0")}_${keyword}`, vibrancy: 3, snapshot: line, links: [] });
+          nextSeq++;
+        }
+      }
+      activeNodes = replaced;
+    }
+    if (activeNodes.length > nodeCap) {
+      const sortedForPruning = activeNodes.map((node, index3) => ({ node, index: index3 })).sort((a2, b) => {
+        if (a2.node.vibrancy !== b.node.vibrancy) {
+          return a2.node.vibrancy - b.node.vibrancy;
+        }
+        return a2.index - b.index;
+      });
+      const keepIndices = new Set(
+        sortedForPruning.slice(activeNodes.length - nodeCap).map((item) => item.index)
+      );
+      activeNodes = activeNodes.filter((_2, index3) => keepIndices.has(index3));
+    }
+    state.nodes = activeNodes;
+    for (const item of state.schema) {
+      if (item.retired) continue;
+      const passes = state.unreferencedPasses[item.subject] ?? 0;
+      if (passes >= retirementThreshold) {
+        const subjectNameLower = item.subject.toLowerCase();
+        const hasActiveNodes = state.nodes.some((node) => {
+          return node.snapshot.toLowerCase().includes(subjectNameLower) || node.id.toLowerCase().includes(subjectNameLower);
+        });
+        if (!hasActiveNodes) {
+          item.retired = true;
+        }
+      }
+    }
+    return state;
+  }
+  function isWindowDue(totalActions, lastThrough, K) {
+    return totalActions >= lastThrough + 2 * K;
+  }
+  function distillationWindow(lastThrough, K) {
+    return { start: lastThrough, end: lastThrough + K };
+  }
+  function isManualWindowReady(totalActions, lastThrough, K) {
+    return totalActions >= lastThrough + K;
+  }
+  function buildConsolidateCommand(knowledgeBlock) {
+    return "Consolidate {{title}}'s knowledge list. Merge subjects that refer to the SAME entity or the SAME concept into ONE line, keeping the existing canonical name and PRESERVING any aliases after a '|' (never split an aliased group). Output ONLY lines in the exact form '- [Canonical | alias1, alias2] facts' (omit the '| ...' when there are no aliases). Do not invent new subjects.\n\nKNOWLEDGE:\n" + knowledgeBlock;
+  }
+  function isDistillationSourceCard(card, importantNames) {
+    if (card.deletedAt) return false;
+    const type = (card.type || "").toLowerCase();
+    if (type !== "character" && type !== "custom") return false;
+    const title = (card.title || "").toLowerCase();
+    if (title.endsWith(" (memory)")) return false;
+    if (title.endsWith(" - crystallized")) return false;
+    const keysList = (card.keys || "").split(/[,;]+/).map((k2) => k2.trim().toLowerCase()).filter(Boolean);
+    return importantNames.some((name) => title === name || keysList.includes(name));
+  }
+  function buildDistillationBuffer(actions, thoughtLog, window2) {
+    const buffer = [];
+    for (let i3 = window2.start; i3 < window2.end; i3++) {
+      if (i3 < 0 || i3 >= actions.length) continue;
+      const act = actions[i3];
+      const turnNum = i3 + 1;
+      const thought = thoughtLog.find((e2) => e2.turn === turnNum);
+      const cleanThought = thought ? extractThoughtInner2(thought.text) : void 0;
+      buffer.push({
+        actionText: act.text || "",
+        thoughtText: cleanThought,
+        turn: turnNum
+      });
+    }
+    return buffer;
+  }
+  function findCrystallizedCard(cards, name) {
+    const targetTitle = `${name} - Crystallized`.toLowerCase();
+    return cards.find(
+      (c2) => !c2.deletedAt && ((c2.type || "").toLowerCase() === "crystallized" || (c2.type || "").toLowerCase() === "memory" || (c2.type || "").toLowerCase() === "character" || (c2.type || "").toLowerCase() === "custom") && (c2.title || "").toLowerCase() === targetTitle
+    );
+  }
+
+  // src/inference/npc-memory-bank.ts
+  var RECALL_ENTITY_WEIGHT = 10;
+  var RECALL_KEYWORD_WEIGHT = 1;
+  var DEFAULT_RECALL_THRESHOLD = 10;
+  var STOPWORDS = /* @__PURE__ */ new Set([
+    "the",
+    "and",
+    "was",
+    "with",
+    "that",
+    "this",
+    "have",
+    "from",
+    "into",
+    "them",
+    "then",
+    "when",
+    "what",
+    "your",
+    "you",
+    "her",
+    "him",
+    "his",
+    "she",
+    "they",
+    "there",
+    "here",
+    "were",
+    "been"
+  ]);
+  function normToken(t3) {
+    return String(t3 || "").toLowerCase().replace(/[^a-z'-]/g, "");
+  }
+  function uniq(xs) {
+    return [...new Set(xs)];
+  }
+  function escapeRe(s3) {
+    return s3.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  function tokenPresent(lowerText, token) {
+    if (!token) return false;
+    return new RegExp(`(^|[^a-z'-])${escapeRe(token)}([^a-z'-]|$)`, "i").test(lowerText);
+  }
+  function extractBlockTags(text, knownSubjectTokens) {
+    const raw = String(text || "");
+    const lower = raw.toLowerCase();
+    const doc = three_default(raw);
+    let entities;
+    if (knownSubjectTokens.size > 0) {
+      entities = uniq([...knownSubjectTokens].filter((tok) => tokenPresent(lower, tok)));
+    } else {
+      entities = uniq(doc.match("#ProperNoun").out("array").map(normToken).filter(Boolean));
+    }
+    const entitySet = new Set(entities);
+    const nouns = doc.nouns().out("array").flatMap((phrase) => phrase.split(/\s+/)).map(normToken).filter(Boolean);
+    const keywords = uniq(nouns.filter((n3) => n3.length >= 3 && !STOPWORDS.has(n3) && !entitySet.has(n3)));
+    return { entities, keywords };
+  }
+  function extractSceneSignal(sceneText, knownSubjectTokens) {
+    const { entities, keywords } = extractBlockTags(sceneText, knownSubjectTokens);
+    return { presentEntities: entities, keywords };
+  }
+  function intersectCount(a2, b) {
+    const setB = new Set(b);
+    let n3 = 0;
+    for (const x of new Set(a2)) if (setB.has(x)) n3++;
+    return n3;
+  }
+  function scoreBlock(block, presentEntities, sceneKeywords, now) {
+    const entityHits = intersectCount(block.entities, presentEntities);
+    const kwHits = intersectCount(block.keywords, sceneKeywords);
+    const base = RECALL_ENTITY_WEIGHT * entityHits + RECALL_KEYWORD_WEIGHT * kwHits;
+    if (base === 0) return 0;
+    const recency = now > 0 ? Math.min(0.9, block.turnEnd / (now + 1)) : 0;
+    const salience = block.salience ? Math.min(0.9, block.salience) : 0;
+    return base + recency + salience;
+  }
+  function selectRecalls(blocks, signal, opts2) {
+    if (opts2.cap <= 0) return [];
+    return blocks.map((b) => ({ b, s: scoreBlock(b, signal.presentEntities, signal.keywords, opts2.now) })).filter((x) => x.s >= opts2.threshold).sort((x, y) => y.s - x.s || y.b.turnEnd - x.b.turnEnd).slice(0, opts2.cap).map((x) => x.b);
+  }
+  function deriveBlockId(anchor) {
+    if (anchor.actionId) return anchor.actionId;
+    if (anchor.actionIds && anchor.actionIds.length) return anchor.actionIds[0];
+    return "blk_empty";
+  }
+  function charactersPresentInWindow(windowText, sources) {
+    const hay = ` ${String(windowText || "").toLowerCase().replace(/[^a-z0-9'-]+/g, " ")} `;
+    const out2 = [];
+    for (const s3 of sources) {
+      const tokens = [s3.title, ...String(s3.keys || "").split(/[,;]+/)].map((t3) => t3.trim().toLowerCase()).filter(Boolean);
+      if (tokens.some((t3) => hay.includes(` ${t3} `))) out2.push(s3.title.trim().toLowerCase());
+    }
+    return [...new Set(out2)];
+  }
+  function orderNativeBlocksNewestFirst(blocks, actionOrder) {
+    const pos = new Map(actionOrder.map((id, i3) => [id, i3]));
+    const rank = (b) => Math.max(-1, ...b.actionIds.map((id) => pos.get(id) ?? -1));
+    return [...blocks].sort((a2, b) => rank(b) - rank(a2));
+  }
+  function blocksInvolvingCharacter(blocks, actionsById, source) {
+    return blocks.filter((b) => {
+      const text = b.actionIds.map((id) => actionsById.get(id) || "").join(" ");
+      return charactersPresentInWindow(text, [source]).length > 0;
+    });
+  }
+  function blockSalience(b) {
+    return b.entities.length * 2 + b.keywords.length + (b.salience ? Math.min(1, b.salience) : 0);
+  }
+  function pruneToCap(blocks, cap) {
+    if (cap <= 0) return [];
+    if (blocks.length <= cap) return blocks;
+    return [...blocks].sort((a2, b) => blockSalience(b) - blockSalience(a2) || b.turnEnd - a2.turnEnd).slice(0, cap);
+  }
+  function presentCastSignature(tokens) {
+    return [...new Set([...tokens].map((t3) => t3.toLowerCase().trim()).filter(Boolean))].sort().join("|");
+  }
+  function buildNpcMemoryCommand(npcName) {
+    const n3 = npcName.trim() || "the character";
+    return `Recall the events inside the [storyInformation]...[/storyInformation] tags from ${n3}'s point of view. Write 1-2 sentences, first person, past tense \u2014 a vivid personal recollection that emphasizes what ${n3} felt over what factually happened. Summarize ONLY what is inside those tags; do not reference anything after or outside them. Output only the sentences, nothing else. (source card: {{title}})`;
+  }
+
+  // src/inference/core-character.ts
+  var CORE_APPEARANCE_TEMPLATE = `Generate the physical description for {{title}} in an interactive, second-person, present-tense story where "you"/"your" refers to the player character {protagonist}. Write in third person about {{title}}; never use "you" or "your". Output EXACTLY these two labeled lines, each on its own line, no markdown, no empty lines, and nothing else:
+Appearance: [Rich, durable prose: stature/build, face, hair color+style, eye color, skin, distinguishing marks, movement/presence, and a signature style/apparel preference. {appearanceGuidance} Do NOT restate any measurements or cup size in the prose; render figure tastefully and do NOT fabricate explicit sexual anatomy.]
+Scent: [A compact two-part signature scent, form "<a> & <b>" (e.g. "honey & vanilla"); avoid defaulting to lavender/ozone.]
+Keep the whole output under 700 characters.`;
+  function buildCoreAppearanceCommand() {
+    return CORE_APPEARANCE_TEMPLATE;
+  }
+  var CORE_CARD_TEMPLATE = `Generate the full character profile for {{title}} in an interactive, second-person, present-tense story where "you"/"your" refers to the player character {protagonist}. Write in third person about {{title}}; never use "you" or "your". Ground everything in how {{title}} has actually behaved in the story. Output EXACTLY these seven labeled lines, each on its own line, no markdown, no empty lines, and nothing else:
+Appearance: [Rich, durable prose (stature/build, face, hair color+style, eye color, skin, distinguishing marks, movement/presence, and a signature style/apparel preference). {appearanceGuidance} Do NOT restate any measurements or cup size in the prose; render figure tastefully and do NOT fabricate explicit sexual anatomy.]
+Scent: [A compact two-part signature scent, form "<a> & <b>" (e.g. "honey & vanilla"); avoid defaulting to lavender/ozone.]
+Background: [1-2 sentences: the formative history that shaped who {{title}} is \u2014 the why beneath the personality, kept compact.]
+Personality: [3-4 sentences of connected prose describing {{title}}'s interior: values, dispositions, self-image, what they want from people. Lead with their dominant everyday mode. State how their inner nature relates to how they present publicly. Include at least one genuine imperfection and their relationship to their own appearance. FORBIDDEN: single-word trait lists, psychology jargon such as "analytical" or "shadow self" or "worldview", any "when X happens they do Y" rule, and any current scene goal.]
+Conversational Style: [1 sentence: how {{title}} actually converses \u2014 directness, pacing, tangents, self-revision mid-thought, asking questions back, dry asides. Speech BEHAVIOR, distinct from Voice's timbre; never a fixed "when X they say Y" rule.]
+Voice: [1-2 sentences: a durable vocal texture or timbre plus speech manner, written so the voice can bend naturally with the scene \u2014 never tie a specific tone to a specific trigger.]
+Drive: [1 sentence: the ONE overarching life want beneath everything {{title}} does \u2014 broad and durable, never their current scene objective.]
+Keep the whole output under 1500 characters. This is a compass for roleplay, not a script: describe who {{title}} is, never what they always do.`;
+  function buildCoreCardCommand() {
+    return CORE_CARD_TEMPLATE;
+  }
+  function fieldLabelRe(field, flags = "im") {
+    return new RegExp(`^\\s*[-\u2022*]?\\s*${field}\\s*:\\s*`, flags);
+  }
+  var KNOWN_FIELD_LABELS = new Set(
+    ["Name", "Gender", "Age", "Appearance", "BWH", "SWH", "Scent", "Quirks", "Background", "Personality", "Conversational Style", "Voice", "Drive"].map(
+      (f3) => f3.toLowerCase()
+    )
+  );
+  var LABEL_LINE_RE = /^\s*([-•*]?)\s*([A-Za-z][A-Za-z' &]{0,24}):\s*/;
+  function detectTopLevelStyle(cardValue) {
+    const lines = String(cardValue || "").split("\n");
+    const nameRe = fieldLabelRe("Name", "i");
+    for (const rawLine of lines) {
+      const line = rawLine.replace(/\r$/, "");
+      if (!nameRe.test(line)) continue;
+      const m3 = LABEL_LINE_RE.exec(line);
+      const bullet = m3?.[1] || "";
+      return bullet === "\u2022" ? "\u2022" : bullet === "-" ? "-" : "bare";
+    }
+    return null;
+  }
+  function isFieldBoundaryLine(line, topStyle) {
+    const m3 = LABEL_LINE_RE.exec(line);
+    if (!m3) return false;
+    const bullet = m3[1] || "";
+    const label2 = m3[2];
+    const labelShapeMatches = /^[A-Z]/.test(label2) || KNOWN_FIELD_LABELS.has(label2.toLowerCase());
+    if (!labelShapeMatches) return false;
+    if (topStyle === "\u2022" || topStyle === "-") return bullet === topStyle;
+    return true;
+  }
+  function extractFieldBlock(cardValue, field) {
+    const topStyle = detectTopLevelStyle(cardValue);
+    const lines = String(cardValue || "").split("\n");
+    const startRe = fieldLabelRe(field, "i");
+    let out2 = null;
+    for (const rawLine of lines) {
+      const line = rawLine.replace(/\r$/, "");
+      if (out2 === null) {
+        if (startRe.test(line)) out2 = [line.replace(startRe, "")];
+        continue;
+      }
+      if (isFieldBoundaryLine(line, topStyle) || /^\s*\]\s*$/.test(line)) break;
+      out2.push(line);
+    }
+    if (out2 === null) return null;
+    const text = out2.join("\n").trim();
+    return text.length ? text : null;
+  }
+  function buildAppearanceBlock(existingCardValue) {
+    const existing = extractFieldBlock(existingCardValue, "Appearance");
+    if (existing !== null) return existing;
+    const fallback2 = String(existingCardValue || "").replace(/^\[+|\]+$/g, "").trim();
+    return fallback2.slice(0, 1e3).trim();
+  }
+  var NON_CARRIED_TOP_LEVEL_FIELDS = /* @__PURE__ */ new Set(
+    ["name", "appearance", "scent", "background", "personality", "conversational style", "voice", "drive"]
+  );
+  function splitTopLevelFields(cardValue) {
+    const topStyle = detectTopLevelStyle(cardValue);
+    const lines = String(cardValue || "").split("\n").map((l2) => l2.replace(/\r$/, "")).filter((l2) => !/^\s*[\[\]]\s*$/.test(l2));
+    const fields = [];
+    let current = null;
+    for (const line of lines) {
+      if (isFieldBoundaryLine(line, topStyle)) {
+        if (current) fields.push({ label: current.label, text: current.body.join("\n").trim() });
+        const m3 = LABEL_LINE_RE.exec(line);
+        current = { label: m3[2], body: [line.slice(m3[0].length)] };
+      } else if (current) {
+        current.body.push(line);
+      }
+    }
+    if (current) fields.push({ label: current.label, text: current.body.join("\n").trim() });
+    return fields;
+  }
+  function extractCarriedTopLevelFields(cardValue) {
+    return splitTopLevelFields(cardValue).filter((f3) => f3.text && !NON_CARRIED_TOP_LEVEL_FIELDS.has(f3.label.toLowerCase())).map((f3) => `${f3.label}: ${f3.text}`).join("\n");
+  }
+  function extractBehavioralBlock(foldedOutput) {
+    return splitTopLevelFields(foldedOutput).filter((f3) => f3.text && f3.label.toLowerCase() !== "name" && f3.label.toLowerCase() !== "appearance").map((f3) => `${f3.label}: ${f3.text}`).join("\n");
+  }
+  var BEHAVIORAL_LABEL_AT_START_RE = /^\s*[-*•]?\s*(Background|Personality|Conversational Style|Voice|Drive)\s*:/i;
+  function hasEstablishedAppearance(cardValue) {
+    const block = extractFieldBlock(cardValue, "Appearance");
+    if (!block) return false;
+    const firstLine = block.split("\n")[0] ?? "";
+    if (BEHAVIORAL_LABEL_AT_START_RE.test(firstLine)) return false;
+    return block.replace(/\s+/g, " ").trim().length >= 40;
+  }
+  function existingKeyPairLine(cardValue) {
+    const m3 = String(cardValue || "").match(/^\s*[-•*]?\s*(BWH|SWH)\s*:\s*[^\n\]]+/im);
+    return m3 ? m3[0].replace(/^\s*[-•*]?\s*/, "").trim() : null;
+  }
+  function assembleCoreCard(opts2) {
+    const hasSampledQuirks = !!(opts2.quirks && opts2.quirks.length);
+    const carriedQuirksText = (() => {
+      const m3 = (opts2.carryFields || "").match(/^\s*[-•*]?\s*Quirks\s*:\s*(.+)$/im);
+      return m3 ? m3[1].trim() : "";
+    })();
+    const carried = (opts2.carryFields || "").split("\n").filter((l2) => {
+      if (opts2.keyPairLine && /^\s*[-•*]?\s*(BWH|SWH)\s*:/i.test(l2)) return false;
+      if (hasSampledQuirks && /^\s*[-•*]?\s*Quirks\s*:/i.test(l2)) return false;
+      return true;
+    }).join("\n").trim();
+    const carriedHasHandedness = /\b(left|right|ambidextrous)[- ]?hand/i.test(carriedQuirksText);
+    const extraQuirks = hasSampledQuirks ? opts2.quirks.filter((q) => {
+      if (carriedQuirksText.toLowerCase().includes(q.toLowerCase())) return false;
+      if (carriedHasHandedness && /\b(left|right|ambidextrous)[- ]?hand/i.test(q)) return false;
+      return true;
+    }) : [];
+    const mergedQuirks = hasSampledQuirks ? [carriedQuirksText, ...extraQuirks].filter(Boolean).join("; ") : "";
+    const parts = [
+      `Name: ${opts2.name}`,
+      `Appearance: ${opts2.appearanceBlock}`,
+      ...opts2.keyPairLine && opts2.keyPairLine.trim() ? [opts2.keyPairLine.trim()] : [],
+      ...mergedQuirks ? [`Quirks: ${mergedQuirks}`] : [],
+      ...carried ? [carried] : [],
+      opts2.behavioral.trim()
+    ];
+    return `[
+${parts.join("\n")}
+]`;
+  }
+  function extractDurableCore(cardValue, maxChars) {
+    const personality = extractFieldBlock(cardValue, "Personality");
+    const convStyle = extractFieldBlock(cardValue, "Conversational Style");
+    const drive = extractFieldBlock(cardValue, "Drive");
+    const parts = [];
+    if (personality) parts.push(`Personality: ${personality}`);
+    if (convStyle) parts.push(`Conversational Style: ${convStyle}`);
+    if (drive) parts.push(`Drive: ${drive}`);
+    return parts.join("\n").slice(0, maxChars).trim();
+  }
+  function spliceField(cardValue, field, newText) {
+    const raw = String(cardValue || "");
+    const topStyle = detectTopLevelStyle(raw);
+    const lines = raw.split("\n");
+    const startRe = fieldLabelRe(field, "i");
+    const stripCr = (l2) => l2.replace(/\r$/, "");
+    const start2 = lines.findIndex((l2) => startRe.test(stripCr(l2)));
+    if (start2 === -1) return cardValue;
+    let end2 = start2 + 1;
+    while (end2 < lines.length && !isFieldBoundaryLine(stripCr(lines[end2]), topStyle) && !/^\s*\]\s*$/.test(stripCr(lines[end2]))) end2++;
+    const label2 = stripCr(lines[start2]).match(fieldLabelRe(field, "i"))[0];
+    const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+    return [...lines.slice(0, start2), `${label2}${newText}${eol === "\r\n" ? "\r" : ""}`, ...lines.slice(end2)].join("\n");
+  }
+  var DRIFT_VERDICT_FIELDS = ["Personality", "Conversational Style", "Voice", "Drive", "Appearance"];
+  var DRIFT_JUDGE_INSTRUCTION = `
+Finally, judge whether this evidence shows a SUSTAINED, lasting change in who {{title}} fundamentally is \u2014 not a mood, not a scene, but a durable shift in their personality, their voice, their life drive, or a permanent physical change. Be conservative: gradual growth across many events counts; a single dramatic moment does not. End your output with exactly one extra line:
+Shifted: [${DRIFT_VERDICT_FIELDS.join(" / ")} / none]`;
+  function parseDriftVerdict(text) {
+    const m3 = String(text || "").match(/(?:^|\n)\s*[-*•]?\s*Shifted:\s*\[?\s*([A-Za-z][A-Za-z ]*?)\s*\]?\s*(?:\n|$)/i);
+    if (!m3) return { shifted: false };
+    const raw = m3[1].trim().toLowerCase();
+    const field = DRIFT_VERDICT_FIELDS.find((f3) => f3.toLowerCase() === raw);
+    return field ? { shifted: true, field } : { shifted: false };
+  }
+  function stripDriftVerdictLine(text) {
+    return String(text || "").split("\n").filter((l2) => !/^\s*[-*•]?\s*Shifted:\s*/i.test(l2)).join("\n");
+  }
+  function buildBoundedRevisionCommand(field, currentFieldText) {
+    return `The character {{title}} has genuinely changed over the story. Their card's ${field} currently reads:
+${currentFieldText}
+Based on what {{title}} has actually lived through (see the provided memories and thoughts), rewrite ONLY this ${field} text to reflect the sustained change \u2014 evolve it, do not replace the person. Preserve everything still true; revise only what the evidence supports. Write in third person about {{title}}. FORBIDDEN: psychology jargon ("analytical", "shadow self", "worldview"), trait lists, "when X they do Y" rules, current scene goals.
+Output ONLY the new ${field} text itself \u2014 no label, no brackets, no other fields \u2014 in under 500 characters.`;
+  }
+  function snapshotOutlookForIncorporation(state, minStrength = 2) {
+    return (state.outlook || []).filter((b) => b.strength >= minStrength).map((b) => ({ ...b }));
+  }
+  function clearIncorporatedOutlook(state, incorporated) {
+    const drop = new Set(incorporated.map((b) => b.text.trim().toLowerCase()));
+    return { ...state, outlook: (state.outlook || []).filter((b) => !drop.has(b.text.trim().toLowerCase())) };
+  }
+  var OUTLOOK_INCORPORATION_INSTRUCTION = `
+
+The character has settled into some generalized beliefs about themselves and the world (their Outlook, provided above). Incorporate these beliefs into the durable Personality and Voice \u2014 let them shape how {{title}} carries themselves \u2014 rather than listing them. They are now part of who {{title}} is.`;
+
+  // src/background/bg-crystallized.ts
+  function extractDelimitedSection(raw, header, allHeaders) {
+    const start2 = raw.indexOf(header);
+    if (start2 === -1) return "";
+    const bodyStart = start2 + header.length;
+    let end2 = raw.length;
+    for (const h2 of allHeaders) {
+      if (h2 === header) continue;
+      const idx = raw.indexOf(h2, bodyStart);
+      if (idx !== -1 && idx < end2) end2 = idx;
+    }
+    return raw.slice(bodyStart, end2).trim();
+  }
+  async function checkCrystallizedUpdates(shortId) {
+    await ensureAuth();
+    const updatedNames = [];
+    const settings = await repo.getSettings();
+    if (!settings || !settings.enableCrystallized) {
+      dlog("[Crystallized] Disabled in settings. Skipping check.");
+      return updatedNames;
+    }
+    const adv = await repo.getAdventure(shortId);
+    if (!adv) {
+      dlog("[Crystallized] No adventure metadata found. Skipping check.");
+      return updatedNames;
+    }
+    const importantNames = (adv.memoraidCharacters || []).map((name) => name.trim().toLowerCase()).filter(Boolean);
+    if (importantNames.length === 0) {
+      dlog("[Crystallized] No MemorAID characters configured. Skipping crystallized memory check.");
+      return updatedNames;
+    }
+    const cards = await repo.getCards(shortId);
+    if (!cards || !cards.length) return updatedNames;
+    const characterCards = cards.filter((c2) => isDistillationSourceCard(c2, importantNames));
+    if (characterCards.length === 0) return updatedNames;
+    const allActions = await repo.getActions(shortId);
+    allActions.sort((a2, b) => {
+      if (a2.createdAt && b.createdAt) return a2.createdAt.localeCompare(b.createdAt);
+      return 0;
+    });
+    const totalActions = allActions.length;
+    const K = adv.crystallizedInterval ?? settings.crystallizedInterval ?? 20;
+    const nodeCap = adv.crystallizedNodeCap ?? settings.crystallizedNodeCap ?? 12;
+    const lastDistilledMap = adv.lastDistilledThrough || {};
+    let advChanged = false;
+    for (const charCard of characterCards) {
+      const name = charCard.title || "";
+      if (isTitleUserDeleted(adv.userDeletedCards, `${name} - Crystallized`)) {
+        dlog(`[Crystallized] Skipping user-deleted Crystallized card for ${name}.`);
+        continue;
+      }
+      const lastThrough = lastDistilledMap[name] || 0;
+      if (isWindowDue(totalActions, lastThrough, K)) {
+        const window2 = { start: lastThrough, end: lastThrough + K };
+        const windowText = allActions.slice(Math.max(0, window2.start), window2.end).map((a2) => a2.text || "").join("\n");
+        if (!isCharacterTriggered(windowText, name, charCard.keys || "")) {
+          dlog(`[Crystallized] ${name} has no mention in window [${window2.start}, ${window2.end}] \u2014 skipping distillation (marker advanced).`);
+          lastDistilledMap[name] = window2.end;
+          advChanged = true;
+          continue;
+        }
+        dlog(`[Crystallized] Distillation window [${window2.start}, ${window2.end}] is due for ${name}. Running...`);
+        try {
+          await runDistillationForNPC(shortId, charCard, window2, nodeCap);
+          lastDistilledMap[name] = window2.end;
+          advChanged = true;
+          updatedNames.push(name);
+        } catch (err) {
+          console.error(`[Crystallized] Failed distillation for ${name}:`, err);
+        }
+      }
+    }
+    if (advChanged) {
+      adv.lastDistilledThrough = lastDistilledMap;
+      await repo.upsertAdventure(adv);
+      invalidateSceneCastGate(shortId);
+    }
+    return updatedNames;
+  }
+  var lastSceneCastSig = /* @__PURE__ */ new Map();
+  function invalidateSceneCastGate(shortId) {
+    lastSceneCastSig.delete(shortId);
+  }
+  async function refreshSceneAwareCrystallized(shortId) {
+    const settings = await repo.getSettings();
+    if (!settings?.enableCrystallized) return;
+    const adv = await repo.getAdventure(shortId);
+    if (!adv) return;
+    const importantNames = (adv.memoraidCharacters || []).map((n3) => n3.trim().toLowerCase()).filter(Boolean);
+    if (!importantNames.length) return;
+    const cards = await repo.getCards(shortId);
+    if (!cards?.length) return;
+    const sourceCards = cards.filter((c2) => isDistillationSourceCard(c2, importantNames));
+    if (!sourceCards.length) return;
+    const knownTokens = /* @__PURE__ */ new Set();
+    const characterTokens = /* @__PURE__ */ new Set();
+    for (const c2 of cards) {
+      if (c2.deletedAt) continue;
+      const toks = [String(c2.title || ""), ...String(c2.keys || "").split(/[,;]+/)].map((t3) => t3.trim().toLowerCase()).filter(Boolean);
+      for (const t3 of toks) {
+        knownTokens.add(t3);
+        if ((c2.type || "").toLowerCase() === "character") characterTokens.add(t3);
+      }
+    }
+    const sceneText = await getSceneText(shortId);
+    const signal = extractSceneSignal(sceneText, knownTokens);
+    const sceneTokens = snapshotTokens(sceneText);
+    const presentTokens = new Set(signal.presentEntities);
+    const protagonist = (adv.protagonistName || "").trim().toLowerCase();
+    if (protagonist) presentTokens.add(protagonist);
+    const sig = presentCastSignature(presentTokens);
+    if (lastSceneCastSig.get(shortId) === sig) return;
+    lastSceneCastSig.set(shortId, sig);
+    const caps = effectiveCrystallizedCaps(adv, settings);
+    const maxChars = adv.crystallizedEntryMaxChars ?? settings.crystallizedEntryMaxChars ?? 900;
+    const now = (await repo.getActions(shortId)).length;
+    const isCharacterSubject = (item) => {
+      for (const t3 of [item.subject, ...item.aliases || []].map((s3) => String(s3 || "").trim().toLowerCase())) {
+        if (characterTokens.has(t3)) return true;
+      }
+      return false;
+    };
+    await ensureAuth();
+    for (const charCard of sourceCards) {
+      try {
+        const name = charCard.title || "";
+        const key = name.toLowerCase();
+        const cryst = findCrystallizedCard(cards, name);
+        if (!cryst) continue;
+        const state = await repo.getCrystallizedState(shortId, key);
+        if (!state) continue;
+        const blocks = caps.recalls > 0 ? await repo.getNpcMemoryBlocks(shortId, key) : [];
+        const recalls = selectRecalls(blocks, signal, { cap: caps.recalls, threshold: DEFAULT_RECALL_THRESHOLD, now }).map((b) => b.povText);
+        const value = renderCrystallizedEntryScene(state, name, {
+          maxChars,
+          caps,
+          presentSubjectTokens: presentTokens,
+          recalls,
+          isCharacterSubject,
+          sceneTokens
+        });
+        if (value === cryst.value) continue;
+        const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+        const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
+        const updatedCard = { ...cryst, value, description: "" };
+        if (auth.sessionToken && isSafeEndpoint(auth.gqlEndpoint)) {
+          const saveReq = buildCardSave(auth.gqlEndpoint, updateQuery, auth.sessionToken, updatedCard, value);
+          const saveRes = await aidFetch(saveReq.url, { method: "POST", headers: saveReq.headers, body: saveReq.body });
+          if (!saveRes.ok) {
+            dlog(`[Crystallized] scene re-save HTTP ${saveRes.status} for ${name}`);
+            continue;
+          }
+        }
+        await repo.putCards(shortId, [updatedCard]);
+        broadcastToTabs({ kind: "approvedCardSync", payload: { ok: true, source: "card", cardId: cryst.id, value, description: "" } });
+      } catch (err) {
+        console.error(`[Crystallized] scene-aware refresh failed for ${charCard.title}:`, err);
+      }
+    }
+  }
+  async function runDistillationForNPC(shortId, charCard, window2, nodeCap) {
+    let name = charCard.title || "";
+    if (name.toLowerCase().endsWith(" - crystallized")) {
+      name = name.replace(/\s*-\s*crystallized$/i, "");
+    }
+    const cards = await repo.getCards(shortId);
+    const settings = await repo.getSettings();
+    let crystallizedCard = findCrystallizedCard(cards, name);
+    if (!crystallizedCard) {
+      dlog(`[Crystallized] Creating new crystallized card for ${name}`);
+      crystallizedCard = await createCrystallizedCard(shortId, name, charCard.keys || name);
+    }
+    const characterKey = name.trim().toLowerCase();
+    let state = await repo.getCrystallizedState(shortId, characterKey);
+    if (!state) {
+      state = parseCrystallized(crystallizedCard.description || "");
+      state.outlook = state.outlook || [];
+      state.preferences = state.preferences || [];
+    }
+    state.preferences = state.preferences || [];
+    const memCardTitle = `${name} (Memory)`;
+    const thoughtsCard = cards.find(
+      (x) => !x.deletedAt && ((x.type || "").toLowerCase() === "memory" || (x.type || "").toLowerCase() === "character" || (x.type || "").toLowerCase() === "custom") && (x.title || "").toLowerCase() === memCardTitle.toLowerCase()
+    );
+    const thoughtLog = thoughtsCard ? parseMemoNotes(thoughtsCard.description || "").thoughtLog : [];
+    const allActions = await repo.getActions(shortId);
+    allActions.sort((a2, b) => {
+      if (a2.createdAt && b.createdAt) return a2.createdAt.localeCompare(b.createdAt);
+      return 0;
+    });
+    const buffer = buildDistillationBuffer(allActions, thoughtLog, window2);
+    const { state: decayedState, dyingNodeIds } = reinforceAndDecay(state, buffer);
+    const priorIds = new Set(decayedState.nodes.map((n3) => n3.id));
+    const priorNodesForArchive = decayedState.nodes.map((n3) => ({ id: n3.id, snapshot: n3.snapshot }));
+    const priorKnowsText = new Map(decayedState.schema.map((s3) => [s3.subject, s3.text]));
+    const priorOutlookTexts = (decayedState.outlook || []).map((b) => b.text);
+    const priorPreferencesTexts = (decayedState.preferences || []).map((b) => b.text);
+    const adv = await repo.getAdventure(shortId);
+    const protagonist = adv?.protagonistName && adv.protagonistName.trim() || parseProtagonistName(adv?.memory) || "the player character";
+    const bufferText = buffer.map((item) => {
+      const thoughtStr = item.thoughtText ? `
+Thoughts: ${item.thoughtText}` : "";
+      return `Action: ${item.actionText}${thoughtStr}`;
+    }).join("\n\n");
+    const dyingNodesList = state.nodes.filter((n3) => dyingNodeIds.includes(n3.id));
+    const dyingNodesText = dyingNodesList.map((n3) => `- Snapshot: ${n3.snapshot}`).join("\n");
+    const combinedContext = [
+      "Recent story events and character thoughts:",
+      bufferText,
+      "",
+      dyingNodesText ? "Fading memories (absorb their core lessons/facts into the Schema):\n" + dyingNodesText : ""
+    ].filter(Boolean).join("\n").slice(0, 3e3);
+    const formattingMode = settings?.formattingMode || DEFAULT_FORMATTING_MODE;
+    const generationTargetCard = { ...crystallizedCard, value: "" };
+    const cleanLlmOutputBrackets = (text) => {
+      let cleaned = text.trim();
+      if (cleaned.startsWith("[")) cleaned = cleaned.slice(1);
+      if (cleaned.endsWith("]")) cleaned = cleaned.slice(0, -1);
+      if (cleaned.startsWith("{")) cleaned = cleaned.slice(1);
+      if (cleaned.endsWith("}")) cleaned = cleaned.slice(0, -1);
+      return cleaned.trim();
+    };
+    const schemaEnabled = settings?.crystallizedKnowsEnabled !== false;
+    const nodesEnabled = settings?.crystallizedNodesEnabled !== false;
+    const outlookEnabled = settings?.crystallizedOutlookEnabled !== false;
+    const preferencesEnabled = settings?.crystallizedPreferencesEnabled !== false;
+    const driftJudgeEnabled = !!settings?.enableAutomaticUpdates;
+    const currentVividText = decayedState.nodes.filter((n3) => n3.vibrancy > 0).map((n3) => `- Snapshot: ${n3.snapshot}`).join("\n");
+    const currentOutlookText = (decayedState.outlook || []).map((b) => `- ${b.text}`).join("\n");
+    const currentPreferencesText = (decayedState.preferences || []).map((b) => `- ${b.text}`).join("\n");
+    const H_KNOWS = "===KNOWS===", H_VIVID = "===VIVID===", H_OUTLOOK = "===OUTLOOK===", H_PREFS = "===PREFERENCES===";
+    const allHeaders = [H_KNOWS, H_VIVID, H_OUTLOOK, H_PREFS];
+    const KNOWS_DIRECTIVE = `${H_KNOWS}
+Update your knowledge of the OTHER people, places, things, topics, foods, media, activities and objects you have formed a genuine opinion, preference or attachment to (the player character {protagonist} is simply one more person). This card is your OWN memory, so NEVER add a line about yourself. For each subject write ONE concise first-person line combining the key facts AND how you currently feel about them, EXACT form "- [Subject] one concise factual+emotional sentence"; when the story develops a subject, rewrite that subject's single line in place \u2014 never a second line for the same subject. Begin this section with the line "### I. SCHEMA".`;
+    const VIVID_DIRECTIVE = `${H_VIVID}
+Give your COMPLETE updated list of Vivid Memories: ONE concise first-person line per distinct scene \u2014 the emotional heart of the moment, feeling over fact, each under 140 characters, prefixed "- Snapshot: ". Merge lines describing the same scene; refine a remembered scene rather than duplicating it; drop what has faded; add a line for each genuinely new scene. Maximum 7 lines.`;
+    const OUTLOOK_DIRECTIVE = `${H_OUTLOOK}
+Give your COMPLETE updated list of beliefs: first-person, GENERALIZED views of yourself or the world \u2014 NEVER about a specific named person. Re-state (refined) every belief that still holds, drop what no longer holds, add at most 2 new ones only if events genuinely shifted something. Maximum 5. Begin this section with a line reading exactly "Beliefs:" then each belief on its own line prefixed "- ".`;
+    const PREFS_DIRECTIVE = `${H_PREFS}
+Give your COMPLETE updated list of concrete personal preferences and quirks \u2014 the ordinary TEXTURE of a person: tastes, habits, pet peeves, little rituals, small opinions about particular things. Each line first-person and CONCRETE. Re-state (refined) every preference that still fits, drop those that no longer do, add at most 2 new ones only if events revealed them. FORBIDDEN: emotional themes, life-philosophy, feelings about a specific named person, relationships/trauma/growth. Maximum 6. Begin this section with a line reading exactly "Preferences:" then each preference on its own line prefixed "- ".`;
+    const directiveParts = [];
+    if (schemaEnabled) directiveParts.push(KNOWS_DIRECTIVE);
+    if (nodesEnabled) directiveParts.push(VIVID_DIRECTIVE);
+    if (outlookEnabled) directiveParts.push(OUTLOOK_DIRECTIVE + (driftJudgeEnabled ? DRIFT_JUDGE_INSTRUCTION : ""));
+    if (preferencesEnabled) directiveParts.push(PREFS_DIRECTIVE);
+    let schemaOutput = "", nodesOutput = "", outlookRaw = "", prefsRaw = "";
+    if (directiveParts.length > 0) {
+      const unifiedCommand = resolveCommand(
+        `You are {{title}}, distilling your own long-term memory after the recent story (the player character is {protagonist}). Read the recent events/thoughts and your current memory state, then output ONLY the requested sections below. Emit each section beginning with its exact ===HEADER=== line on its own line, in the order shown, and write nothing outside these sections.
+
+` + directiveParts.join("\n\n"),
+        protagonist
+      );
+      const contextParts = [combinedContext];
+      if (nodesEnabled) contextParts.push(`Your current Vivid Memories:
+${currentVividText || "(none yet)"}`);
+      if (outlookEnabled) contextParts.push(`Your current Beliefs:
+${currentOutlookText || "(none yet)"}`);
+      if (preferencesEnabled) contextParts.push(`Your current Preferences:
+${currentPreferencesText || "(none yet)"}`);
+      const unifiedContext = contextParts.join("\n\n").slice(0, 6e3);
+      dlog(`[Crystallized] Dispatching unified distillation (${directiveParts.length} section(s)) for ${name}...`);
+      const rUnified = await generateCard(generationTargetCard, unifiedCommand, formattingMode, { storyInformation: unifiedContext });
+      if (!rUnified.ok) {
+        throw new Error(rUnified.message || "unknown error on unified distillation call");
+      }
+      const unified = rUnified.value || "";
+      dlog(`[Crystallized] Unified distillation output: ${unified}`);
+      if (schemaEnabled) schemaOutput = extractDelimitedSection(unified, H_KNOWS, allHeaders);
+      if (nodesEnabled) nodesOutput = extractDelimitedSection(unified, H_VIVID, allHeaders);
+      if (outlookEnabled) outlookRaw = extractDelimitedSection(unified, H_OUTLOOK, allHeaders);
+      if (preferencesEnabled) prefsRaw = extractDelimitedSection(unified, H_PREFS, allHeaders);
+      if (schemaEnabled && !schemaOutput.trim()) {
+        try {
+          dlog(`[Crystallized] Unified reply dropped KNOWS for ${name} \u2014 targeted fallback.`);
+          const t3 = resolveCommand(pickCommandTemplate(settings?.cardCommands?.crystallizedSchema, DEFAULT_CARD_COMMANDS.crystallizedSchema || ""), protagonist);
+          const r2 = await generateCard(generationTargetCard, t3, formattingMode, { storyInformation: combinedContext });
+          if (r2.ok) schemaOutput = r2.value;
+        } catch (err) {
+          dlog(`[Crystallized] Schema fallback failed for ${name}: ${err}`);
+        }
+      }
+      if (nodesEnabled && !nodesOutput.trim()) {
+        try {
+          dlog(`[Crystallized] Unified reply dropped VIVID for ${name} \u2014 targeted fallback.`);
+          const ctx = [currentVividText ? `Your current Vivid Memories:
+${currentVividText}` : "", combinedContext].filter(Boolean).join("\n\n").slice(0, 4e3);
+          const t3 = resolveCommand(pickCommandTemplate(settings?.cardCommands?.crystallizedNodes, DEFAULT_CARD_COMMANDS.crystallizedNodes || ""), protagonist);
+          const r2 = await generateCard(generationTargetCard, t3, formattingMode, { storyInformation: ctx });
+          if (r2.ok) nodesOutput = r2.value;
+        } catch (err) {
+          dlog(`[Crystallized] Nodes fallback failed for ${name}: ${err}`);
+        }
+      }
+      if (outlookEnabled && !outlookRaw.trim()) {
+        try {
+          dlog(`[Crystallized] Unified reply dropped OUTLOOK for ${name} \u2014 targeted fallback.`);
+          const ctx = [`Your current Beliefs:
+${currentOutlookText || "(none yet)"}`, combinedContext].filter(Boolean).join("\n\n").slice(0, 4e3);
+          const base = resolveCommand(pickCommandTemplate(settings?.cardCommands?.crystallizedOutlook, DEFAULT_CARD_COMMANDS.crystallizedOutlook || ""), protagonist);
+          const r2 = await generateCard(generationTargetCard, driftJudgeEnabled ? `${base}${DRIFT_JUDGE_INSTRUCTION}` : base, formattingMode, { storyInformation: ctx });
+          if (r2.ok) outlookRaw = r2.value;
+        } catch (err) {
+          dlog(`[Crystallized] Outlook fallback failed for ${name}: ${err}`);
+        }
+      }
+      if (preferencesEnabled && !prefsRaw.trim()) {
+        try {
+          dlog(`[Crystallized] Unified reply dropped PREFERENCES for ${name} \u2014 targeted fallback.`);
+          const ctx = [`Your current Preferences:
+${currentPreferencesText || "(none yet)"}`, combinedContext].filter(Boolean).join("\n\n").slice(0, 4e3);
+          const t3 = resolveCommand(pickCommandTemplate(settings?.cardCommands?.crystallizedPreferences, DEFAULT_CARD_COMMANDS.crystallizedPreferences || ""), protagonist);
+          const r2 = await generateCard(generationTargetCard, t3, formattingMode, { storyInformation: ctx });
+          if (r2.ok) prefsRaw = r2.value;
+        } catch (err) {
+          dlog(`[Crystallized] Preferences fallback failed for ${name}: ${err}`);
+        }
+      }
+    } else {
+      dlog(`[Crystallized] All distillation sections disabled for ${name} \u2014 pure decay window (no provider call).`);
+    }
+    const charTokens = /* @__PURE__ */ new Set();
+    for (const c2 of cards) {
+      if (c2.deletedAt || (c2.type || "").toLowerCase() !== "character") continue;
+      for (const t3 of [String(c2.title || ""), ...String(c2.keys || "").split(/[,;]+/)]) {
+        const tok = t3.trim().toLowerCase();
+        if (tok) charTokens.add(tok);
+      }
+    }
+    const ownerPresentAt = buffer.map((item) => !!(item.thoughtText && item.thoughtText.trim()) || isCharacterTriggered(item.actionText, name, charCard.keys || ""));
+    const allowNewSubject = (subject, aliases3) => {
+      const isCharacterSubj = [subject, ...aliases3].some((s3) => charTokens.has(String(s3 || "").trim().toLowerCase()));
+      if (!isCharacterSubj) return true;
+      for (let i3 = 0; i3 < buffer.length; i3++) {
+        if (!isCharacterTriggered(buffer[i3].actionText, subject, "")) continue;
+        if (ownerPresentAt[i3] || ownerPresentAt[i3 - 1] || ownerPresentAt[i3 + 1]) return true;
+      }
+      dlog(`[Crystallized] Gating NEW subject [${subject}] for ${name} \u2014 no co-presence in the window (never met).`);
+      return false;
+    };
+    const cleanSchema = cleanLlmOutputBrackets(schemaOutput);
+    const cleanNodes = cleanLlmOutputBrackets(nodesOutput);
+    const nodesSnapshotOnly = cleanNodes.split(/^\s*Beliefs\s*:/im)[0] || "";
+    const combinedOutput = `${cleanSchema}
+
+### II. NEW NODES
+${nodesSnapshotOnly}`;
+    const reconciledState = reconcile(decayedState, combinedOutput, nodeCap, void 0, name, allowNewSubject);
+    if (outlookEnabled && outlookRaw.trim()) {
+      try {
+        let outlookOutput = outlookRaw;
+        if (driftJudgeEnabled) {
+          const drift = parseDriftVerdict(outlookOutput);
+          outlookOutput = stripDriftVerdictLine(outlookOutput);
+          if (drift.shifted && drift.field) {
+            const advDrift = await repo.getAdventure(shortId);
+            if (advDrift) {
+              advDrift.ccDriftPending = { ...advDrift.ccDriftPending || {}, [name]: drift.field };
+              await repo.upsertAdventure(advDrift);
+              dlog(`[Crystallized] Drift judge: ${name}'s ${drift.field} has durably shifted \u2014 bounded revision queued.`);
+            }
+          }
+        }
+        const cleanOutlook = cleanLlmOutputBrackets(outlookOutput);
+        reconciledState.outlook = reconcileOutlook(reconciledState.outlook || [], parseOutlook(cleanOutlook));
+      } catch (err) {
+        dlog(`[Crystallized] Outlook reconcile failed for ${name} \u2014 leaving outlook state untouched: ${err}`);
+      }
+    }
+    if (preferencesEnabled && prefsRaw.trim()) {
+      try {
+        const cleanPrefs = cleanLlmOutputBrackets(prefsRaw);
+        reconciledState.preferences = reconcilePreferences(reconciledState.preferences || [], parsePreferences(cleanPrefs));
+      } catch (err) {
+        dlog(`[Crystallized] Preferences reconcile failed for ${name} \u2014 leaving preferences state untouched: ${err}`);
+      }
+    }
+    try {
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const archive = [];
+      const survivingIds = new Set(reconciledState.nodes.map((n3) => n3.id));
+      for (const n3 of priorNodesForArchive) {
+        if (!survivingIds.has(n3.id)) archive.push({ id: crypto.randomUUID(), shortId, characterKey, kind: "vivid", text: n3.snapshot, turn: window2.end, archivedAt: now });
+      }
+      for (const s3 of reconciledState.schema) {
+        const prev = priorKnowsText.get(s3.subject);
+        if (prev !== void 0 && prev !== s3.text) archive.push({ id: crypto.randomUUID(), shortId, characterKey, kind: "knows", subject: s3.subject, text: prev, turn: window2.end, archivedAt: now });
+      }
+      const survivingBeliefs = new Set((reconciledState.outlook || []).map((b) => b.text));
+      for (const t3 of priorOutlookTexts) {
+        if (!survivingBeliefs.has(t3)) archive.push({ id: crypto.randomUUID(), shortId, characterKey, kind: "outlook", text: t3, turn: window2.end, archivedAt: now });
+      }
+      const survivingPrefs = new Set((reconciledState.preferences || []).map((b) => b.text));
+      for (const t3 of priorPreferencesTexts) {
+        if (!survivingPrefs.has(t3)) archive.push({ id: crypto.randomUUID(), shortId, characterKey, kind: "preferences", text: t3, turn: window2.end, archivedAt: now });
+      }
+      await repo.appendCrystallizedArchive(archive);
+    } catch (err) {
+      console.error(`[Crystallized] Failed to append archive entries:`, err);
+    }
+    try {
+      const newNodes = reconciledState.nodes.filter((n3) => !priorIds.has(n3.id));
+      if (newNodes.length > 0) {
+        const logEntries = newNodes.map((n3) => ({
+          id: crypto.randomUUID(),
+          shortId,
+          character: name,
+          characterKey: name.toLowerCase(),
+          nodeId: n3.id,
+          snapshot: n3.snapshot,
+          createdTurn: window2.end,
+          createdAt: (/* @__PURE__ */ new Date()).toISOString()
+        }));
+        await repo.appendVividMemories(logEntries);
+        dlog(`[Crystallized] Appended ${logEntries.length} new vivid memory log entries to db for ${name}`);
+      }
+    } catch (err) {
+      console.error(`[Crystallized] Failed to append vivid memories to log:`, err);
+    }
+    await repo.putCrystallizedState(shortId, characterKey, reconciledState);
+    const maxChars = adv?.crystallizedEntryMaxChars ?? settings?.crystallizedEntryMaxChars ?? 900;
+    const newValue = renderCrystallizedEntry(reconciledState, name, maxChars);
+    const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+    const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
+    const updatedCard = {
+      ...crystallizedCard,
+      value: newValue,
+      description: ""
+      // machinery no longer lives on the card — state is in IndexedDB
+    };
+    dlog(`[Crystallized] Saving updated crystallized card for ${name}...`);
+    const saveReq = buildCardSave(auth.gqlEndpoint, updateQuery, auth.sessionToken, updatedCard, newValue);
+    const saveRes = await aidFetch(saveReq.url, { method: "POST", headers: saveReq.headers, body: saveReq.body });
+    if (!saveRes.ok) {
+      throw new Error(`AI Dungeon GQL UseAutoSaveStoryCard failed: HTTP ${saveRes.status}`);
+    }
+    await repo.putCards(shortId, [updatedCard]);
+    broadcastToTabs({
+      kind: "approvedCardSync",
+      payload: { ok: true, source: "card", cardId: crystallizedCard.id, value: newValue, description: "" }
+    });
+  }
+  async function createCrystallizedCard(shortId, name, keys) {
+    const createOp = await repo.getOp("SaveQueueStoryCard");
+    const createQuery = createOp?.query || DEFAULT_GQL_QUERIES.SaveQueueStoryCard;
+    const tempId = Math.floor(Math.random() * 1e9).toString();
+    const initialValue = `[${name}'s Crystallized Memory
+Knows:
+]`;
+    const initialDesc = "[CRYSTALLIZED MEMORY]\n\n### I. SCHEMA\n\n### II. NODES\n";
+    const newCardRow = {
+      id: tempId,
+      shortId,
+      type: "Memory",
+      title: `${name} - Crystallized`,
+      keys,
+      value: initialValue,
+      description: initialDesc
+    };
+    const req = buildCardCreate(auth.gqlEndpoint, createQuery, auth.sessionToken, newCardRow, initialValue);
+    const res = await aidFetch(req.url, { method: "POST", headers: req.headers, body: req.body });
+    if (!res.ok) {
+      throw new Error(`AI Dungeon GQL SaveQueueStoryCard failed: HTTP ${res.status}`);
+    }
+    const resJson = await res.json();
+    const returnedCard = resJson[0]?.data?.updateStoryCard?.storyCard || resJson[0]?.data?.saveQueueStoryCard?.storyCard || resJson[0]?.data?.updateStoryCard || resJson[0]?.data?.saveQueueStoryCard;
+    const isSuccess = resJson[0]?.data?.updateStoryCard?.success || resJson[0]?.data?.saveQueueStoryCard?.success || returnedCard;
+    if (!isSuccess) {
+      throw new Error(resJson[0]?.errors?.[0]?.message || "Mutation failed");
+    }
+    const actualId = returnedCard?.id || newCardRow.id;
+    const targetCard = { ...newCardRow, id: actualId };
+    await repo.putCards(shortId, [targetCard]);
+    broadcastToTabs({
+      kind: "approvedCardSync",
+      payload: { ok: true, source: "card", cardId: actualId, value: initialValue, description: initialDesc }
+    });
+    return targetCard;
+  }
+  async function runCrystallizedDistillationManual(shortId, cardId, name) {
+    try {
+      await ensureAuth();
+      if (!auth.sessionToken || !isSafeEndpoint(auth.gqlEndpoint)) {
+        return { ok: false, error: "No session token yet \u2014 interact with the page once, then retry." };
+      }
+      const adv = await repo.getAdventure(shortId);
+      if (!adv) return { ok: false, error: "Adventure not found." };
+      const cards = await repo.getCards(shortId);
+      if (!cards) return { ok: false, error: "Cards not found." };
+      let charCard = cards.find((c2) => c2.id === cardId);
+      if (!charCard) return { ok: false, error: "Character card not found." };
+      if ((charCard.title || "").toLowerCase().endsWith(" - crystallized") || (charCard.type || "").toLowerCase() === "crystallized") {
+        const baseName = (charCard.title || "").replace(/\s*-\s*crystallized$/i, "");
+        const parentCard = cards.find(
+          (c2) => !c2.deletedAt && ((c2.type || "").toLowerCase() === "character" || (c2.type || "").toLowerCase() === "custom") && (c2.title || "").toLowerCase() === baseName.toLowerCase()
+        );
+        if (parentCard) {
+          charCard = parentCard;
+        }
+      }
+      const allActions = await repo.getActions(shortId);
+      allActions.sort((a2, b) => {
+        if (a2.createdAt && b.createdAt) return a2.createdAt.localeCompare(b.createdAt);
+        return 0;
+      });
+      const totalActions = allActions.length;
+      const lastDistilledMap = adv.lastDistilledThrough || {};
+      const lastThrough = lastDistilledMap[name] || 0;
+      const settings = await repo.getSettings();
+      const K = adv.crystallizedInterval ?? settings?.crystallizedInterval ?? 20;
+      const nodeCap = adv.crystallizedNodeCap ?? settings?.crystallizedNodeCap ?? 12;
+      if (!isManualWindowReady(totalActions, lastThrough, K)) {
+        return { ok: false, error: `Not enough new actions for a full distillation window yet (need ${lastThrough + K}, have ${totalActions}).` };
+      }
+      const window2 = distillationWindow(lastThrough, K);
+      dlog(`[Crystallized] Running manual distillation window [${window2.start}, ${window2.end}] for ${name}`);
+      await runDistillationForNPC(shortId, charCard, window2, nodeCap);
+      lastDistilledMap[name] = window2.end;
+      adv.lastDistilledThrough = lastDistilledMap;
+      await repo.upsertAdventure(adv);
+      return { ok: true };
+    } catch (err) {
+      console.error(`[Crystallized] Manual distillation failed:`, err);
+      return { ok: false, error: err?.message || String(err) };
+    }
+  }
+  async function saveCrystallizedState(shortId, card, state) {
+    await ensureAuth();
+    if (!auth.sessionToken || !isSafeEndpoint(auth.gqlEndpoint)) {
+      return { error: "No session token yet \u2014 interact with the page once, then retry." };
+    }
+    const adv = await repo.getAdventure(shortId);
+    const settings = await repo.getSettings();
+    const name = (card.title || "").replace(/\s*-\s*crystallized$/i, "").trim() || "Character";
+    const characterKey = name.trim().toLowerCase();
+    const maxChars = adv?.crystallizedEntryMaxChars ?? settings?.crystallizedEntryMaxChars ?? 900;
+    await repo.putCrystallizedState(shortId, characterKey, state);
+    const newValue = renderCrystallizedEntry(state, name, maxChars);
+    const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+    const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
+    const updated = { ...card, value: newValue, description: "" };
+    const saveReq = buildCardSave(auth.gqlEndpoint, updateQuery, auth.sessionToken, updated, newValue);
+    const saveRes = await aidFetch(saveReq.url, { method: "POST", headers: saveReq.headers, body: saveReq.body });
+    if (!saveRes.ok) return { error: `AI Dungeon save failed: HTTP ${saveRes.status}` };
+    const json = await saveRes.json();
+    const returnedCard = json?.[0]?.data?.updateStoryCard?.storyCard || json?.[0]?.data?.updateStoryCard;
+    const isSuccess = json?.[0]?.data?.updateStoryCard?.success || returnedCard;
+    if (!isSuccess) {
+      const msgStr = json?.[0]?.data?.updateStoryCard?.message || json?.[0]?.errors?.[0]?.message || "Mutation failed";
+      return { error: `AI Dungeon rejected save: ${msgStr}` };
+    }
+    await repo.putCards(shortId, [updated]);
+    broadcastToTabs({ kind: "approvedCardSync", payload: { ok: true, source: "card", cardId: card.id, value: newValue, description: "" } });
+    return { ok: true };
+  }
+
+  // src/background/bg-life.ts
+  init_card_command();
+  async function tryNativeCardDelete(shortId, cardId) {
+    const deleteOp = await repo.getOp("UseDeleteStoryCard");
+    const deleteQuery = deleteOp?.query || DEFAULT_GQL_QUERIES.UseDeleteStoryCard;
+    const req = buildCardDelete(auth.gqlEndpoint, deleteQuery, auth.sessionToken, cardId, shortId);
+    const res = await aidFetch(req.url, { method: "POST", headers: req.headers, body: req.body });
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    const json = await res.json();
+    const r2 = Array.isArray(json) ? json[0] : json;
+    if (r2?.errors?.length) return { ok: false, error: r2.errors[0]?.message || "Mutation rejected" };
+    const data = r2?.data;
+    const payload = data && typeof data === "object" ? Object.values(data)[0] : void 0;
+    if (payload && payload.success === false) {
+      return { ok: false, error: payload.message || "Mutation rejected" };
+    }
+    if (!data || Object.values(data).every((v2) => v2 == null)) {
+      return { ok: false, error: "Delete returned no data" };
+    }
+    return { ok: true };
+  }
+  async function archiveLifeCard(shortId, card) {
+    if (!auth.sessionToken || !isSafeEndpoint(auth.gqlEndpoint)) return { ok: false, error: "No session token yet \u2014 interact with the page once, then retry." };
+    try {
+      const del = await tryNativeCardDelete(shortId, card.id);
+      if (!del.ok) {
+        console.warn(`[LifeCards] Native delete failed for ${card.id}: ${del.error}`);
+        return { ok: false, error: del.error };
+      }
+      const deletedAtStr = (/* @__PURE__ */ new Date()).toISOString();
+      const archivedCard = { ...card, deletedAt: deletedAtStr };
+      await repo.putCards(shortId, [archivedCard]);
+      const adv = await repo.getAdventure(shortId);
+      if (adv) {
+        const set = new Set(adv.lcArchived || []);
+        set.add(card.id);
+        adv.lcArchived = Array.from(set);
+        const settings = await repo.getSettings();
+        const titlePrefix = settings?.livingCharactersTitlePrefix || "Life - ";
+        const owner = (card.title || "").replace(new RegExp(`^${titlePrefix}`, "i"), "").trim().toLowerCase();
+        if (owner) {
+          adv.lcResolvedAt = adv.lcResolvedAt || {};
+          adv.lcResolvedAt[owner] = (await repo.getActions(shortId)).length;
+        }
+        await repo.upsertAdventure(adv);
+      }
+      broadcastToTabs({
+        kind: "approvedCardSync",
+        payload: { ok: true, source: "card", cardId: card.id, value: archivedCard.value, description: archivedCard.description || "", keys: archivedCard.keys, deletedAt: deletedAtStr, blockAutosave: true }
+      });
+      return { ok: true };
+    } catch (err) {
+      console.error(`[LifeCards] Error archiving Life Card ${card.id}:`, err);
+      return { ok: false, error: err?.message || String(err) };
+    }
+  }
+  async function checkLifeCardUpdates(shortId, actionText) {
+    await ensureAuth();
+    const settings = await repo.getSettings();
+    if (settings?.enableLivingCharacters === false) return {};
+    const cards = await repo.getCards(shortId);
+    const adv = await repo.getAdventure(shortId);
+    if (!adv) return {};
+    const lc = adv.livingConfig || {};
+    const rosterText = lc.roster || "";
+    const roster = rosterText.split("\n").map((n3) => n3.trim()).filter(Boolean);
+    if (roster.length === 0) {
+      dlog("[LifeCards] Roster is empty for this adventure. Skipping update check.");
+      return {};
+    }
+    const titlePrefix = settings?.livingCharactersTitlePrefix || "Life - ";
+    const keyPrefix = settings?.livingCharactersKeyPrefix || "chaos-v2:";
+    const lifeCards = cards.filter((c2) => {
+      if (c2.deletedAt) return false;
+      const typeLower = (c2.type || "").toLowerCase();
+      const titleLower = (c2.title || "").toLowerCase();
+      const keysList = (c2.keys || "").split(/[,;]+/).map((k2) => k2.trim().toLowerCase()).filter(Boolean);
+      return typeLower === "life" || titleLower.startsWith(titlePrefix.toLowerCase()) || keysList.some((k2) => k2.startsWith(keyPrefix.toLowerCase()));
+    });
+    const checkActions = await repo.getActions(shortId);
+    const turnCount = checkActions.length + (actionText ? 1 : 0);
+    const seededCardIds = /* @__PURE__ */ new Set();
+    const interval = lc.interval ?? 15;
+    const maxActive = lc.maxActive ?? 2;
+    dlog(`[LifeCards] Turn: ${turnCount}, Live relationships: ${lifeCards.length}/${maxActive}`);
+    const protagonist = adv.protagonistName && adv.protagonistName.trim() || parseProtagonistName(adv.memory) || "the player character";
+    const npcRoster = roster.filter((name) => name.toLowerCase() !== protagonist.toLowerCase());
+    const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+    const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
+    const escapeRegex = (s3) => s3.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+    for (let i3 = 0; i3 < lifeCards.length; i3++) {
+      const card = lifeCards[i3];
+      const ownerName = card.title ? card.title.replace(new RegExp(`^${titlePrefix}`, "i"), "").trim() : "";
+      if (!ownerName) continue;
+      const ownerLower = ownerName.toLowerCase();
+      const exactMatch = npcRoster.some((name) => name.toLowerCase() === ownerLower);
+      if (!exactMatch) {
+        const matchingRosterName = npcRoster.find((rName) => {
+          const rLower = rName.toLowerCase();
+          return ownerLower.startsWith(rLower + " ") || rLower.startsWith(ownerLower + " ");
+        });
+        if (matchingRosterName && auth.sessionToken && isSafeEndpoint(auth.gqlEndpoint)) {
+          dlog(`[LifeCards] Auto-migrating Life Card owner name from "${ownerName}" to "${matchingRosterName}"`);
+          const oldOwner = ownerName;
+          const newOwner = matchingRosterName;
+          const parsed = parseLifeCardEntry(card.value);
+          const targetVal = parsed.target || "";
+          const newTitle = `${titlePrefix}${newOwner}`;
+          const newKeys = `${keyPrefix}${keyName(newOwner)},${newOwner}${targetVal ? `,${targetVal}` : ""}`;
+          let newValue = card.value || "";
+          newValue = newValue.replace(new RegExp(`^Owner:\\s*${escapeRegex(oldOwner)}`, "i"), `Owner: ${newOwner}`);
+          newValue = newValue.replace(new RegExp(`Owner:\\s*${escapeRegex(oldOwner)}`, "gi"), `Owner: ${newOwner}`);
+          let newDesc = card.description || "";
+          newDesc = newDesc.replace(new RegExp(escapeRegex(oldOwner), "gi"), newOwner);
+          const updatedCard = {
+            ...card,
+            title: newTitle,
+            keys: newKeys,
+            value: newValue,
+            description: newDesc
+          };
+          try {
+            const saveReq = buildCardSave(auth.gqlEndpoint, updateQuery, auth.sessionToken, updatedCard, newValue);
+            const saveRes = await aidFetch(saveReq.url, { method: "POST", headers: saveReq.headers, body: saveReq.body });
+            if (saveRes.ok) {
+              await repo.putCards(shortId, [updatedCard]);
+              dlog(`[LifeCards] Successfully auto-migrated Life Card for "${oldOwner}" to "${newOwner}".`);
+              broadcastToTabs({
+                kind: "approvedCardSync",
+                payload: { ok: true, source: "card", cardId: card.id, value: newValue, description: newDesc, keys: newKeys }
+              });
+              lifeCards[i3] = updatedCard;
+            }
+          } catch (err) {
+            console.error(`[LifeCards] Error auto-migrating Life Card for "${oldOwner}":`, err);
+          }
+        }
+      }
+    }
+    const presenceText = await getSceneText(shortId, actionText);
+    const relevance = lc.sceneRelevance || "strict";
+    const getCharacterKeys = (charName) => {
+      const charCard = cards.find((c2) => {
+        if (c2.deletedAt) return false;
+        const typeLower = (c2.type || "").toLowerCase();
+        if (typeLower !== "character" && typeLower !== "custom") return false;
+        return (c2.title || "").toLowerCase() === charName.toLowerCase();
+      });
+      return charCard ? charCard.keys : charName;
+    };
+    const dormancyTurns = lc.dormancyTurns ?? 7;
+    const dormantSince = adv.lcDormantSince || {};
+    let dormantStateChanged = false;
+    const staleTurns = lc.staleTurns ?? 14;
+    const lastEventTurn = adv.lcLastEventTurn || {};
+    adv.lcLastEventTurn = lastEventTurn;
+    let lastEventChanged = false;
+    const maxActiveTurns = lc.maxActiveTurns ?? 4;
+    const seededTurn = adv.lcSeededTurn || {};
+    adv.lcSeededTurn = seededTurn;
+    let seededTurnChanged = false;
+    let liveCount = lifeCards.length;
+    for (const card of lifeCards) {
+      if (seededCardIds.has(card.id)) continue;
+      const ownerName = card.title ? card.title.replace(new RegExp(`^${titlePrefix}`, "i"), "").trim() : "";
+      if (!ownerName) continue;
+      let current = card;
+      const parsed = parseLifeCardEntry(current.value);
+      const targetName = parsed.target || "";
+      if (seededTurn[current.id] == null) {
+        seededTurn[current.id] = turnCount;
+        seededTurnChanged = true;
+      }
+      if (shouldRetireByAge(seededTurn[current.id], turnCount, maxActiveTurns)) {
+        dlog(`[LifeCards] ${ownerName} thread hit max lifetime (${turnCount - seededTurn[current.id]}/${maxActiveTurns} turns) \u2014 retiring regardless of activity.`);
+        const archived = await archiveLifeCard(shortId, current);
+        if (archived.ok) {
+          liveCount--;
+          delete seededTurn[current.id];
+          seededTurnChanged = true;
+          if (dormantSince[current.id] != null) {
+            delete dormantSince[current.id];
+            dormantStateChanged = true;
+          }
+          if (lastEventTurn[current.id] != null) {
+            delete lastEventTurn[current.id];
+            lastEventChanged = true;
+          }
+        }
+        continue;
+      }
+      const ownerIsProtag = isSameLivingCharacterName(ownerName, protagonist);
+      const targetIsProtag = !!targetName && isSameLivingCharacterName(targetName, protagonist);
+      const ownerPresent = ownerIsProtag || isCharacterTriggered(presenceText, ownerName, getCharacterKeys(ownerName));
+      const targetPresent = !targetName || targetIsProtag || isCharacterTriggered(presenceText, targetName, getCharacterKeys(targetName));
+      const inScene = relevance === "strict" ? ownerPresent && targetPresent : ownerPresent;
+      if (!inScene) {
+        if (dormantSince[current.id] == null) {
+          dormantSince[current.id] = turnCount;
+          dormantStateChanged = true;
+        }
+        const dt = turnCount - dormantSince[current.id];
+        if (shouldArchiveLifeCard("dormant", dt, dormancyTurns)) {
+          dlog(`[LifeCards] Removing off-scene Life Card for ${ownerName} at dormancy (off-scene ${dt} turns).`);
+          const archived = await archiveLifeCard(shortId, current);
+          if (archived.ok) {
+            delete dormantSince[current.id];
+            dormantStateChanged = true;
+            liveCount--;
+          }
+        }
+        continue;
+      }
+      if (lastEventTurn[current.id] == null) {
+        lastEventTurn[current.id] = turnCount;
+        lastEventChanged = true;
+      }
+      if (shouldFadeStale(lastEventTurn[current.id], turnCount, staleTurns)) {
+        dlog(`[LifeCards] ${ownerName} thread faded (stale ${turnCount - lastEventTurn[current.id]} turns, no development) \u2014 archiving so a new pressure can take its place.`);
+        const archived = await archiveLifeCard(shortId, current);
+        if (archived.ok) {
+          liveCount--;
+          delete lastEventTurn[current.id];
+          lastEventChanged = true;
+          if (dormantSince[current.id] != null) {
+            delete dormantSince[current.id];
+            dormantStateChanged = true;
+          }
+        }
+        continue;
+      }
+      if (dormantSince[current.id] != null) {
+        delete dormantSince[current.id];
+        dormantStateChanged = true;
+      }
+      if (lastEventTurn[current.id] !== turnCount) {
+        lastEventTurn[current.id] = turnCount;
+        lastEventChanged = true;
+      }
+      const statusLower = (parsed.status || "").toLowerCase();
+      if (statusLower === "seedling" || statusLower === "dormant") {
+        try {
+          const newValue = setLifeCardStatusValue(current.value, "active");
+          const updatedCard = { ...current, value: newValue };
+          const saveReq = buildCardSave(auth.gqlEndpoint, updateQuery, auth.sessionToken, updatedCard, newValue);
+          const saveRes = await aidFetch(saveReq.url, { method: "POST", headers: saveReq.headers, body: saveReq.body });
+          if (saveRes.ok) {
+            await repo.putCards(shortId, [updatedCard]);
+            current = updatedCard;
+            dlog(`[LifeCards] ${ownerName} seedling activated (in scene).`);
+            broadcastToTabs({ kind: "approvedCardSync", payload: { ok: true, source: "card", cardId: current.id, value: newValue, description: current.description || "" } });
+          }
+        } catch (err) {
+          console.error(`[LifeCards] Error activating seedling Life Card for ${ownerName}:`, err);
+        }
+      }
+    }
+    const createLifeCard = async (owner, target) => {
+      if (!(auth.sessionToken && isSafeEndpoint(auth.gqlEndpoint))) return null;
+      const pressuresText = lc.pressures || DEFAULT_LC_PRESSURES;
+      const defaultPool = pressuresText.split("\n").map((p5) => p5.trim()).filter(Boolean);
+      const pressures = selectPressurePool(owner, target, lc.pressurePairs, defaultPool);
+      const pressure = pressures.length ? pressures[Math.floor(Math.random() * pressures.length)] : "friendship";
+      const momentum = rollMomentum();
+      dlog(`[LifeCards] Seeding relationship: ${owner} feels ${pressure} toward ${target} (momentum: ${momentum})`);
+      const createOp = await repo.getOp("SaveQueueStoryCard");
+      const createQuery = createOp?.query || DEFAULT_GQL_QUERIES.SaveQueueStoryCard;
+      const tempId = Math.floor(Math.random() * 1e9).toString();
+      const keys = `${keyPrefix}${keyName(owner)},${owner},${target}`;
+      const initialValue = buildLifeCardValue({ owner, target, pressure, occurrence: "none", momentum, status: "seedling" });
+      const ownerTitleLower = `${titlePrefix}${owner}`.toLowerCase();
+      const ownerKeyLower = `${keyPrefix}${keyName(owner)}`.toLowerCase();
+      const priorLog = cards.filter((c2) => c2.deletedAt && ((c2.title || "").toLowerCase() === ownerTitleLower || (c2.keys || "").split(/[,;]+/).map((k2) => k2.trim().toLowerCase()).includes(ownerKeyLower))).sort((a2, b) => String(b.deletedAt || "").localeCompare(String(a2.deletedAt || "")))[0]?.description || "";
+      const initialDesc = buildSeededDescription(priorLog, buildLifeHistoryLine(owner, pressure, target, momentum));
+      const newCardRow = { id: tempId, shortId, type: "Life", title: `${titlePrefix}${owner}`, keys, value: initialValue, description: initialDesc };
+      try {
+        const req = buildCardCreate(auth.gqlEndpoint, createQuery, auth.sessionToken, newCardRow, initialValue);
+        const res = await aidFetch(req.url, { method: "POST", headers: req.headers, body: req.body });
+        if (!res.ok) return null;
+        const json = await res.json();
+        const returnedCard = json?.[0]?.data?.updateStoryCard?.storyCard || json?.[0]?.data?.saveQueueStoryCard?.storyCard || json?.[0]?.data?.updateStoryCard || json?.[0]?.data?.saveQueueStoryCard;
+        if (!returnedCard) return null;
+        const savedCard = { ...newCardRow, id: returnedCard.id };
+        await repo.putCards(shortId, [savedCard]);
+        lastEventTurn[returnedCard.id] = turnCount;
+        seededTurn[returnedCard.id] = turnCount;
+        adv.lcLastSeedTurn = turnCount;
+        adv.lcSeedCount = (adv.lcSeedCount ?? 0) + 1;
+        await repo.upsertAdventure(adv);
+        dlog(`[LifeCards] Seeded Life Card for ${owner} (ID: ${returnedCard.id})`);
+        broadcastToTabs({ kind: "approvedCardSync", payload: { ok: true, source: "card", cardId: returnedCard.id, value: savedCard.value, description: savedCard.description || "" } });
+        return { owner, target, pressure, momentum };
+      } catch (err) {
+        console.error("[LifeCards] Error seeding Life Card:", err);
+        return null;
+      }
+    };
+    let seededPair;
+    if (shouldAttemptSeed({ liveCount, maxActive, seedCount: adv.lcSeedCount ?? 0, turnCount, lastSeedTurn: adv.lcLastSeedTurn ?? 0, interval })) {
+      const existingOwners = new Set(lifeCards.filter((c2) => !c2.deletedAt).map((c2) => {
+        const name = c2.title ? c2.title.replace(new RegExp(`^${titlePrefix}`, "i"), "").trim() : "";
+        return name.toLowerCase();
+      }).filter(Boolean));
+      const reseedCooldown = lc.reseedCooldown ?? 15;
+      const resolvedAt = adv.lcResolvedAt || {};
+      const eligibleOwners = npcRoster.filter((name) => {
+        const nameLower = name.toLowerCase();
+        const alreadyHas = Array.from(existingOwners).some((existing) => existing === nameLower || existing.startsWith(nameLower + " ") || nameLower.startsWith(existing + " "));
+        if (alreadyHas) return false;
+        if (reseedCooldown > 0) {
+          const r2 = resolvedAt[nameLower];
+          if (r2 != null && turnCount - r2 < reseedCooldown) {
+            dlog(`[LifeCards] ${name} on reseed cooldown (${turnCount - r2}/${reseedCooldown}). Not eligible to seed.`);
+            return false;
+          }
+        }
+        return true;
+      });
+      const sceneNPCs = computeInScene(presenceText, npcRoster.map((name) => ({ name, keys: getCharacterKeys(name) })));
+      const seedMode = relevance === "strict" ? "strict" : "off";
+      const pair = chooseSeedPair({
+        sceneNPCs,
+        eligibleOwners,
+        npcRoster,
+        // The protagonist may be TARGETED but never owns; "the player character" is a placeholder, not a real name.
+        protagonist: protagonist === "the player character" ? "" : protagonist,
+        mode: seedMode,
+        involvement: lc.protagonistInvolvement || "normal"
+      });
+      if (pair) {
+        const created = await createLifeCard(pair.owner, pair.target);
+        if (created) seededPair = created;
+      } else {
+        dlog(`[LifeCards] Seed attempt found no eligible pair (mode=${seedMode}, sceneNPCs=${sceneNPCs.length}, eligible=${eligibleOwners.length}). Retrying next turn.`);
+      }
+    }
+    if (dormantStateChanged || lastEventChanged || seededTurnChanged) {
+      adv.lcDormantSince = dormantSince;
+      adv.lcLastEventTurn = lastEventTurn;
+      adv.lcSeededTurn = seededTurn;
+      await repo.upsertAdventure(adv);
+    }
+    return { seededPair };
+  }
+
+  // src/inference/phenotype/rng.ts
+  function clamp(x, lo, hi) {
+    return x < lo ? lo : x > hi ? hi : x;
+  }
+  function hashSeed(str) {
+    let h1 = 3735928559, h2 = 1103547991;
+    for (let i3 = 0; i3 < str.length; i3++) {
+      const ch = str.charCodeAt(i3);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ h1 >>> 16, 2246822507) ^ Math.imul(h2 ^ h2 >>> 13, 3266489909);
+    h2 = Math.imul(h2 ^ h2 >>> 16, 2246822507) ^ Math.imul(h1 ^ h1 >>> 13, 3266489909);
+    return h2 >>> 0;
+  }
+  function mulberry32(seed) {
+    let a2 = seed >>> 0;
+    return function() {
+      a2 |= 0;
+      a2 = a2 + 1831565813 | 0;
+      let t3 = Math.imul(a2 ^ a2 >>> 15, 1 | a2);
+      t3 = t3 + Math.imul(t3 ^ t3 >>> 7, 61 | t3) ^ t3;
+      return ((t3 ^ t3 >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  function gaussian(rng, mean = 0, sd = 1) {
+    let u2 = 0, v2 = 0;
+    while (u2 === 0) u2 = rng();
+    while (v2 === 0) v2 = rng();
+    return mean + sd * Math.sqrt(-2 * Math.log(u2)) * Math.cos(2 * Math.PI * v2);
+  }
+  function truncatedNormal(mean, sd, lo, hi, rng) {
+    for (let i3 = 0; i3 < 100; i3++) {
+      const x = gaussian(rng, mean, sd);
+      if (x >= lo && x <= hi) return x;
+    }
+    return clamp(mean, lo, hi);
+  }
+
+  // src/inference/phenotype/lexicon.ts
+  var DESCRIPTOR_LEXICON = {
+    // height
+    tall: { height: "high" },
+    statuesque: { height: "high", shapeHint: "Hourglass" },
+    towering: { height: "high" },
+    "long-legged": { height: "high" },
+    leggy: { height: "high" },
+    lofty: { height: "high" },
+    short: { height: "low" },
+    petite: { scale: "low", height: "low" },
+    diminutive: { height: "low", scale: "low" },
+    tiny: { height: "low", scale: "low" },
+    // scale / frame
+    slim: { scale: "low" },
+    slender: { scale: "low" },
+    willowy: { scale: "low", height: "high" },
+    wiry: { scale: "low", muscularity: "Lean", shapeHint: "Rectangle/Slim" },
+    lithe: { scale: "low" },
+    lean: { scale: "low", muscularity: "Lean" },
+    svelte: { scale: "low" },
+    waifish: { scale: "low" },
+    beanpole: { height: "high", scale: "low" },
+    lanky: { height: "high", scale: "low" },
+    gangly: { height: "high", scale: "low" },
+    average: {},
+    athletic: { muscularity: "Muscular" },
+    toned: { muscularity: "Muscular" },
+    fit: { muscularity: "Muscular" },
+    muscular: { muscularity: "Muscular", scale: "high" },
+    muscled: { muscularity: "Muscular", scale: "high" },
+    brawny: { muscularity: "Muscular", scale: "high" },
+    jacked: { muscularity: "Muscular", scale: "high" },
+    burly: { scale: "high", muscularity: "Stocky" },
+    stocky: { scale: "high", muscularity: "Stocky" },
+    "heavy-set": { scale: "high", muscularity: "Stocky" },
+    hefty: { scale: "high" },
+    thickset: { scale: "high", muscularity: "Stocky" },
+    stout: { scale: "high" },
+    chunky: { scale: "high" },
+    plump: { scale: "high" },
+    "full-figured": { scale: "high", cup: "high" },
+    curvy: { shapeHint: "Hourglass", cup: "high" },
+    voluptuous: { shapeHint: "Hourglass", cup: "high", scale: "high" },
+    buxom: { cup: "high" },
+    "plus-size": { scale: "high" },
+    rotund: { scale: "high" },
+    // shape (female)
+    hourglass: { shapeHint: "Hourglass" },
+    "pear-shaped": { shapeHint: "Pear/Triangle" },
+    "apple-shaped": { shapeHint: "Oval/Apple" },
+    rectangular: { shapeHint: "Rectangle/Slim" },
+    // shoulders (male)
+    "broad-shouldered": { shoulders: "high" },
+    "broad-chested": { shoulders: "high" },
+    "v-shaped": { shoulders: "high", shapeHint: "V-Taper" },
+    "barrel-chested": { shoulders: "high", scale: "high" },
+    "narrow-shouldered": { shoulders: "low" },
+    // cup (female)
+    busty: { cup: "high" },
+    "big-busted": { cup: "high" },
+    "large-chested": { cup: "high" },
+    "ample-chested": { cup: "high" },
+    "flat-chested": { cup: "low" },
+    "small-chested": { cup: "low" },
+    "modest-chested": { cup: "low" }
+  };
+  var ARCHETYPE_PHRASES = {
+    Hourglass: "an even hourglass",
+    "Top Hourglass": "a top-heavy hourglass",
+    "Spoon/Curvy Pear": "a curvy, hip-forward figure",
+    "Pear/Triangle": "a pear-shaped figure",
+    "Rectangle/Slim": "a lean, straight figure",
+    "Inverted Triangle": "a shoulder-forward figure",
+    "V-Taper": "a strong V-taper",
+    "Rectangle/Athletic": "an athletic, even build",
+    Trapezoid: "a broad, squared-off build",
+    "Triangle/Pear": "a hip-heavy build",
+    "Oval/Apple": "a solid, center-set build",
+    Petite: "petite",
+    Slim: "slim",
+    Average: "average",
+    "Full/Plus": "full-figured",
+    Lean: "lean",
+    Muscular: "muscular",
+    Stocky: "stocky"
+  };
+  function mergeBias(into, add) {
+    return { ...into, ...add };
+  }
+
+  // src/inference/phenotype/classify.ts
+  function femaleShape(bust, waist, hip) {
+    const bustWaist = bust - waist, hipWaist = hip - waist, bustHip = bust - hip;
+    const defined = bustWaist >= 9 && hipWaist >= 10;
+    if (defined && Math.abs(bustHip) <= 1) return "Hourglass";
+    if (defined && bustHip > 1) return "Top Hourglass";
+    if (hip - bust >= 4 && hipWaist >= 10 && bustWaist >= 9) return "Spoon/Curvy Pear";
+    if (hip - bust >= 2) return "Pear/Triangle";
+    if (bust - hip >= 2) return "Inverted Triangle";
+    return "Rectangle/Slim";
+  }
+  function maleShape(shoulders, waist, hip) {
+    const shHip = shoulders - hip, shWaist = shoulders - waist;
+    if (waist >= shoulders - 2 && shHip <= 3) return "Oval/Apple";
+    if (hip - shoulders >= 2) return "Triangle/Pear";
+    if (shHip >= 6) return "V-Taper";
+    if (shWaist >= 14) return "Trapezoid";
+    return "Rectangle/Athletic";
+  }
+  function extractCues(text) {
+    const found = /* @__PURE__ */ new Set();
+    const lower = ` ${String(text || "").toLowerCase()} `;
+    for (const key of Object.keys(DESCRIPTOR_LEXICON)) {
+      if (key.includes("-") || key.includes(" ")) {
+        if (lower.includes(` ${key} `) || lower.includes(`${key} `) || lower.includes(` ${key}`)) found.add(key);
+      }
+    }
+    try {
+      const doc = three_default(String(text || ""));
+      const adjectives = doc.adjectives().out("array");
+      const words = doc.terms().out("array");
+      for (const raw of [...adjectives, ...words]) {
+        const w = raw.toLowerCase().replace(/[^a-z-]/g, "");
+        if (w && DESCRIPTOR_LEXICON[w]) found.add(w);
+      }
+    } catch {
+    }
+    return [...found];
+  }
+  function classify(lazyDesc, gender) {
+    const cues = extractCues(lazyDesc);
+    let bias = {};
+    for (const cue of cues) bias = mergeBias(bias, DESCRIPTOR_LEXICON[cue] || {});
+    const shape = bias.shapeHint || (gender === "female" ? "Rectangle/Slim" : "Rectangle/Athletic");
+    const scale = gender === "female" ? bias.scale === "low" ? "Slim" : bias.scale === "high" ? "Full/Plus" : "Average" : bias.muscularity || (bias.scale === "high" ? "Stocky" : bias.scale === "low" ? "Lean" : "Average");
+    return { gender, shape, scale, cues, bias };
+  }
+
+  // src/inference/phenotype/tables.ts
+  var HEIGHT_NORMALS = {
+    western: { male: { mean: 69.1, sd: 2.9 }, female: { mean: 63.5, sd: 2.7 } },
+    global: { male: { mean: 67.5, sd: 3 }, female: { mean: 62.8, sd: 2.75 } }
+  };
+  var HANDEDNESS_LEFT_RATE = { male: 0.116, female: 0.095 };
+  var MALE_BUILD_BY_HEIGHT = [
+    { loIn: 63, hiIn: 65, a: [41.5, 45], waist: [29.5, 34], hip: [34.5, 37.5] },
+    { loIn: 66, hiIn: 68, a: [43, 46.5], waist: [31, 35.5], hip: [36, 39.5] },
+    { loIn: 69, hiIn: 71, a: [44.5, 48], waist: [32, 37], hip: [37.5, 41.5] },
+    { loIn: 72, hiIn: 74, a: [46, 50], waist: [33, 38.5], hip: [39, 43] },
+    { loIn: 75, hiIn: 77, a: [48, 52.5], waist: [34.5, 40.5], hip: [41, 45.5] },
+    { loIn: 78, hiIn: 80, a: [51, 55], waist: [36, 42], hip: [43.5, 47.5] },
+    { loIn: 81, hiIn: 83, a: [54, 58.5], waist: [38, 44.5], hip: [46, 51] },
+    { loIn: 84, hiIn: 86, a: [58, 64], waist: [40, 49], hip: [49, 56] }
+  ];
+  var FEMALE_BUILD_BY_HEIGHT = [
+    { loIn: 58, hiIn: 60, a: [31, 34.5], waist: [23.5, 26.5], hip: [32.5, 35.5] },
+    { loIn: 61, hiIn: 63, a: [32.5, 36], waist: [24.5, 28], hip: [34, 37.5] },
+    { loIn: 64, hiIn: 66, a: [34, 37.5], waist: [25.5, 29.5], hip: [35.5, 39.5] },
+    { loIn: 67, hiIn: 69, a: [35.5, 39], waist: [26.5, 31], hip: [37, 41] },
+    { loIn: 70, hiIn: 72, a: [36.5, 40.5], waist: [27.5, 32.5], hip: [38.5, 43] },
+    { loIn: 73, hiIn: 75, a: [38, 42.5], waist: [29, 34.5], hip: [40.5, 45] },
+    { loIn: 76, hiIn: 77, a: [40, 45], waist: [31, 37], hip: [42.5, 47.5] }
+  ];
+  function bandForHeight(bands, heightInches) {
+    if (heightInches <= bands[0].loIn) return bands[0];
+    const last = bands[bands.length - 1];
+    if (heightInches >= last.hiIn) return last;
+    for (const b of bands) if (heightInches >= b.loIn && heightInches <= b.hiIn) return b;
+    let chosen = bands[0];
+    for (const b of bands) if (b.loIn <= heightInches) chosen = b;
+    return chosen;
+  }
+  var SCALE_TIER_WEIGHTS = [0.05, 0.25, 0.4, 0.25, 0.05];
+  var SCALE_TIER_RANGES = [
+    [0, 0.05],
+    [0.05, 0.3],
+    [0.3, 0.7],
+    [0.7, 0.95],
+    [0.95, 1]
+  ];
+  var CUP_DISTRIBUTION_WORN = [
+    { letter: "AA", weight: 0.02 },
+    { letter: "A", weight: 0.13 },
+    { letter: "B", weight: 0.3 },
+    { letter: "C", weight: 0.28 },
+    { letter: "D", weight: 0.15 },
+    { letter: "DD", weight: 0.07 },
+    { letter: "DDD", weight: 0.03 },
+    { letter: "G", weight: 0.02 }
+  ];
+
+  // src/inference/phenotype/braSize.ts
+  var CUP_LADDER = ["AA", "A", "B", "C", "D", "DD", "DDD", "G"];
+  function letterToCupVolume(letter) {
+    const i3 = CUP_LADDER.indexOf(letter.toUpperCase());
+    return i3 < 0 ? 2 : i3;
+  }
+  function cupVolumeToLetter(vol) {
+    const i3 = Math.round(clamp(vol, 0, CUP_LADDER.length - 1));
+    return CUP_LADDER[i3];
+  }
+  function trueBustToBra(trueBustInches, band) {
+    const evenBand = 2 * Math.round(band / 2);
+    return `${evenBand}${cupVolumeToLetter(Math.round(trueBustInches - evenBand))}`;
+  }
+
+  // src/inference/phenotype/sample.ts
+  var EPS_SD = 0.14;
+  function drawHeight(gender, population, bias, rng) {
+    const { mean, sd } = HEIGHT_NORMALS[population][gender];
+    let lo = mean - 3 * sd, hi = mean + 3 * sd;
+    if (bias.height === "high") lo = mean + 1 * sd;
+    else if (bias.height === "low") hi = mean - 1 * sd;
+    return truncatedNormal(mean, sd, lo, hi, rng);
+  }
+  function drawScalePercentile(bias, rng) {
+    const weights = SCALE_TIER_WEIGHTS.slice();
+    if (bias.scale === "low") {
+      weights[0] += 0.15;
+      weights[1] += 0.15;
+      weights[3] -= 0.12;
+      weights[4] -= 0.04;
+    } else if (bias.scale === "high") {
+      weights[3] += 0.15;
+      weights[4] += 0.12;
+      weights[1] -= 0.12;
+      weights[0] -= 0.04;
+    }
+    const total = weights.reduce((a2, b) => a2 + Math.max(0, b), 0);
+    let r2 = rng() * total, idx = 0;
+    for (let i3 = 0; i3 < weights.length; i3++) {
+      r2 -= Math.max(0, weights[i3]);
+      if (r2 <= 0) {
+        idx = i3;
+        break;
+      }
+    }
+    const [lo, hi] = SCALE_TIER_RANGES[idx];
+    return lo + rng() * (hi - lo);
+  }
+  function lerp(range, p5) {
+    return range[0] + clamp(p5, 0, 1) * (range[1] - range[0]);
+  }
+  function axisPercentile(p0, pin, rng) {
+    let p5 = clamp(p0 + gaussian(rng, 0, EPS_SD), 0, 1);
+    if (pin === "high") p5 = clamp(Math.max(p5, 0.85) + Math.abs(gaussian(rng, 0, EPS_SD)) * 0.3, 0, 1);
+    else if (pin === "low") p5 = clamp(Math.min(p5, 0.15), 0, 1);
+    return p5;
+  }
+  function drawCupVolume(bias, rng) {
+    const tiers = CUP_DISTRIBUTION_WORN.map((t3) => ({ vol: letterToCupVolume(t3.letter), weight: t3.weight }));
+    const shift = bias.cup === "high" ? 2.5 : bias.cup === "low" ? 0.4 : 1;
+    const weights = tiers.map((t3) => t3.weight * (bias.cup === "high" ? Math.pow(shift, t3.vol / 3) : bias.cup === "low" ? Math.pow(shift, t3.vol) : 1));
+    const total = weights.reduce((a2, b) => a2 + b, 0);
+    let r2 = rng() * total;
+    for (let i3 = 0; i3 < tiers.length; i3++) {
+      r2 -= weights[i3];
+      if (r2 <= 0) return tiers[i3].vol;
+    }
+    return tiers[tiers.length - 1].vol;
+  }
+  function sampleAnchors(archetype, population, seed) {
+    const rng = mulberry32(seed >>> 0);
+    const { gender, bias } = archetype;
+    const heightInches = drawHeight(gender, population, bias, rng);
+    const p0 = drawScalePercentile(bias, rng);
+    const bands = gender === "female" ? FEMALE_BUILD_BY_HEIGHT : MALE_BUILD_BY_HEIGHT;
+    const band = bandForHeight(bands, Math.round(heightInches));
+    const waist = Math.round(lerp(band.waist, axisPercentile(p0, void 0, rng)));
+    const hip = Math.round(lerp(band.hip, axisPercentile(p0, void 0, rng)));
+    let m3;
+    let keyPair, descriptorPhrase, shape;
+    if (gender === "female") {
+      const bandRange = [band.a[0] - 5, band.a[1] - 3];
+      const bandIn = lerp(bandRange, axisPercentile(p0, void 0, rng));
+      const evenBand = 2 * Math.round(bandIn / 2);
+      const cupVolume = drawCupVolume(bias, rng);
+      const bustTrue = Math.round(clamp(evenBand + cupVolume, band.a[0] - 3, band.a[1] + 5));
+      shape = femaleShape(bustTrue, waist, hip);
+      keyPair = `BWH: ${trueBustToBra(bustTrue, evenBand)}-${waist}-${hip}`;
+      m3 = { heightInches: Math.round(heightInches), bustTrue, band: evenBand, cupVolume, waist, hip };
+      const cupWord = cupVolume <= 2 ? "modest" : cupVolume <= 4 ? "full" : "ample";
+      descriptorPhrase = `${statureWord(gender, heightInches)}, ${ARCHETYPE_PHRASES[shape] || shape.toLowerCase()} with a ${cupWord} bust`;
+    } else {
+      const shoulders = Math.round(lerp(band.a, axisPercentile(p0, bias.shoulders, rng)));
+      shape = maleShape(shoulders, waist, hip);
+      keyPair = `SWH: ${shoulders}-${waist}-${hip}`;
+      m3 = { heightInches: Math.round(heightInches), shoulders, waist, hip };
+      descriptorPhrase = `${statureWord(gender, heightInches)}, ${ARCHETYPE_PHRASES[shape] || shape.toLowerCase()}`;
+    }
+    return { descriptorPhrase, keyPair, internalMeasurements: m3 };
+  }
+  function statureWord(gender, heightInches) {
+    const tall = gender === "female" ? 66.2 : 72;
+    const short = gender === "female" ? 60.8 : 66.2;
+    if (heightInches >= tall) return "tall";
+    if (heightInches <= short) return "short";
+    return "average-height";
+  }
+  function sampleQuirks(gender, cues, seed) {
+    const rng = mulberry32(seed >>> 0 ^ 2654435769);
+    const out2 = [];
+    const cued = cues.map((c2) => c2.toLowerCase());
+    if (cued.some((c2) => /left-?handed|southpaw/.test(c2))) out2.push("Left-handed");
+    else if (cued.some((c2) => /right-?handed/.test(c2))) out2.push("Right-handed");
+    else out2.push(rng() < HANDEDNESS_LEFT_RATE[gender] ? "Left-handed" : "Right-handed");
+    return out2;
+  }
+
+  // src/inference/phenotype/index.ts
+  var GENDER_FIELD_RE = /^\s*[-•*]?\s*Gender(?:\s*&\s*Age)?\s*:\s*(.+)$/im;
+  var FEMALE_NAME_TITLE = /\b(mrs|ms|miss|mme|madame|mademoiselle|lady|dame|madam|queen|princess|duchess|countess|baroness|empress|mistress|mother|sister|nun|matron|frau|senora|senorita)\b/i;
+  var MALE_NAME_TITLE = /\b(mr|mister|monsieur|sir|lord|master|king|prince|duke|earl|count|baron|viscount|emperor|father|brother|herr|senor|sri|don)\b/i;
+  function resolveGender(cardValue, storyText, name = "") {
+    const field = String(cardValue || "").match(GENDER_FIELD_RE)?.[1]?.toLowerCase() || "";
+    if (/\bfemale\b|\bwoman\b|\bgirl\b|\bshe\b/.test(field)) return "female";
+    if (/\bmale\b|\bman\b|\bboy\b/.test(field)) return "male";
+    const nm = String(name || "");
+    if (FEMALE_NAME_TITLE.test(nm)) return "female";
+    if (MALE_NAME_TITLE.test(nm)) return "male";
+    const story = ` ${String(storyText || "").toLowerCase()} `;
+    const fem = (story.match(/\b(she|her|hers|herself|woman|girl|lady|mrs|miss|ms)\b/g) || []).length;
+    const masc = (story.match(/\b(he|him|his|himself|man|boy|sir|mr|monsieur)\b/g) || []).length;
+    if (fem === 0 && masc === 0) return null;
+    if (fem > masc) return "female";
+    if (masc > fem) return "male";
+    return null;
+  }
+  var NO_ANATOMY = "Render build and figure tastefully; do not fabricate explicit sexual anatomy, and never put measurements or a cup size in the prose.";
+  function guidanceFrom(descriptorPhrase, heightInches, gender) {
+    const feet = Math.floor(heightInches / 12), inches = Math.round(heightInches - feet * 12);
+    return `Ground ${gender === "female" ? "her" : "his"} physical description on this sampled frame: ${descriptorPhrase}, about ${feet}'${inches}". ${NO_ANATOMY}`;
+  }
+  function buildPhenotypeInputs(args) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const { shortId, characterKey, name, gender, population, cueText } = args;
+    const rec0 = args.existingRecord;
+    const skipUpgrade = !!(rec0 && rec0.provenance === "skipped" && gender);
+    const genderMismatch = !!(rec0 && rec0.gender && gender && rec0.gender !== gender);
+    if (rec0 && !skipUpgrade && !genderMismatch) {
+      const rec2 = rec0;
+      return {
+        record: rec2,
+        appearanceGuidance: rec2.provenance === "sampled" && rec2.gender ? guidanceFrom(rec2.descriptorPhrase, rec2.measurements?.heightInches ?? 0, rec2.gender) : rec2.provenance === "skipped" ? `Describe ${name}'s appearance from the story's cues; this being may be non-human or ungendered. ${NO_ANATOMY}` : "",
+        keyPairLine: rec2.keyPair,
+        quirks: rec2.quirks,
+        rewriteAppearance: rec2.provenance !== "reverse-seeded"
+      };
+    }
+    if (!gender) {
+      const rec2 = {
+        shortId,
+        characterKey,
+        provenance: "skipped",
+        gender: null,
+        population,
+        seed: hashSeed(`${characterKey}|${name}`),
+        cues: [],
+        archetype: null,
+        measurements: null,
+        descriptorPhrase: "",
+        keyPair: "",
+        quirks: [],
+        sampledAt: now
+      };
+      return { record: rec2, appearanceGuidance: `Describe ${name}'s appearance from the story's cues; this being may be non-human or ungendered. ${NO_ANATOMY}`, keyPairLine: "", quirks: [], rewriteAppearance: true };
+    }
+    const seed = hashSeed(`${characterKey}|${name}|${gender}|${population}`);
+    const archetype = classify(cueText, gender);
+    if (args.hasEstablishedAppearance) {
+      const keyPair = args.existingKeyPairLine && args.existingKeyPairLine.trim() ? args.existingKeyPairLine.trim() : sampleAnchors(archetype, population, seed).keyPair;
+      const quirks2 = sampleQuirks(gender, archetype.cues, seed);
+      const rec2 = {
+        shortId,
+        characterKey,
+        provenance: "reverse-seeded",
+        gender,
+        population,
+        seed,
+        cues: archetype.cues,
+        archetype: { shape: archetype.shape, scale: archetype.scale },
+        measurements: null,
+        descriptorPhrase: "",
+        keyPair,
+        quirks: quirks2,
+        sampledAt: now
+      };
+      return { record: rec2, appearanceGuidance: "", keyPairLine: keyPair, quirks: quirks2, rewriteAppearance: false };
+    }
+    const anchors = sampleAnchors(archetype, population, seed);
+    const quirks = sampleQuirks(gender, archetype.cues, seed);
+    const rec = {
+      shortId,
+      characterKey,
+      provenance: "sampled",
+      gender,
+      population,
+      seed,
+      cues: archetype.cues,
+      archetype: { shape: archetype.shape, scale: archetype.scale },
+      measurements: anchors.internalMeasurements,
+      descriptorPhrase: anchors.descriptorPhrase,
+      keyPair: anchors.keyPair,
+      quirks,
+      sampledAt: now
+    };
+    return {
+      record: rec,
+      appearanceGuidance: guidanceFrom(anchors.descriptorPhrase, anchors.internalMeasurements.heightInches, gender),
+      keyPairLine: anchors.keyPair,
+      quirks,
+      rewriteAppearance: true
+    };
+  }
+  function rerollPhenotype(rec) {
+    if (!rec.gender || rec.provenance === "skipped") return null;
+    const reroll = (rec.reroll ?? 0) + 1;
+    const seed = hashSeed(`${rec.characterKey}|${rec.gender}|${rec.population}|reroll:${reroll}`);
+    const archetype = classify((rec.cues || []).join(" "), rec.gender);
+    const anchors = sampleAnchors(archetype, rec.population, seed);
+    const quirks = sampleQuirks(rec.gender, rec.cues || [], seed);
+    const record = {
+      ...rec,
+      provenance: "sampled",
+      reroll,
+      seed,
+      archetype: { shape: archetype.shape, scale: archetype.scale },
+      measurements: anchors.internalMeasurements,
+      descriptorPhrase: anchors.descriptorPhrase,
+      keyPair: anchors.keyPair,
+      quirks,
+      sampledAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    return {
+      record,
+      appearanceGuidance: guidanceFrom(anchors.descriptorPhrase, anchors.internalMeasurements.heightInches, rec.gender),
+      keyPairLine: anchors.keyPair,
+      quirks
+    };
+  }
+
+  // src/background/bg-memoraid.ts
+  init_card_command();
+  var lastProcessedSceneText = /* @__PURE__ */ new Map();
+  var memoraidInFlight = /* @__PURE__ */ new Set();
+  function __resetMemoraidStateForTests() {
+    lastProcessedSceneText.clear();
+    memoraidInFlight.clear();
+    cachedRecentActions.clear();
+    cachedSceneText.clear();
+  }
+  async function checkMemorAIDUpdates(shortId, pendingActionText) {
+    if (memoraidInFlight.has(shortId)) {
+      dlog(`[MemorAID] Generation already in flight for ${shortId}; skipping concurrent invocation.`);
+      return [];
+    }
+    memoraidInFlight.add(shortId);
+    try {
+      return await checkMemorAIDUpdatesImpl(shortId, pendingActionText);
+    } finally {
+      memoraidInFlight.delete(shortId);
+    }
+  }
+  async function checkMemorAIDUpdatesImpl(shortId, pendingActionText) {
+    await ensureAuth();
+    const updatedNames = [];
+    const cards = await repo.getCards(shortId);
+    dlog(`[MemorAID] checkMemorAIDUpdates called for ${shortId}. Total cards in local DB:`, cards ? cards.length : 0);
+    if (!cards || !cards.length) return updatedNames;
+    const settings = await repo.getSettings() || {
+      formattingMode: DEFAULT_FORMATTING_MODE,
+      cardCommands: DEFAULT_CARD_COMMANDS
+    };
+    dlog(`[MemorAID] Settings loaded:`, await repo.getSettings() ? "yes" : "no (using defaults)");
+    if (settings.enableMemorAID === false) {
+      dlog("[MemorAID] Disabled in settings. Skipping memory updates.");
+      return updatedNames;
+    }
+    const adv0 = await repo.getAdventure(shortId);
+    let importantNamesOriginal = (adv0?.memoraidCharacters || []).map((name) => name.trim()).filter(Boolean);
+    if (importantNamesOriginal.length === 0) {
+      const configCard = cards.find((c2) => !c2.deletedAt && (c2.title || "").toLowerCase() === "configure memoraid");
+      importantNamesOriginal = parseImportantCharacters(configCard?.description).map((n3) => n3.trim()).filter(Boolean);
+    }
+    const importantNames = importantNamesOriginal.map((n3) => n3.toLowerCase());
+    if (importantNames.length === 0) {
+      dlog("[MemorAID] No important characters configured for this adventure. Skipping memory updates.");
+      return updatedNames;
+    }
+    dlog(`[MemorAID] Important characters (per-adventure):`, importantNames);
+    const allActions = await repo.getActions(shortId);
+    allActions.sort((a2, b) => {
+      if (a2.createdAt && b.createdAt) return a2.createdAt.localeCompare(b.createdAt);
+      return 0;
+    });
+    const checkActions = [...allActions];
+    if (pendingActionText) {
+      checkActions.push({
+        id: "pending",
+        text: pendingActionText,
+        type: "do",
+        createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+    const latestAction = checkActions[checkActions.length - 1];
+    if (!latestAction || !latestAction.text) {
+      dlog("[MemorAID] No actions found or latest action has empty text.");
+      return updatedNames;
+    }
+    dlog(`[MemorAID] Latest action text: "${latestAction.text.slice(0, 100)}..."`);
+    const characterCards = cards.filter((c2) => isDistillationSourceCard(c2, importantNames));
+    dlog(`[MemorAID] Found ${characterCards.length} character cards matching important list:`, characterCards.map((c2) => c2.title));
+    const coveredWords = /* @__PURE__ */ new Set();
+    for (const c2 of characterCards) {
+      for (const t3 of [c2.title || "", ...String(c2.keys || "").split(/[,;]+/)]) {
+        const tl = t3.trim().toLowerCase();
+        if (tl) coveredWords.add(tl);
+      }
+    }
+    const virtualCharacters = [];
+    for (const orig of importantNamesOriginal) {
+      const lower = orig.toLowerCase();
+      if (coveredWords.has(lower)) continue;
+      virtualCharacters.push({ id: `virtual-${lower}`, shortId, type: "character", title: orig, keys: lower, value: "" });
+    }
+    const trackableCharacters = [...characterCards, ...virtualCharacters];
+    const memoraidThoughtLookback = Math.max(1, settings?.memoraidThoughtLookback ?? 1);
+    const thoughtCardLimit = settings?.thoughtCardLimit ?? 2e3;
+    const presenceText = await getSceneText(shortId, pendingActionText);
+    if (!isSceneNovel(lastProcessedSceneText.get(shortId), presenceText)) {
+      dlog(`[MemorAID] Scene is a near-duplicate of the last processed one \u2014 skipping thought regeneration.`);
+      return updatedNames;
+    }
+    lastProcessedSceneText.set(shortId, presenceText);
+    const presenceLookback = settings?.memoraidPresenceLookback ?? 5;
+    const sceneForGeneration = checkActions.slice(-presenceLookback).map((a2) => (a2.text || "").trim()).filter(Boolean).join("\n");
+    const triggered = trackableCharacters.filter((c2) => {
+      const isTriggered = isCharacterTriggered(presenceText, c2.title || "", c2.keys || "");
+      dlog(`[MemorAID] Character "${c2.title}" triggered in scene? ${isTriggered} (keys: "${c2.keys}")`);
+      return isTriggered;
+    });
+    if (triggered.length === 0) {
+      dlog("[MemorAID] No important characters were triggered in the active scene lookback window.");
+      return updatedNames;
+    }
+    const adv = await repo.getAdventure(shortId);
+    const creationsToRun = [];
+    const characterToMemCardMap = /* @__PURE__ */ new Map();
+    for (const c2 of triggered) {
+      const titleVal = c2.title || "";
+      const memCardTitle = `${titleVal} (Memory)`;
+      const memCardKeys = c2.keys || titleVal;
+      const existingMemCard = cards.find(
+        (x) => ((x.type || "").toLowerCase() === "memory" || (x.type || "").toLowerCase() === "character" || (x.type || "").toLowerCase() === "custom") && !x.deletedAt && (x.title || "").toLowerCase() === memCardTitle.toLowerCase()
+      );
+      if (existingMemCard) {
+        characterToMemCardMap.set(c2.id, existingMemCard);
+      } else if (isTitleUserDeleted(adv?.userDeletedCards, memCardTitle)) {
+        dlog(`[MemorAID] Skipping recreation of user-deleted memory card "${memCardTitle}".`);
+        continue;
+      } else {
+        dlog(`[MemorAID] Queueing new memory card creation for ${c2.title}...`);
+        const createOp = await repo.getOp("SaveQueueStoryCard");
+        const createQuery = createOp?.query || DEFAULT_GQL_QUERIES.SaveQueueStoryCard;
+        const tempId = Math.floor(Math.random() * 1e9).toString();
+        const initialValue = "[\n - none\n]";
+        const newCardRow = {
+          id: tempId,
+          shortId,
+          type: "Memory",
+          title: memCardTitle,
+          keys: memCardKeys,
+          value: initialValue,
+          description: ""
+        };
+        const req = buildCardCreate(auth.gqlEndpoint, createQuery, auth.sessionToken, newCardRow, initialValue);
+        creationsToRun.push({ character: c2, cardRow: newCardRow, req });
+      }
+    }
+    if (creationsToRun.length > 0) {
+      await ensureAuth();
+      if (auth.sessionToken && isSafeEndpoint(auth.gqlEndpoint)) {
+        dlog(`[MemorAID] Batch creating ${creationsToRun.length} memory cards...`);
+        const creationOps = creationsToRun.map((item) => JSON.parse(item.req.body)[0]);
+        try {
+          const batchReq = buildGraphQLMutation(auth.gqlEndpoint, creationOps, auth.sessionToken);
+          const res = await aidFetch(batchReq.url, { method: "POST", headers: batchReq.headers, body: batchReq.body });
+          if (!res.ok) {
+            console.error(`[MemorAID] Batch creation push HTTP failure:`, res.status);
+          } else {
+            const jsonArray = await res.json();
+            for (let i3 = 0; i3 < creationsToRun.length; i3++) {
+              const item = creationsToRun[i3];
+              const resJson = jsonArray[i3];
+              const returnedCard = resJson?.data?.updateStoryCard?.storyCard || resJson?.data?.saveQueueStoryCard?.storyCard || resJson?.data?.updateStoryCard || resJson?.data?.saveQueueStoryCard;
+              const isSuccess = resJson?.data?.updateStoryCard?.success || resJson?.data?.saveQueueStoryCard?.success || returnedCard;
+              if (!isSuccess) {
+                const msg = resJson?.data?.updateStoryCard?.message || resJson?.errors?.[0]?.message || "Mutation failed";
+                console.error(`[MemorAID] AI Dungeon rejected memory card creation for ${item.character.title}:`, msg);
+                continue;
+              }
+              const actualId = returnedCard?.id || item.cardRow.id;
+              const targetMemCard = {
+                ...item.cardRow,
+                id: actualId
+              };
+              await repo.putCards(shortId, [targetMemCard]);
+              characterToMemCardMap.set(item.character.id, targetMemCard);
+              dlog(`[MemorAID] Successfully created empty memory card for ${item.character.title} (ID: ${actualId})`);
+              broadcastToTabs({
+                kind: "approvedCardSync",
+                payload: { ok: true, source: "card", cardId: actualId, value: targetMemCard.value || "", description: targetMemCard.description || "" }
+              });
+            }
+          }
+        } catch (err) {
+          console.error(`[MemorAID] Failed to batch create memory cards:`, err);
+        }
+      } else {
+        console.warn("[MemorAID] Missing session token or endpoint. Cannot create memory cards.");
+      }
+    }
+    const turnNow = countActions(checkActions);
+    const cooldownMap = adv?.memoraidOffstageCooldown ? { ...adv.memoraidOffstageCooldown } : {};
+    let cooldownChanged = false;
+    const offstageLookback = settings?.memoraidPresenceLookback ?? 5;
+    const generationsToRun = [];
+    const generationResults = [];
+    for (const c2 of triggered) {
+      const targetMemCard = characterToMemCardMap.get(c2.id);
+      if (!targetMemCard) continue;
+      if (isOnOffstageCooldown(cooldownMap[(c2.title || "").toLowerCase()], turnNow)) {
+        dlog(`[MemorAID] ${c2.title} on offstage cooldown until turn ${cooldownMap[(c2.title || "").toLowerCase()]}. Skipping generation.`);
+        continue;
+      }
+      let needsPruneSave = false;
+      const currentDesc = targetMemCard.description || "";
+      const prevNotes = parseMemoNotes(currentDesc);
+      const prunedDesc = buildMemoNotes(prevNotes);
+      if (currentDesc !== prunedDesc) {
+        dlog(`[MemorAID] Description for ${c2.title} is oversized or needs pruning (${currentDesc.length} -> ${prunedDesc.length} chars). Queueing self-healing save.`);
+        targetMemCard.description = prunedDesc;
+        needsPruneSave = true;
+      }
+      if (prevNotes.thoughtLog.some((e2) => e2.turn === turnNow)) {
+        dlog(`[MemorAID] Already generated thought for turn ${turnNow} for ${c2.title}. Skipping generation.`);
+        if (needsPruneSave) {
+          generationResults.push({
+            character: c2,
+            targetMemCard,
+            value: targetMemCard.value || "",
+            newDesc: prunedDesc
+          });
+        }
+        continue;
+      }
+      dlog(`[MemorAID] Queueing memory generation for ${c2.title}...`);
+      const sceneBlock = `Current scene (react ONLY to the latest action):
+${sceneForGeneration}`;
+      const thoughtContext = buildThoughtContext(prevNotes.thoughtLog, memoraidThoughtLookback, c2.title || "Character", 3e3);
+      const durableCore = extractDurableCore(c2.value || "", 400);
+      const anchoredContext = durableCore ? `${c2.title || "This character"}'s nature:
+${durableCore}
+
+${thoughtContext}` : thoughtContext;
+      const lifeContext = settings?.enableLivingCharacters !== false ? buildLifeCardContext(cards, c2.title || "", settings) : "";
+      const combinedContext = [sceneBlock, lifeContext, anchoredContext].filter(Boolean).join("\n\n").trim().slice(0, 4e3);
+      const template = settings?.cardCommands?.memoraid || DEFAULT_CARD_COMMANDS.memoraid || "";
+      const protagonist = adv?.protagonistName && adv.protagonistName.trim() || parseProtagonistName(adv?.memory) || "the player character";
+      const resolvedCommand = resolveCommand(template, protagonist) + `
+
+CRITICAL: The generated thoughts must be strictly under ${thoughtCardLimit} characters in length.`;
+      const formattingMode = settings?.formattingMode || DEFAULT_FORMATTING_MODE;
+      const opts2 = {
+        storyInformation: combinedContext
+      };
+      const generationTargetCard = { ...targetMemCard, value: "" };
+      generationsToRun.push({ character: c2, targetMemCard, prevNotes, genCard: generationTargetCard, command: resolvedCommand, formattingMode, opts: opts2 });
+    }
+    if (generationsToRun.length > 0) {
+      dlog(`[MemorAID] Generating ${generationsToRun.length} memories via the configured provider...`);
+      for (const item of generationsToRun) {
+        const parsed = await generateCard(item.genCard, item.command, item.formattingMode, item.opts);
+        if (!parsed.ok) {
+          console.error(`[MemorAID] Provider generation failed for ${item.character.title}:`, parsed.message || "unknown error");
+          continue;
+        }
+        const generatedMemory = parsed.value;
+        const name = (item.character.title || "Character").trim();
+        const cdKey = name.toLowerCase();
+        if (classifyMemoraidPresence(generatedMemory) === "offstage" || isLeakedPrompt(generatedMemory)) {
+          const ebThought = `[${name}'s Thoughts:
+${buildEarsBurningThought()}
+]`;
+          const ebLog = pushThought(item.prevNotes.thoughtLog, { turn: turnNow, text: ebThought });
+          const ebDesc = buildMemoNotes({ thoughtLog: ebLog });
+          let ebEntry = renderThoughtWindow(ebLog, Math.max(memoraidThoughtLookback, 1), name, thoughtCardLimit) || ebThought;
+          if (ebEntry.length > thoughtCardLimit) ebEntry = ebEntry.slice(0, thoughtCardLimit - 1).trimEnd() + "]";
+          generationResults.push({ character: item.character, targetMemCard: item.targetMemCard, value: ebEntry, newDesc: ebDesc });
+          cooldownMap[cdKey] = turnNow + offstageLookback;
+          cooldownChanged = true;
+          dlog(`[MemorAID] ${name} judged offstage \u2014 ears-burning thought + cooldown until turn ${cooldownMap[cdKey]}.`);
+          continue;
+        }
+        if (cooldownMap[cdKey] != null) {
+          delete cooldownMap[cdKey];
+          cooldownChanged = true;
+        }
+        let inner = generatedMemory.trim();
+        inner = inner.replace(/^\s*\[?\s*[^\n\]]*\bThoughts:\s*/i, "");
+        inner = inner.replace(/^[\s[]+/, "").replace(/[\s\]]+$/, "").trim();
+        const newThought = `[${name}'s Thoughts:
+${inner}
+]`;
+        dlog(`[MemorAID] Successfully generated memories for ${item.character.title}: "${newThought}"`);
+        const newLog = pushThought(item.prevNotes.thoughtLog, { turn: turnNow, text: newThought });
+        const newDesc = buildMemoNotes({ thoughtLog: newLog });
+        let entryValue = renderThoughtWindow(newLog, Math.max(memoraidThoughtLookback, 1), name, thoughtCardLimit) || newThought;
+        if (entryValue.length > thoughtCardLimit) entryValue = entryValue.slice(0, thoughtCardLimit - 1).trimEnd() + "]";
+        generationResults.push({ character: item.character, targetMemCard: item.targetMemCard, value: entryValue, newDesc });
+      }
+    }
+    const savesToRun = [];
+    const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+    const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
+    for (const item of generationResults) {
+      const memCardKeys = item.targetMemCard.keys || item.character.title || "";
+      const updatedCard = { ...item.targetMemCard, type: "Memory", keys: memCardKeys, value: item.value, description: item.newDesc };
+      const req = buildCardSave(auth.gqlEndpoint, updateQuery, auth.sessionToken, updatedCard, item.value);
+      savesToRun.push({ character: item.character, targetMemCard: item.targetMemCard, value: item.value, newDesc: item.newDesc, req });
+    }
+    if (savesToRun.length > 0) {
+      await ensureAuth();
+      if (auth.sessionToken && isSafeEndpoint(auth.gqlEndpoint)) {
+        dlog(`[MemorAID] Batch saving ${savesToRun.length} updated memory cards...`);
+        const saveOps = savesToRun.map((item) => JSON.parse(item.req.body)[0]);
+        try {
+          const batchReq = buildGraphQLMutation(auth.gqlEndpoint, saveOps, auth.sessionToken);
+          const res = await aidFetch(batchReq.url, { method: "POST", headers: batchReq.headers, body: batchReq.body });
+          if (!res.ok) {
+            console.error(`[MemorAID] Batch update push HTTP failure:`, res.status);
+          } else {
+            const jsonArray = await res.json();
+            for (let i3 = 0; i3 < savesToRun.length; i3++) {
+              const item = savesToRun[i3];
+              const resJson = jsonArray[i3];
+              const returnedCard = resJson?.data?.updateStoryCard?.storyCard || resJson?.data?.updateStoryCard;
+              const isSuccess = resJson?.data?.updateStoryCard?.success || returnedCard;
+              if (!isSuccess) {
+                const msg = resJson?.data?.updateStoryCard?.message || resJson?.errors?.[0]?.message || "Mutation failed";
+                console.error(`[MemorAID] AI Dungeon rejected memory card save for ${item.character.title}:`, msg);
+                continue;
+              }
+              const updatedCard = { ...item.targetMemCard, type: "Memory", keys: item.targetMemCard.keys || item.character.title || "", value: item.value, description: item.newDesc };
+              await repo.putCards(shortId, [updatedCard]);
+              dlog(`[MemorAID] Successfully saved updated memories to memory card for ${item.character.title}`);
+              updatedNames.push(item.character.title || "Character");
+              broadcastToTabs({
+                kind: "approvedCardSync",
+                payload: { ok: true, source: "card", cardId: item.targetMemCard.id, value: item.value, description: item.newDesc }
+              });
+            }
+          }
+        } catch (err) {
+          console.error(`[MemorAID] Failed to batch save memories:`, err);
+        }
+      } else {
+        console.warn("[MemorAID] Missing session token or endpoint. Cannot save memories.");
+      }
+    }
+    if (cooldownChanged && adv) {
+      adv.memoraidOffstageCooldown = cooldownMap;
+      await repo.upsertAdventure(adv);
+    }
+    return updatedNames;
+  }
+  async function selfHealMemoraidEntries(shortId) {
+    const settings = await repo.getSettings();
+    if (settings?.enableMemorAID === false) return;
+    const cards = await repo.getCards(shortId);
+    const broken = cards.filter(
+      (c2) => !c2.deletedAt && (c2.title || "").toLowerCase().endsWith(" (memory)") && (c2.value || "").trim() !== "" && !isWrappedThoughtEntry(c2.value)
+    );
+    if (!broken.length) return;
+    await ensureAuth();
+    if (!(auth.sessionToken && isSafeEndpoint(auth.gqlEndpoint))) return;
+    const lookback = Math.max(1, settings?.memoraidThoughtLookback ?? 1);
+    const turn = await repo.getActionCount(shortId);
+    const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+    const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
+    for (const card of broken) {
+      const name = (card.title || "").replace(/\s*\(memory\)$/i, "").trim() || "Character";
+      const rep = repairThoughtEntry(name, card.value, card.description, lookback, turn);
+      if (!rep.changed) continue;
+      const updated = { ...card, value: rep.value, description: rep.description };
+      try {
+        const saveReq = buildCardSave(auth.gqlEndpoint, updateQuery, auth.sessionToken, updated, rep.value);
+        const res = await aidFetch(saveReq.url, { method: "POST", headers: saveReq.headers, body: saveReq.body });
+        if (res.ok) {
+          await repo.putCards(shortId, [updated]);
+          broadcastToTabs({ kind: "approvedCardSync", payload: { ok: true, source: "card", cardId: card.id, value: rep.value, description: rep.description } });
+          dlog(`[MemorAID] Self-healed unwrapped entry for ${name}.`);
+        } else {
+          console.error(`[MemorAID] Self-heal save failed for ${name}: HTTP ${res.status}`);
+        }
+      } catch (err) {
+        console.error(`[MemorAID] Self-heal save threw for ${name}:`, err);
+      }
+    }
+  }
+
+  // src/background/bg-npc-memory.ts
+  init_card_command();
+  function cleanGenerated(text) {
+    let t3 = String(text || "").trim();
+    if (t3.startsWith("[")) t3 = t3.slice(1);
+    if (t3.endsWith("]")) t3 = t3.slice(0, -1);
+    return t3.trim();
+  }
+  async function resolveSourceCards(shortId) {
+    const adv = await repo.getAdventure(shortId);
+    const importantNames = (adv?.memoraidCharacters || []).map((n3) => n3.trim().toLowerCase()).filter(Boolean);
+    if (!importantNames.length) return [];
+    const cards = await repo.getCards(shortId);
+    return cards.filter((c2) => isDistillationSourceCard(c2, importantNames)).map((c2) => ({ title: (c2.title || "").trim(), keys: c2.keys || "" })).filter((s3) => s3.title);
+  }
+  async function generateNpcBlock(shortId, characterTitle, nativeBlock, sources) {
+    try {
+      const anchor = { actionId: nativeBlock.lastRelevantActionId || nativeBlock.actionIds[0], actionIds: nativeBlock.actionIds || [] };
+      const characterKey = characterTitle.trim().toLowerCase();
+      const allActions = await repo.getActions(shortId);
+      const idIndex = new Map(allActions.map((a2, i3) => [a2.id, i3]));
+      const ids = new Set(anchor.actionIds);
+      const windowActions = allActions.filter((a2) => ids.has(a2.id));
+      const contextRaw = (windowActions.length ? windowActions : allActions.slice(-8)).map((a2) => a2.text || "").join("\n").slice(0, 3e3);
+      if (!contextRaw.trim()) return null;
+      const selfSource = sources.find((s3) => s3.title.trim().toLowerCase() === characterKey) || { title: characterTitle, keys: "" };
+      if (charactersPresentInWindow(contextRaw, [selfSource]).length === 0) {
+        dlog(`[AID bg] Skipping ${characterTitle} \u2014 not present in native block ${deriveBlockId(anchor)}`);
+        return null;
+      }
+      const storyInformation = `[storyInformation]
+${contextRaw}
+[/storyInformation]`;
+      const target = { id: "", shortId, type: "custom", title: characterTitle, keys: "", value: "" };
+      const settings = await repo.getSettings();
+      const formattingMode = settings?.formattingMode || DEFAULT_FORMATTING_MODE;
+      const r2 = await generateCard(target, buildNpcMemoryCommand(characterTitle), formattingMode, { storyInformation, includeStorySummary: false });
+      if (!r2.ok) {
+        dlog(`[AID bg] npc-memory gen failed for ${characterTitle}:`, r2.message);
+        return null;
+      }
+      return await storeNpcBlockFromPov(shortId, characterTitle, anchor, r2.value, sources, idIndex);
+    } catch (err) {
+      dlog(`[AID bg] generateNpcBlock error for ${characterTitle}:`, err);
+      return null;
+    }
+  }
+  async function storeNpcBlockFromPov(shortId, characterTitle, anchor, rawPov, sources, idIndex) {
+    const povText = cleanGenerated(rawPov);
+    if (!povText) return null;
+    const characterKey = characterTitle.trim().toLowerCase();
+    const knownTokens = new Set(
+      sources.flatMap((s3) => [s3.title, ...String(s3.keys || "").split(/[,;]+/)]).map((t3) => t3.trim().toLowerCase()).filter(Boolean)
+    );
+    const { entities, keywords } = extractBlockTags(povText, knownTokens);
+    const index3 = idIndex || new Map((await repo.getActions(shortId)).map((a2, i3) => [a2.id, i3]));
+    const indices = anchor.actionIds.map((id) => index3.get(id)).filter((n3) => n3 !== void 0);
+    const turnStart = indices.length ? Math.min(...indices) : 0;
+    const turnEnd = indices.length ? Math.max(...indices) : 0;
+    const block = {
+      shortId,
+      characterKey,
+      blockId: deriveBlockId(anchor),
+      sourceAnchor: anchor,
+      povText,
+      entities,
+      keywords,
+      turnStart,
+      turnEnd,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    await repo.putNpcMemoryBlock(block);
+    return block;
+  }
+  async function presentNpcSourcesForBlock(shortId, blockText) {
+    const sources = await resolveSourceCards(shortId);
+    if (!sources.length) return [];
+    const presentKeys = new Set(charactersPresentInWindow(blockText, sources).map((s3) => s3.trim().toLowerCase()));
+    return sources.filter((s3) => presentKeys.has(s3.title.trim().toLowerCase()));
+  }
+  var BACKFILL_BATCH = 20;
+  async function effectiveMemoryCap(shortId) {
+    const adv = await repo.getAdventure(shortId);
+    const settings = await repo.getSettings();
+    return adv?.crystallizedNpcMemoryCap ?? settings?.crystallizedNpcMemoryCap ?? 400;
+  }
+  async function enforceMemoryCap(shortId, characterKey, cap) {
+    const blocks = await repo.getNpcMemoryBlocks(shortId, characterKey);
+    if (blocks.length <= cap) return;
+    const survivors = new Set(pruneToCap(blocks, cap).map((b) => b.blockId));
+    for (const b of blocks) if (!survivors.has(b.blockId)) await repo.deleteNpcMemoryBlock(shortId, characterKey, b.blockId);
+  }
+  async function regenerateNpcMemoryBlock(shortId, characterTitle, blockId) {
+    const characterKey = characterTitle.trim().toLowerCase();
+    const existing = (await repo.getNpcMemoryBlocks(shortId, characterKey)).find((b) => b.blockId === blockId);
+    if (!existing) return { error: "Memory block not found." };
+    const sources = await resolveSourceCards(shortId);
+    const nativeBlock = { actionIds: existing.sourceAnchor.actionIds, lastRelevantActionId: existing.sourceAnchor.actionId };
+    const block = await generateNpcBlock(shortId, characterTitle, nativeBlock, sources);
+    if (!block) return { error: "Regeneration failed (no output or character not present in that block)." };
+    return { block };
+  }
+  async function generateNpcBlocksForNewNativeBlock(shortId, nativeBlock) {
+    const sources = await resolveSourceCards(shortId);
+    if (!sources.length) return;
+    const cap = await effectiveMemoryCap(shortId);
+    for (const s3 of sources) {
+      const made = await generateNpcBlock(shortId, s3.title, nativeBlock, sources);
+      if (made) await enforceMemoryCap(shortId, s3.title.trim().toLowerCase(), cap);
+    }
+  }
+  async function backfillNpcMemories(shortId, characterTitle) {
+    await ensureAuth();
+    const adv = await repo.getAdventure(shortId);
+    const allActions = await repo.getActions(shortId);
+    const allActionIds = allActions.map((a2) => a2.id);
+    const actionsById = new Map(allActions.map((a2) => [a2.id, a2.text || ""]));
+    const nativeBlocks = (adv?.memoryBankEntries || []).filter((m3) => m3 && m3.actionIds && m3.actionIds.length);
+    if (!nativeBlocks.length) return { generated: 0, remaining: 0 };
+    const sources = await resolveSourceCards(shortId);
+    const characterKey = characterTitle.trim().toLowerCase();
+    const cap = await effectiveMemoryCap(shortId);
+    const selfSource = sources.find((s3) => s3.title.trim().toLowerCase() === characterKey) || { title: characterTitle, keys: "" };
+    const ordered = orderNativeBlocksNewestFirst(blocksInvolvingCharacter(nativeBlocks, actionsById, selfSource), allActionIds);
+    let existing = new Set((await repo.getNpcMemoryBlocks(shortId, characterKey)).map((b) => b.blockId));
+    const missing = ordered.filter((b) => !existing.has(deriveBlockId({ actionId: b.lastRelevantActionId || b.actionIds[0], actionIds: b.actionIds })));
+    let generated = 0;
+    for (const block of missing) {
+      if (existing.size >= cap) break;
+      const made = await generateNpcBlock(shortId, characterTitle, block, sources);
+      if (made) {
+        generated++;
+        existing.add(deriveBlockId({ actionId: block.lastRelevantActionId || block.actionIds[0], actionIds: block.actionIds }));
+        broadcastToTabs({ kind: "npcMemoryProgress", shortId, characterTitle, generated, remaining: Math.max(0, missing.length - generated), block: made });
+        if (generated >= BACKFILL_BATCH) break;
+        await new Promise((r2) => setTimeout(r2, 250));
+      }
+    }
+    await enforceMemoryCap(shortId, characterKey, cap);
+    const remaining = Math.max(0, missing.length - generated);
+    broadcastToTabs({ kind: "npcMemoryProgress", shortId, characterTitle, generated, remaining, done: true });
+    return { generated, remaining };
+  }
+
+  // src/inference/proper-nouns.ts
+  var PN_CONNECTORS = /* @__PURE__ */ new Set([
+    "of",
+    "the",
+    "a",
+    "an",
+    "de",
+    "la",
+    "le",
+    "du",
+    "des",
+    "von",
+    "van",
+    "el",
+    "al"
+  ]);
+  var PENDING_PROPER_NOUN_CAP = 150;
+  var CONTRACTION_RE = /^[A-Za-z]+'(d|ll|ve|re|t|s|m)$/i;
+  var ELISION_RE = /^[JCN]'/i;
+  function isContractionToken(word) {
+    return CONTRACTION_RE.test(word.trim());
+  }
+  function isElisionToken(word) {
+    return ELISION_RE.test(word.trim());
+  }
+  function multiwordDisqualified(phrase) {
+    const words = phrase.split(/\s+/).filter(Boolean);
+    if (words.length < 2) return false;
+    return words.some((w) => {
+      const lw = w.toLowerCase();
+      if (PN_CONNECTORS.has(lw)) return false;
+      if (/^[a-z]/.test(w)) return true;
+      return isContractionToken(w);
+    });
+  }
+  function trimJunkEdgeWords(phrase, isJunkWord, isLeadJunkWord) {
+    const words = phrase.split(/\s+/).filter(Boolean);
+    let start2 = 0;
+    let end2 = words.length;
+    let changed = true;
+    while (changed && start2 < end2) {
+      changed = false;
+      if (start2 < end2 && (isJunkWord(words[start2]) || (isLeadJunkWord?.(words[start2]) ?? false))) {
+        start2++;
+        changed = true;
+      } else if (start2 > 0 && start2 < end2 && PN_CONNECTORS.has(words[start2].toLowerCase())) {
+        start2++;
+        changed = true;
+      }
+      if (start2 < end2 && (PN_CONNECTORS.has(words[end2 - 1].toLowerCase()) || isJunkWord(words[end2 - 1]))) {
+        end2--;
+        changed = true;
+      }
+    }
+    return words.slice(start2, end2).join(" ");
+  }
+  var escapeRe2 = (s3) => s3.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+  function hasMidSentenceCap(word, text) {
+    const re = new RegExp(`([a-z,;])\\s+${escapeRe2(word)}(?![A-Za-z])`, "g");
+    return re.test(text);
+  }
+  function mentionedInText(noun, text, isKnownWord) {
+    if (new RegExp(`\\b${escapeRe2(noun)}\\b`).test(text)) return true;
+    const words = noun.split(/\s+/).filter(Boolean);
+    if (words.length < 2) return false;
+    return words.some((w) => {
+      if (PN_CONNECTORS.has(w.toLowerCase())) return false;
+      if (isKnownWord && isKnownWord(w)) return false;
+      return new RegExp(`\\b${escapeRe2(w)}\\b`).test(text);
+    });
+  }
+  var keyOf = (noun) => noun.trim().toLowerCase();
+  var wordsOf = (noun) => noun.toLowerCase().split(/\s+/).filter(Boolean);
+  var isWordSubset = (small, large) => small.every((w) => large.includes(w));
+  function registerCandidate(pending, noun, actionId, actionText, now) {
+    const key = keyOf(noun);
+    const newWords = wordsOf(noun);
+    let entry = pending[key];
+    if (!entry) {
+      for (const [k2, e2] of Object.entries(pending)) {
+        const oldWords = wordsOf(e2.noun);
+        if (newWords.length > oldWords.length && isWordSubset(oldWords, newWords)) {
+          delete pending[k2];
+          entry = { ...e2, noun };
+          pending[key] = entry;
+          break;
+        }
+        if (newWords.length < oldWords.length && isWordSubset(newWords, oldWords)) {
+          entry = e2;
+          break;
+        }
+      }
+    }
+    if (!entry) {
+      pending[key] = {
+        noun,
+        firstActionId: actionId,
+        mentionActionIds: [actionId],
+        hasMidSentenceCap: wordsOf(noun).length === 1 ? hasMidSentenceCap(noun, actionText) : false,
+        lastSeenAt: now
+      };
+      return;
+    }
+    if (!entry.mentionActionIds.includes(actionId)) entry.mentionActionIds.push(actionId);
+    if (!entry.hasMidSentenceCap && wordsOf(entry.noun).length === 1) {
+      entry.hasMidSentenceCap = hasMidSentenceCap(entry.noun, actionText);
+    }
+    entry.lastSeenAt = now;
+  }
+  function updatePendingEvidence(pending, actionId, actionText, now, isKnownWord) {
+    let changed = false;
+    for (const entry of Object.values(pending)) {
+      const single = wordsOf(entry.noun).length === 1;
+      if (!entry.mentionActionIds.includes(actionId) && mentionedInText(entry.noun, actionText, isKnownWord)) {
+        entry.mentionActionIds.push(actionId);
+        entry.lastSeenAt = now;
+        changed = true;
+      }
+      if (single && !entry.hasMidSentenceCap && hasMidSentenceCap(entry.noun, actionText)) {
+        entry.hasMidSentenceCap = true;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+  function readyToPromote(entry) {
+    if (entry.mentionActionIds.length < 2) return false;
+    return wordsOf(entry.noun).length > 1 || entry.hasMidSentenceCap;
+  }
+  function prunePending(pending, cap = PENDING_PROPER_NOUN_CAP) {
+    const keys = Object.keys(pending);
+    if (keys.length <= cap) return;
+    keys.sort((a2, b) => pending[b].lastSeenAt.localeCompare(pending[a2].lastSeenAt));
+    for (const k2 of keys.slice(cap)) delete pending[k2];
+  }
 
   // src/background/background.ts
-  var repo = new Repo();
+  var repo3 = new Repo();
   try {
     browser.storage.local?.remove?.(["aidToken", "aidEndpoint"]);
   } catch {
@@ -21688,7 +25772,6 @@ ${e2.text}` : e2.text;
   var sessionToken = null;
   var gqlEndpoint = null;
   var cachedImportantCharacters = /* @__PURE__ */ new Map();
-  var cachedRecentActions = /* @__PURE__ */ new Map();
   var memoraidTimingLastMs = null;
   var memoraidTimingCount = 0;
   var memoraidTimingSumMs = 0;
@@ -21698,12 +25781,6 @@ ${e2.text}` : e2.text;
       avgMs: memoraidTimingCount > 0 ? memoraidTimingSumMs / memoraidTimingCount : null,
       count: memoraidTimingCount
     };
-  }
-  function recordMemoraidTiming(ms) {
-    memoraidTimingLastMs = ms;
-    memoraidTimingCount += 1;
-    memoraidTimingSumMs += ms;
-    broadcastToTabs({ kind: "memoraidTiming", payload: memoraidTimingSnapshot() });
   }
   var cachedOffMetaRepo = null;
   var lastOffMetaFetchTime = 0;
@@ -22200,12 +26277,162 @@ ${e2.text}` : e2.text;
       "transition",
       "transitions",
       "climax",
-      "continuation"
+      "continuation",
+      // Demonyms / languages / nationalities — proper ADJECTIVES, not entities (biggest live false-positive
+      // source; "French" alone fired 100+ times). Kept as an explicit list because compromise unreliably
+      // tags these as #ProperNoun even lowercased, defeating the POS filter below.
+      "french",
+      "english",
+      "spanish",
+      "italian",
+      "german",
+      "greek",
+      "russian",
+      "chinese",
+      "japanese",
+      "korean",
+      "dutch",
+      "portuguese",
+      "brazilian",
+      "mexican",
+      "canadian",
+      "american",
+      "british",
+      "irish",
+      "scottish",
+      "welsh",
+      "jamaican",
+      "basque",
+      "afrikaans",
+      "gallic",
+      "bostonian",
+      "frenchwoman",
+      "european",
+      "asian",
+      "african",
+      "arab",
+      "arabic",
+      "latin",
+      "roman",
+      "nordic",
+      "slavic",
+      "indian",
+      "thai",
+      "vietnamese",
+      "filipino",
+      "turkish",
+      "polish",
+      "swedish",
+      "norwegian",
+      "danish",
+      "finnish",
+      "hungarian",
+      "czech",
+      "austrian",
+      "swiss",
+      "belgian",
+      "australian",
+      "egyptian",
+      "persian",
+      "hebrew",
+      // Period / style adjectives that read as proper nouns
+      "gothic",
+      "renaissance",
+      "baroque",
+      "victorian",
+      "medieval",
+      "olympic",
+      "cartesian",
+      // Sentence-initial discourse markers / interjections (capitalized at sentence start, not names).
+      "almost",
+      "exactly",
+      "seems",
+      "since",
+      "sorry",
+      "thanks",
+      "totally",
+      "unless",
+      "howdy",
+      "complicated",
+      "certainly",
+      "especially",
+      "despite",
+      "except",
+      "enough",
+      "alright",
+      "goodnight",
+      "describe",
+      "discuss",
+      "dismissed",
+      "besides",
+      "seriously",
+      "obviously",
+      "apparently",
+      "literally",
+      "frankly",
+      "regardless",
+      "luckily",
+      "nonetheless",
+      "furthermore",
+      "moreover",
+      "anyway",
+      "anyhow",
+      "indeed",
+      "absolutely",
+      "definitely",
+      "probably",
+      "possibly",
+      "hopefully",
+      "thankfully",
+      "unfortunately",
+      "fortunately",
+      "admittedly",
+      "whatever",
+      "somehow",
+      "anyways",
+      "okay",
+      "alrighty",
+      "welp",
+      "yikes",
+      "oops",
+      "ouch",
+      "ugh",
+      "huh",
+      // French loanwords / interjections that surface capitalized
+      "cela",
+      "dieu",
+      "reine",
+      "c'est",
+      "mon dieu",
+      "voila",
+      "voil\xE0",
+      // Generic descriptive nicknames (keep distinctive story epithets; suppress generic placeholders)
+      "big guy",
+      "big man",
+      "big boy",
+      "tall guy",
+      "little guy",
+      "pretty girl",
+      "pink one",
+      "man of mystery"
     ]);
     const knownLower = new Set(knownNames.map((n3) => n3.toLowerCase().trim()));
+    const knownWordSet = /* @__PURE__ */ new Set();
+    for (const n3 of knownNames) for (const w of n3.toLowerCase().split(/\s+/)) if (w) knownWordSet.add(w);
+    const isJunkWord = (w) => {
+      const lw = w.toLowerCase();
+      if (PN_CONNECTORS.has(lw)) return false;
+      if (/^[a-z]/.test(w)) return true;
+      if (isContractionToken(w) || isElisionToken(w)) return true;
+      return three_default(lw).match("#Demonym").found;
+    };
+    const isLeadJunkWord = (w) => {
+      const lw = w.toLowerCase();
+      return !PN_CONNECTORS.has(lw) && ignoreList.has(lw);
+    };
     const candidates = [];
     const rawTerms = [];
-    const escapeRe = (s3) => s3.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+    const escapeRe3 = (s3) => s3.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
     doc.match("#ProperNoun+ (of|the|a|an)* #ProperNoun+").out("array").forEach((s3) => rawTerms.push(s3));
     doc.match("#ProperNoun+").out("array").forEach((s3) => rawTerms.push(s3));
     for (const raw of rawTerms) {
@@ -22224,10 +26451,22 @@ ${e2.text}` : e2.text;
           cleanedPart = words.join(" ");
           words = cleanedPart.split(/\s+/);
         }
-        const dm = new RegExp(`\\b${escapeRe(cleanedPart)}\\s+([A-Z]\\d{0,2}|\\d{1,3}[A-Z]?)(?![A-Za-z0-9])`).exec(cleanedText);
+        const dm = new RegExp(`\\b${escapeRe3(cleanedPart)}\\s+([A-Z]\\d{0,2}|\\d{1,3}[A-Z]?)(?![A-Za-z0-9])`).exec(cleanedText);
         if (dm && dm[1] !== "I") {
           cleanedPart = `${cleanedPart} ${dm[1]}`;
           words = cleanedPart.split(/\s+/);
+        }
+        if (words.length === 1 && (isContractionToken(cleanedPart) || isElisionToken(cleanedPart))) continue;
+        if (words.length > 1) {
+          const trimmed = trimJunkEdgeWords(cleanedPart, isJunkWord, isLeadJunkWord);
+          if (!trimmed) continue;
+          if (trimmed !== cleanedPart) {
+            cleanedPart = trimmed;
+            words = cleanedPart.split(/\s+/);
+            if (words.length === 1 && (isContractionToken(cleanedPart) || isElisionToken(cleanedPart))) continue;
+          }
+          if (words.length > 1 && multiwordDisqualified(cleanedPart)) continue;
+          if (words.length > 1 && words.every((w) => PN_CONNECTORS.has(w.toLowerCase()) || knownWordSet.has(w.toLowerCase()))) continue;
         }
         const lower = cleanedPart.toLowerCase();
         if (ignoreList.has(lower) || knownLower.has(lower)) continue;
@@ -22246,6 +26485,7 @@ ${e2.text}` : e2.text;
         if (isSubName) continue;
         if (words.length === 1) {
           const docLower = three_default(lower);
+          if (docLower.match("#Demonym").found) continue;
           if (!docLower.match("#ProperNoun").found) {
             if (docLower.match("#Verb|#Adjective|#Adverb|#Pronoun|#Conjunction|#Preposition").found) {
               continue;
@@ -22333,6 +26573,16 @@ ${e2.text}` : e2.text;
       "grandpa",
       "grandma",
       "elder",
+      // Non-English / additional honorifics so title-prefixed variants dedup onto an existing card
+      // (e.g. "Mademoiselle Vallois" / "Monsieur Vallois" → "Vallois"). Proper-noun hardening spec §Dedup.
+      "monsieur",
+      "madame",
+      "mademoiselle",
+      "miss",
+      "se\xF1or",
+      "senor",
+      "herr",
+      "frau",
       "the",
       "a",
       "an",
@@ -22357,11 +26607,11 @@ ${e2.text}` : e2.text;
     return isSubset(wordsA, wordsB) || isSubset(wordsB, wordsA) && wordsB.length >= 2;
   }
   async function runProperNounAutoDetection(shortId, newActions) {
-    const settings = await repo.getSettings();
+    const settings = await repo3.getSettings();
     if (settings?.enableProperNounDetection === false) return;
-    const adv = await repo.getAdventure(shortId);
+    const adv = await repo3.getAdventure(shortId);
     if (!adv) return;
-    const cards = await repo.getCards(shortId);
+    const cards = await repo3.getCards(shortId);
     const suggestions = adv.locationSuggestions || [];
     const logs = adv.properNounLogs || [];
     const existingNames = [];
@@ -22376,13 +26626,20 @@ ${e2.text}` : e2.text;
     if (adv.protagonistName) {
       existingNames.push(adv.protagonistName);
     }
+    const peBlocks = parsePlotEssentials(adv.memory);
+    for (const b of peBlocks) {
+      if (b.name) existingNames.push(b.name);
+    }
+    for (const pn of detectProperNouns(adv.memory || "", existingNames, [])) {
+      existingNames.push(pn);
+    }
     for (const l2 of logs) {
       if (l2.properNoun) existingNames.push(l2.properNoun);
     }
     for (const s3 of suggestions) {
       if (s3.properNoun) existingNames.push(s3.properNoun);
     }
-    const allCards = await repo.getAllCards(shortId).catch(() => []);
+    const allCards = await repo3.getAllCards(shortId).catch(() => []);
     const globalLexiconNames = [];
     for (const c2 of allCards) {
       if (c2.deletedAt) continue;
@@ -22394,7 +26651,7 @@ ${e2.text}` : e2.text;
     }
     let actionsToScan = newActions;
     if (!actionsToScan || actionsToScan.length === 0) {
-      const allActions = await repo.getActions(shortId);
+      const allActions = await repo3.getActions(shortId);
       allActions.sort((a2, b) => {
         if (a2.createdAt && b.createdAt) {
           return a2.createdAt.localeCompare(b.createdAt);
@@ -22404,9 +26661,16 @@ ${e2.text}` : e2.text;
       actionsToScan = allActions.slice(-5);
     }
     let updated = false;
+    const pending = adv.properNounPending || {};
+    let pendingChanged = false;
+    const knownWords = /* @__PURE__ */ new Set();
+    for (const n3 of existingNames) for (const w of n3.toLowerCase().split(/\s+/)) if (w) knownWords.add(w);
+    const isKnownWord = (w) => knownWords.has(w.toLowerCase());
     const decisions = [];
     for (const action of actionsToScan) {
       if (!action.text) continue;
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      if (updatePendingEvidence(pending, action.id, action.text, now, isKnownWord)) pendingChanged = true;
       const candidates = detectProperNouns(action.text, existingNames, globalLexiconNames);
       if (candidates.length) decisions.push(`[${action.id}] candidates=[${candidates.join(", ")}]`);
       for (const noun of candidates) {
@@ -22415,32 +26679,45 @@ ${e2.text}` : e2.text;
           decisions.push(`  "${noun}": skipped (alias of "${aliasOf}")`);
           continue;
         }
-        decisions.push(`  "${noun}": SUGGESTED`);
+        registerCandidate(pending, noun, action.id, action.text, now);
+        pendingChanged = true;
+        decisions.push(`  "${noun}": pending (evidence gate)`);
+      }
+      for (const [key, entry] of Object.entries(pending)) {
+        if (!readyToPromote(entry)) continue;
+        decisions.push(`  "${entry.noun}": SUGGESTED (mentions=${entry.mentionActionIds.length})`);
         suggestions.push({
-          properNoun: noun,
+          properNoun: entry.noun,
           actionId: action.id,
           actionText: action.text,
-          timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+          timestamp: now,
           status: "pending"
         });
-        existingNames.push(noun);
+        existingNames.push(entry.noun);
+        for (const w of entry.noun.toLowerCase().split(/\s+/)) if (w) knownWords.add(w);
+        delete pending[key];
+        pendingChanged = true;
         updated = true;
       }
     }
+    const beforePrune = Object.keys(pending).length;
+    prunePending(pending);
+    if (Object.keys(pending).length !== beforePrune) pendingChanged = true;
     console.info(
       `[AID bg] Proper-noun detection scanned ${actionsToScan.length} action(s): ` + (decisions.length ? decisions.join(" ") : "(no candidates)")
     );
-    if (updated) {
-      await repo.upsertAdventure({
+    if (updated || pendingChanged) {
+      await repo3.upsertAdventure({
         shortId,
-        locationSuggestions: suggestions
+        locationSuggestions: suggestions,
+        properNounPending: pending
       });
-      broadcastToTabs({ kind: "stateUpdated", shortId });
+      if (updated) broadcastToTabs2({ kind: "stateUpdated", shortId });
     }
   }
   async function updateConfigCache(shortId) {
     try {
-      const cards = await repo.getCards(shortId);
+      const cards = await repo3.getCards(shortId);
       if (!cards || !cards.length) return;
       const configCard = cards.find(
         (c2) => !c2.deletedAt && (c2.title || "").toLowerCase() === "configure memoraid"
@@ -22457,30 +26734,33 @@ ${e2.text}` : e2.text;
       }
       const importantNames = match2[1].split(/[,\r\n]+/).map((name) => name.trim().toLowerCase()).filter((name) => name.length > 0);
       cachedImportantCharacters.set(shortId, importantNames);
-      dlog(`[AID bg] Updated cached important characters for ${shortId}:`, importantNames);
+      dlog2(`[AID bg] Updated cached important characters for ${shortId}:`, importantNames);
+      try {
+        const adv = await repo3.getAdventure(shortId);
+        if (adv) {
+          const cur = adv.memoraidCharacters || [];
+          const same = cur.length === importantNames.length && cur.every((n3, i3) => n3 === importantNames[i3]);
+          if (!same) {
+            adv.memoraidCharacters = importantNames;
+            await repo3.upsertAdventure(adv);
+          }
+        }
+      } catch (err) {
+        dlog2("[AID bg] Failed to mirror important characters to adv.memoraidCharacters:", err);
+      }
     } catch (err) {
       console.error("[AID bg] Failed to update config cache:", err);
     }
   }
-  async function updateRecentActionsCache(shortId, actions) {
-    try {
-      const actList = actions || await repo.getActions(shortId);
-      const sliced = actList.slice(-30);
-      cachedRecentActions.set(shortId, sliced);
-      dlog(`[AID bg] Updated cached recent actions count for ${shortId}:`, sliced.length);
-    } catch (err) {
-      console.error("[AID bg] Failed to update actions cache:", err);
-    }
+  var debugEnabled2 = false;
+  var _log2 = console.log.bind(console);
+  function dlog2(...args) {
+    if (debugEnabled2) _log2(...args);
   }
-  var debugEnabled = false;
-  var _log = console.log.bind(console);
-  function dlog(...args) {
-    if (debugEnabled) _log(...args);
-  }
-  var _originalFetch = globalThis.fetch;
-  async function fetchWithRelay(url, init) {
+  var _originalFetch2 = globalThis.fetch;
+  async function fetchWithRelay2(url, init) {
     try {
-      return await _originalFetch(url, init);
+      return await _originalFetch2(url, init);
     } catch (err) {
       const isNetworkError = err && (err.name === "TypeError" || err.message?.includes("NetworkError") || err.message?.includes("fetch"));
       if (isNetworkError && url && (url.includes("aidungeon.com") || url === gqlEndpoint)) {
@@ -22498,7 +26778,7 @@ ${e2.text}` : e2.text;
           }
         }
         if (shortId) {
-          dlog(`[AID bg] Background fetch to ${url} failed. Relaying request via content script for adventure ${shortId}...`);
+          dlog2(`[AID bg] Background fetch to ${url} failed. Relaying request via content script for adventure ${shortId}...`);
           try {
             const tabs = await browser.tabs.query({ url: "*://*.aidungeon.com/*" }).catch(() => []);
             let targetTabId = null;
@@ -22523,7 +26803,7 @@ ${e2.text}` : e2.text;
               });
               if (res && typeof res === "object") {
                 if (!res.error) {
-                  dlog("[AID bg] Relay fetch successful.");
+                  dlog2("[AID bg] Relay fetch successful.");
                   return {
                     ok: res.ok,
                     status: res.status,
@@ -22549,36 +26829,40 @@ ${e2.text}` : e2.text;
       throw err;
     }
   }
-  var fetch2 = fetchWithRelay;
-  var sessionStore = browser.storage.session;
+  var fetch2 = fetchWithRelay2;
+  var sessionStore2 = browser.storage.session;
   async function rememberAuth(opts2) {
     const patch = {};
     if (opts2.token) {
       sessionToken = opts2.token;
       patch.aidToken = opts2.token;
+      auth.sessionToken = opts2.token;
     }
     if (opts2.endpoint) {
       gqlEndpoint = opts2.endpoint;
       patch.aidEndpoint = opts2.endpoint;
+      auth.gqlEndpoint = opts2.endpoint;
     }
-    if (sessionStore && Object.keys(patch).length > 0) {
+    if (sessionStore2 && Object.keys(patch).length > 0) {
       try {
-        await sessionStore.set(patch);
+        await sessionStore2.set(patch);
       } catch {
       }
     }
   }
-  async function ensureAuth() {
+  async function ensureAuth2() {
     if (sessionToken && gqlEndpoint) return;
-    if (!sessionStore) return;
+    if (!sessionStore2) return;
     try {
-      const s3 = await sessionStore.get(["aidToken", "aidEndpoint"]);
+      const s3 = await sessionStore2.get(["aidToken", "aidEndpoint"]);
       if (!sessionToken && s3?.aidToken) sessionToken = s3.aidToken;
       if (!gqlEndpoint && s3?.aidEndpoint) gqlEndpoint = s3.aidEndpoint;
     } catch {
     }
+    auth.sessionToken = sessionToken;
+    auth.gqlEndpoint = gqlEndpoint;
   }
-  function isSafeEndpoint(url) {
+  function isSafeEndpoint2(url) {
     if (!url) return false;
     try {
       const u2 = new URL(url);
@@ -22589,7 +26873,7 @@ ${e2.text}` : e2.text;
   }
   async function fetchAdventureTitle(shortId) {
     try {
-      await ensureAuth();
+      await ensureAuth2();
       if (!sessionToken || !gqlEndpoint) return null;
       const query = `
       query GetAdventureTitle($shortId: String!) {
@@ -22621,7 +26905,7 @@ ${e2.text}` : e2.text;
   var ensureTitlesInProgress = false;
   async function ensureAdventureTitles(adventures) {
     if (ensureTitlesInProgress) return;
-    await ensureAuth();
+    await ensureAuth2();
     if (!sessionToken || !gqlEndpoint) return;
     const untitled = adventures.filter((a2) => {
       const title = a2.title;
@@ -22635,8 +26919,8 @@ ${e2.text}` : e2.text;
         const title = await fetchAdventureTitle(adv.shortId);
         if (title && title !== "AI Dungeon" && title !== "Untitled Adventure" && title !== "Adventure") {
           console.log(`[AID bg] Resolved title for ${adv.shortId} -> "${title}"`);
-          await repo.upsertAdventure({ shortId: adv.shortId, title });
-          broadcastToTabs({ kind: "stateUpdated", shortId: adv.shortId });
+          await repo3.upsertAdventure({ shortId: adv.shortId, title });
+          broadcastToTabs2({ kind: "stateUpdated", shortId: adv.shortId });
         }
       }
     } catch (err) {
@@ -22646,12 +26930,12 @@ ${e2.text}` : e2.text;
     }
   }
   async function runBackfill(shortId) {
-    const op = await repo.getOp("GetGameplayAdventure");
+    const op = await repo3.getOp("GetGameplayAdventure");
     if (!op) return { error: "Open the adventure once so I can learn the read operation, then retry." };
     if (op.kind !== "read") return { error: "Refusing to replay a non-read operation." };
-    await ensureAuth();
+    await ensureAuth2();
     if (!sessionToken) return { error: "No session token yet \u2014 interact with the page once, then retry." };
-    if (!isSafeEndpoint(gqlEndpoint)) {
+    if (!isSafeEndpoint2(gqlEndpoint)) {
       return { error: "No AI Dungeon GraphQL endpoint observed yet." };
     }
     const endpoint = gqlEndpoint, token = sessionToken, query = op.query;
@@ -22682,19 +26966,19 @@ ${e2.text}` : e2.text;
       const advData = items[0]?.data?.adventure;
       if (advData) {
         const rawMems = advData.state?.memories;
-        const oldMemories = (await repo.getAdventure(shortId))?.memoryBankEntries || [];
+        const oldMemories = (await repo3.getAdventure(shortId))?.memoryBankEntries || [];
         const parsedMems = Array.isArray(rawMems) ? rawMems.map((m3) => {
           const text = typeof m3 === "string" ? m3 : m3?.text || "";
           const old = oldMemories.find((o2) => o2.text === text);
           if (old) return old;
           return typeof m3 === "string" ? { actionIds: [], text: m3 } : m3;
         }) : [];
-        await repo.upsertAdventure({
+        await repo3.upsertAdventure({
           shortId,
           title: advData.title || void 0,
           memoryBankEntries: parsedMems
         });
-        dlog("[AID bg] Backfilled memories successfully using custom query.");
+        dlog2("[AID bg] Backfilled memories successfully using custom query.");
       }
     } catch (err) {
       console.error("[AID bg] Failed to backfill memories with custom query:", err);
@@ -22711,7 +26995,7 @@ ${e2.text}` : e2.text;
       if (parsed.instructions) advUpdate.instructions = parsed.instructions;
       if (parsed.authorsNote) advUpdate.authorsNote = parsed.authorsNote;
       if (parsed.memoryBankEntries) {
-        const oldMemories = (await repo.getAdventure(shortId))?.memoryBankEntries || [];
+        const oldMemories = (await repo3.getAdventure(shortId))?.memoryBankEntries || [];
         advUpdate.memoryBankEntries = parsed.memoryBankEntries.map((m3) => {
           const text = typeof m3 === "string" ? m3 : m3?.text || "";
           const old = oldMemories.find((o2) => o2.text === text);
@@ -22720,10 +27004,10 @@ ${e2.text}` : e2.text;
         });
       }
       if (advUpdate.title || advUpdate.memory || advUpdate.memoryBankEntries || advUpdate.instructions || advUpdate.authorsNote) {
-        await repo.upsertAdventure(advUpdate);
+        await repo3.upsertAdventure(advUpdate);
       }
       if (Array.isArray(parsed.storyCards)) {
-        await repo.putCards(shortId, parsed.storyCards.map((c2) => ({ ...c2, shortId })));
+        await repo3.putCards(shortId, parsed.storyCards.map((c2) => ({ ...c2, shortId })));
         backfillCardIds = parsed.storyCards.map((c2) => c2.id);
       }
       return { actions: parsed.actions, hasMore: false, nextCursor: null };
@@ -22736,8 +27020,12 @@ ${e2.text}` : e2.text;
       cachedOutputs: [],
       actions: ordered
     });
-    await repo.replaceAllActions(shortId, canonical);
-    if (backfillCardIds) await repo.reconcileDeletedCards(shortId, backfillCardIds);
+    await repo3.replaceAllActions(shortId, canonical);
+    if (backfillCardIds) {
+      await repo3.reconcileDeletedCards(shortId, backfillCardIds);
+      const liveCards = (await repo3.getCards(shortId)).filter((c2) => !c2.deletedAt);
+      await repo3.purgeStaleDeletedDuplicates(shortId, liveCards.map((c2) => ({ id: c2.id, title: c2.title, type: c2.type })));
+    }
     await seedBaselines(shortId);
     return { loaded: canonical.length };
   }
@@ -22745,12 +27033,12 @@ ${e2.text}` : e2.text;
   async function seedBaselines(shortId, ctx) {
     if (seedBaselinesInFlight.has(shortId)) {
       await seedBaselinesInFlight.get(shortId);
-      return repo.getVersions(shortId);
+      return repo3.getVersions(shortId);
     }
     const promise = (async () => {
-      const adv = ctx?.adv ?? await repo.getAdventure(shortId);
-      const cards = ctx?.cards ?? await repo.getCards(shortId);
-      const versions = await repo.getVersions(shortId);
+      const adv = ctx?.adv ?? await repo3.getAdventure(shortId);
+      const cards = ctx?.cards ?? await repo3.getCards(shortId);
+      const versions = await repo3.getVersions(shortId);
       const plotBlocks = parsePlotEssentials(adv?.memory);
       const baselineKeys = /* @__PURE__ */ new Set();
       const versionsToKeep = [];
@@ -22770,9 +27058,9 @@ ${e2.text}` : e2.text;
         }
       }
       if (versionsToDelete.length > 0) {
-        dlog(`[AID bg] Found ${versionsToDelete.length} duplicate baselines for ${shortId}. Cleaning up...`);
+        dlog2(`[AID bg] Found ${versionsToDelete.length} duplicate baselines for ${shortId}. Cleaning up...`);
         for (const v2 of versionsToDelete) {
-          await repo.deleteVersion(v2.id);
+          await repo3.deleteVersion(v2.id);
         }
         versions.length = 0;
         versions.push(...versionsToKeep);
@@ -22789,7 +27077,7 @@ ${e2.text}` : e2.text;
             v2.cardId = match2.id;
             v2.cardType = match2.type || "character";
           }
-          await repo.putVersion(v2);
+          await repo3.putVersion(v2);
         }
       }
       for (const v2 of versions) {
@@ -22813,7 +27101,7 @@ ${e2.text}` : e2.text;
           if (match2) {
             v2.cardId = match2.id;
             v2.cardType = match2.type || "character";
-            await repo.putVersion(v2);
+            await repo3.putVersion(v2);
           }
         }
       }
@@ -22826,17 +27114,17 @@ ${e2.text}` : e2.text;
         const currentType = card.type || "character";
         let dirty = false;
         if (currentName && v2.characterName !== currentName) {
-          dlog(`[AID bg] Card ${cid} renamed: migrating version history "${v2.characterName}" -> "${currentName}".`);
+          dlog2(`[AID bg] Card ${cid} renamed: migrating version history "${v2.characterName}" -> "${currentName}".`);
           v2.characterName = currentName;
           dirty = true;
         }
         if (v2.cardType !== currentType) {
-          dlog(`[AID bg] Card ${cid} type changed: migrating version history cardType "${v2.cardType}" -> "${currentType}".`);
+          dlog2(`[AID bg] Card ${cid} type changed: migrating version history cardType "${v2.cardType}" -> "${currentType}".`);
           v2.cardType = currentType;
           dirty = true;
         }
         if (dirty) {
-          await repo.putVersion(v2);
+          await repo3.putVersion(v2);
         }
       }
       const seenKeys = /* @__PURE__ */ new Set();
@@ -22850,7 +27138,7 @@ ${e2.text}` : e2.text;
         }
         seenKeys.add(`name:${v2.characterName.trim().toLowerCase()}`);
       }
-      const totalActions = ctx?.actionsCount ?? ctx?.actions?.length ?? await repo.getActionCount(shortId);
+      const totalActions = ctx?.actionsCount ?? ctx?.actions?.length ?? await repo3.getActionCount(shortId);
       const entries = [
         ...cards.filter((c2) => c2.deletedAt == null).map((c2) => ({
           name: c2.title || c2.keys,
@@ -22898,7 +27186,7 @@ ${e2.text}` : e2.text;
             cardId: e2.cardId,
             cardType: e2.type
           };
-          await repo.putVersion(nv);
+          await repo3.putVersion(nv);
           versions.push(nv);
           if (e2.cardId) {
             seenKeys.add(`id:${e2.cardId}`);
@@ -22925,9 +27213,9 @@ ${e2.text}` : e2.text;
     );
     if (!stale) return cards;
     try {
-      await ensureAuth();
-      if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) return cards;
-      const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+      await ensureAuth2();
+      if (!sessionToken || !isSafeEndpoint2(gqlEndpoint)) return cards;
+      const updateOp = await repo3.getOp("UseAutoSaveStoryCard");
       const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
       const migrated = { ...stale, type: MEMORAID_CONFIG_TYPE };
       const req = buildCardSave(gqlEndpoint, updateQuery, sessionToken, migrated, migrated.value || "");
@@ -22936,8 +27224,8 @@ ${e2.text}` : e2.text;
       const json = await res.json();
       const ok = json?.[0]?.data?.updateStoryCard?.success || json?.[0]?.data?.updateStoryCard?.storyCard || json?.[0]?.data?.updateStoryCard;
       if (!ok) return cards;
-      await repo.putCards(shortId, [migrated]);
-      dlog(`[AID bg] Migrated "Configure MemorAID" card ${stale.id} from type "${stale.type}" to "${MEMORAID_CONFIG_TYPE}".`);
+      await repo3.putCards(shortId, [migrated]);
+      dlog2(`[AID bg] Migrated "Configure MemorAID" card ${stale.id} from type "${stale.type}" to "${MEMORAID_CONFIG_TYPE}".`);
       return cards.map((c2) => c2.id === stale.id ? migrated : c2);
     } catch (err) {
       console.warn("[AID bg] Configure MemorAID type migration deferred:", err);
@@ -22945,16 +27233,16 @@ ${e2.text}` : e2.text;
     }
   }
   async function runAnalyze(shortId) {
-    const settings = await repo.getSettings();
+    const settings = await repo3.getSettings();
     const providerName = settings?.provider || "claude";
     const apiKey = settings?.apiKeys?.[providerName];
     if (!settings || !apiKey && providerName !== "ollama") {
       return { error: `Set your API key/endpoint for ${providerName} in settings.` };
     }
-    const adv = await repo.getAdventure(shortId);
+    const adv = await repo3.getAdventure(shortId);
     if (!adv?.protagonistName) return { error: "Set your character's name in settings." };
     const windowN = settings.analyzeWindow && settings.analyzeWindow > 0 ? settings.analyzeWindow : 20;
-    const allActions = await repo.getActions(shortId);
+    const allActions = await repo3.getActions(shortId);
     const recent = sliceLastActions(allActions, windowN);
     let req = buildAnalyzeRequest(adv.protagonistName, recent, adv.memory);
     req.useMemories = settings?.useMemories;
@@ -22977,7 +27265,7 @@ ${e2.text}` : e2.text;
     req.typeGuidance = { ...DEFAULT_TYPE_GUIDANCE, ...settings?.typeGuidance ?? {} };
     if (req.characters.length === 0) return { error: "No Plot Essentials characters found in memory." };
     await seedBaselines(shortId);
-    const versionsNow = await repo.getVersions(shortId);
+    const versionsNow = await repo3.getVersions(shortId);
     const latestApplied = /* @__PURE__ */ new Map();
     for (const v2 of versionsNow) if (v2.status === "applied") latestApplied.set(v2.characterName, v2.entry);
     req = { ...req, characters: req.characters.map((c2) => ({ ...c2, currentEntry: latestApplied.get(c2.name) ?? c2.currentEntry })) };
@@ -22997,7 +27285,7 @@ ${e2.text}` : e2.text;
     const created = [];
     for (const p5 of proposals) {
       const id = crypto.randomUUID();
-      await repo.putVersion({
+      await repo3.putVersion({
         id,
         shortId,
         characterName: p5.name,
@@ -23011,7 +27299,7 @@ ${e2.text}` : e2.text;
       });
       created.push({ id, characterName: p5.name, changeSummary: p5.changeSummary, entry: p5.newEntry });
     }
-    await repo.upsertAdventure({ shortId, lastAnalysisAction: totalActionsCount });
+    await repo3.upsertAdventure({ shortId, lastAnalysisAction: totalActionsCount });
     return {
       count: proposals.length,
       proposedNames: proposals.map((p5) => p5.name),
@@ -23027,18 +27315,18 @@ ${e2.text}` : e2.text;
     };
   }
   async function applyVersionLocally(versionId) {
-    const v2 = await repo.getVersion(versionId);
+    const v2 = await repo3.getVersion(versionId);
     if (!v2) return;
     if (v2.source === "plot") return;
-    const cards = await repo.getCards(v2.shortId);
+    const cards = await repo3.getCards(v2.shortId);
     const match2 = cards.find((c2) => (c2.title || c2.keys) === v2.characterName);
     if (match2) {
-      await repo.putCards(v2.shortId, [{ ...match2, value: v2.entry }]);
+      await repo3.putCards(v2.shortId, [{ ...match2, value: v2.entry }]);
     }
   }
   async function runApplyToAid(versionId) {
-    dlog("[AID bg] runApplyToAid called for version:", versionId);
-    const v2 = await repo.getVersion(versionId);
+    dlog2("[AID bg] runApplyToAid called for version:", versionId);
+    const v2 = await repo3.getVersion(versionId);
     if (!v2) {
       console.error("[AID bg] Version not found:", versionId);
       return { error: "Version not found." };
@@ -23047,42 +27335,42 @@ ${e2.text}` : e2.text;
       console.warn("[AID bg] Version status is not 'applied':", v2.status);
       return { error: "Version must be accepted/applied first." };
     }
-    dlog("[AID bg] Version data loaded:", JSON.stringify(v2));
-    await ensureAuth();
+    dlog2("[AID bg] Version data loaded:", JSON.stringify(v2));
+    await ensureAuth2();
     if (!sessionToken) {
       console.error("[AID bg] Missing sessionToken!");
       return { error: "No session token yet \u2014 interact with the page once, then retry." };
     }
-    if (!isSafeEndpoint(gqlEndpoint)) {
+    if (!isSafeEndpoint2(gqlEndpoint)) {
       console.error("[AID bg] Safe endpoint check failed for:", gqlEndpoint);
       return { error: "No AI Dungeon GraphQL endpoint observed yet." };
     }
     const endpoint = gqlEndpoint;
     const token = sessionToken;
     if (v2.source === "card") {
-      dlog("[AID bg] Replaying Story Card write mutation...");
-      const op = await repo.getOp("UseAutoSaveStoryCard");
+      dlog2("[AID bg] Replaying Story Card write mutation...");
+      const op = await repo3.getOp("UseAutoSaveStoryCard");
       if (!op) {
         console.warn("[AID bg] No learned UseAutoSaveStoryCard mutation!");
         return { error: "Perform a Story Card edit/save once in the AID UI so I can learn the operation shape." };
       }
-      const cards = await repo.getCards(v2.shortId);
+      const cards = await repo3.getCards(v2.shortId);
       const card = cards.find((c2) => (c2.title || c2.keys) === v2.characterName);
       if (!card) {
         console.error("[AID bg] Story Card not found in DB for:", v2.characterName);
         return { error: `No matching Story Card found for '${v2.characterName}'.` };
       }
-      dlog("[AID bg] Story Card found, building UseAutoSaveStoryCard request payload...");
+      dlog2("[AID bg] Story Card found, building UseAutoSaveStoryCard request payload...");
       const req = buildCardSave(endpoint, op.query, token, card, v2.entry);
-      dlog("[AID bg] Sending fetch to UseAutoSaveStoryCard...", req.url);
+      dlog2("[AID bg] Sending fetch to UseAutoSaveStoryCard...", req.url);
       const res = await fetch2(req.url, { method: "POST", headers: req.headers, body: req.body });
-      dlog("[AID bg] Fetch response status:", res.status, res.statusText);
+      dlog2("[AID bg] Fetch response status:", res.status, res.statusText);
       if (!res.ok) {
         console.error("[AID bg] GraphQL card push HTTP failure:", res.status);
         return { error: `GraphQL push failed with HTTP ${res.status}` };
       }
       const json = await res.json();
-      dlog("[AID bg] Fetch response JSON:", JSON.stringify(json));
+      dlog2("[AID bg] Fetch response JSON:", JSON.stringify(json));
       const isSuccess = json?.[0]?.data?.updateStoryCard?.success;
       if (!isSuccess) {
         const msg = json?.[0]?.data?.updateStoryCard?.message || json?.[0]?.errors?.[0]?.message || "Mutation failed";
@@ -23090,20 +27378,20 @@ ${e2.text}` : e2.text;
         return { error: `AI Dungeon rejected card update: ${msg}` };
       }
       const now = (/* @__PURE__ */ new Date()).toISOString();
-      await repo.setVersionPushed(v2.id, now);
-      dlog("[AID bg] Story Card push successful, database updated.");
+      await repo3.setVersionPushed(v2.id, now);
+      dlog2("[AID bg] Story Card push successful, database updated.");
       return { ok: true, source: v2.source, cardId: card.id, characterName: v2.characterName, value: v2.entry, description: card.description };
     } else {
-      dlog("[AID bg] Replaying Plot Essentials memory write mutation...");
-      const op = await repo.getOp("UpdateAdventurePlot");
+      dlog2("[AID bg] Replaying Plot Essentials memory write mutation...");
+      const op = await repo3.getOp("UpdateAdventurePlot");
       const query = op?.query || DEFAULT_GQL_QUERIES.UpdateAdventurePlot;
-      const adv = await repo.getAdventure(v2.shortId);
+      const adv = await repo3.getAdventure(v2.shortId);
       if (!adv) {
         console.error("[AID bg] Adventure metadata not found for shortId:", v2.shortId);
         return { error: `Could not locate adventure metadata in database for shortId '${v2.shortId}'.` };
       }
       const currentMemory = adv.memory || "";
-      dlog("[AID bg] Current memory block length:", currentMemory.length);
+      dlog2("[AID bg] Current memory block length:", currentMemory.length);
       const newMemory = replaceBlock(currentMemory, v2.characterName, v2.entry);
       if (newMemory === null) {
         console.error("[AID bg] Block replacement failed! replaceBlock returned null for:", v2.characterName);
@@ -23111,33 +27399,33 @@ ${e2.text}` : e2.text;
         const names = parsed.map((p5) => `'${p5.name}'`).join(", ");
         return { error: `Could not locate character block for '${v2.characterName}' in Plot Essentials. Memory length: ${currentMemory.length} chars. Parsed blocks: [${names || "none"}]` };
       }
-      dlog("[AID bg] Memory block successfully replaced. Building UpdateAdventurePlot payload...");
+      dlog2("[AID bg] Memory block successfully replaced. Building UpdateAdventurePlot payload...");
       const req = buildMemorySave(endpoint, query, token, v2.shortId, newMemory);
-      dlog("[AID bg] Sending fetch to UpdateAdventurePlot...", req.url);
+      dlog2("[AID bg] Sending fetch to UpdateAdventurePlot...", req.url);
       const res = await fetch2(req.url, { method: "POST", headers: req.headers, body: req.body });
-      dlog("[AID bg] Fetch response status:", res.status, res.statusText);
+      dlog2("[AID bg] Fetch response status:", res.status, res.statusText);
       if (!res.ok) {
         console.error("[AID bg] GraphQL memory push HTTP failure:", res.status);
         return { error: `GraphQL push failed with HTTP ${res.status}` };
       }
       const json = await res.json();
-      dlog("[AID bg] Fetch response JSON:", JSON.stringify(json));
+      dlog2("[AID bg] Fetch response JSON:", JSON.stringify(json));
       const isSuccess = json?.[0]?.data?.updateAdventurePlot?.success;
       if (!isSuccess) {
         const msg = json?.[0]?.data?.updateAdventurePlot?.message || json?.[0]?.errors?.[0]?.message || "Mutation failed";
         console.error("[AID bg] AI Dungeon rejected memory update:", msg);
         return { error: `AI Dungeon rejected memory update: ${msg}` };
       }
-      await repo.upsertAdventure({ shortId: v2.shortId, memory: newMemory });
+      await repo3.upsertAdventure({ shortId: v2.shortId, memory: newMemory });
       const now = (/* @__PURE__ */ new Date()).toISOString();
-      await repo.setVersionPushed(v2.id, now);
-      dlog("[AID bg] Plot Essentials push successful, database updated.");
-      broadcastToTabs({ kind: "memoryUpdated", shortId: v2.shortId, memory: newMemory, previousMemory: currentMemory });
+      await repo3.setVersionPushed(v2.id, now);
+      dlog2("[AID bg] Plot Essentials push successful, database updated.");
+      broadcastToTabs2({ kind: "memoryUpdated", shortId: v2.shortId, memory: newMemory, previousMemory: currentMemory });
       return { ok: true, source: v2.source, memory: newMemory };
     }
   }
   async function getActiveProvider() {
-    const settings = await repo.getSettings();
+    const settings = await repo3.getSettings();
     const providerName = settings?.provider || "claude";
     const apiKey = settings?.apiKeys?.[providerName];
     if (!settings || !apiKey && providerName !== "ollama") {
@@ -23154,8 +27442,21 @@ ${e2.text}` : e2.text;
       return new ClaudeProvider(apiKey || "", model5 || "claude-3-5-sonnet-latest");
     }
   }
-  function resolveTitleToken(template, title) {
+  function resolveTitleToken2(template, title) {
     return template.replace(/\{\{\s*title\s*\}\}/g, title);
+  }
+  function gatherCharacterCueText(cardValue, actions, name, keys) {
+    const needles = [name, ...(keys || "").split(/[,;]+/)].map((s3) => s3.trim().toLowerCase()).filter((s3) => s3.length >= 3);
+    const recent = (actions || []).slice(-40);
+    const hits = [];
+    for (const a2 of recent) {
+      const t3 = (a2?.text || "").trim();
+      if (!t3) continue;
+      const lower = t3.toLowerCase();
+      if (needles.some((n3) => lower.includes(n3))) hits.push(t3);
+    }
+    return `${String(cardValue || "").trim()}
+${hits.join("\n")}`.trim().slice(0, 2e3);
   }
   function cleanLlmResponse(text) {
     let cleaned = text.trim();
@@ -23182,85 +27483,22 @@ ${trimmed}
     }
     return trimmed;
   }
-  function parseFields(text) {
-    const fields = {};
-    const lines = text.split("\n");
-    let currentKey = "";
-    let currentValue = "";
-    const keyRegex = /^(Name|Appearance|Personality|Psychology|Worldview|Quirks|Voice|Goals|Dynamic\s*\([^)]*\))\s*:\s*(.*)/i;
-    for (const line of lines) {
-      const match2 = line.match(keyRegex);
-      if (match2) {
-        if (currentKey) {
-          fields[currentKey.toLowerCase()] = currentValue.trim();
-        }
-        currentKey = match2[1] || "";
-        currentValue = match2[2] || "";
-      } else {
-        if (currentKey) {
-          currentValue += "\n" + line;
-        }
-      }
-    }
-    if (currentKey) {
-      fields[currentKey.toLowerCase()] = currentValue.trim();
-    }
-    return fields;
-  }
-  function reconstructFields(fields, protagonist) {
-    const order = [
-      "name",
-      "appearance",
-      "personality",
-      "psychology",
-      "worldview",
-      "quirks",
-      "voice",
-      "goals",
-      `dynamic (${protagonist.toLowerCase()})`
-    ];
-    let result = "";
-    const addedKeys = /* @__PURE__ */ new Set();
-    for (const key of order) {
-      const actualKey = Object.keys(fields).find((k2) => k2.toLowerCase() === key || key.startsWith("dynamic") && k2.toLowerCase().startsWith("dynamic"));
-      if (actualKey && fields[actualKey]) {
-        const val = fields[actualKey];
-        let displayKey = actualKey;
-        if (key === `dynamic (${protagonist.toLowerCase()})`) {
-          displayKey = `Dynamic (${protagonist})`;
-        } else {
-          displayKey = actualKey.charAt(0).toUpperCase() + actualKey.slice(1);
-        }
-        result += `${displayKey}: ${val}
-`;
-        addedKeys.add(actualKey.toLowerCase());
-      }
-    }
-    for (const [k2, v2] of Object.entries(fields)) {
-      if (!addedKeys.has(k2.toLowerCase()) && v2) {
-        const displayKey = k2.charAt(0).toUpperCase() + k2.slice(1);
-        result += `${displayKey}: ${v2}
-`;
-      }
-    }
-    return result.trim();
-  }
-  async function runGenerateCard(shortId, cardId) {
-    const cards = await repo.getCards(shortId);
+  async function runGenerateCard(shortId, cardId, templateOverride) {
+    const cards = await repo3.getCards(shortId);
     const card = cards.find((c2) => c2.id === cardId);
     if (!card) return { error: "Story Card not found locally \u2014 try Backfill." };
     const name = card.title || card.keys;
-    const settings = await repo.getSettings();
+    const settings = await repo3.getSettings();
     const characterCardLimit = settings?.characterCardLimit ?? 600;
     const providerOrError = await getActiveProvider();
     if ("error" in providerOrError) return { error: providerOrError.error };
     const provider = providerOrError;
     const providerName = settings?.provider || "claude";
-    const adv = await repo.getAdventure(shortId);
+    const adv = await repo3.getAdventure(shortId);
     const protagonist = adv?.protagonistName && adv.protagonistName.trim() || parseProtagonistName(adv?.memory) || "the player character";
     const isMemoraid = (card.title || "").toLowerCase().endsWith(" (memory)");
     const typeKey = isMemoraid ? "memoraid" : normalizeType(card.type);
-    const template = settings?.cardCommands?.[typeKey] || (isMemoraid ? settings?.cardCommands?.memoraid || DEFAULT_CARD_COMMANDS.memoraid : defaultCommandForType(card.type)) || "";
+    const template = templateOverride ? settings?.cardCommands?.[templateOverride] || DEFAULT_CARD_COMMANDS[templateOverride] || "" : settings?.cardCommands?.[typeKey] || (isMemoraid ? settings?.cardCommands?.memoraid || DEFAULT_CARD_COMMANDS.memoraid : defaultCommandForType(card.type)) || "";
     if (!hasTitleToken(template)) {
       return { error: "This card-type command is missing the required {{title}} token (AID needs it). Fix it in Settings \u2192 Prompts." };
     }
@@ -23268,6 +27506,10 @@ ${trimmed}
     const formattingMode = settings?.formattingMode || DEFAULT_FORMATTING_MODE;
     const opts2 = {};
     let baseContext = "";
+    let coreCharPh = null;
+    let coreCharSourceValue = "";
+    let coreCharPreservedAppearance = "";
+    let coreCharOutlook = null;
     if (adv?.memory && adv.memory.trim()) {
       baseContext += `Plot Essentials (Global Story Context):
 ${adv.memory.trim()}
@@ -23282,27 +27524,106 @@ ${card.value.trim()}
     }
     if (normalizeType(card.type) === "location" && card.value) {
       baseContext += buildLocationContext(card, cards);
-      dlog("[AID bg] Location base context built (current entry + containing locations):", baseContext.length);
+      dlog2("[AID bg] Location base context built (current entry + containing locations):", baseContext.length);
     } else if (normalizeType(card.type) === "character") {
       const memCardTitle = `${card.title || ""} (Memory)`;
       const memCard = cards.find(
         (x) => (x.type.toLowerCase() === "memory" || x.type.toLowerCase() === "character") && !x.deletedAt && (x.title || "").toLowerCase() === memCardTitle.toLowerCase()
       );
       if (memCard) {
-        const versions = await repo.getVersions(shortId);
+        const versions = await repo3.getVersions(shortId);
         const lastUpdateTurn = versions.filter((v2) => v2.status === "applied" && v2.characterName === card.title).reduce((mx, v2) => Math.max(mx, v2.actionCount ?? 0), 0);
         const log3 = parseMemoNotes(memCard.description).thoughtLog;
         const memBlock = thoughtsSince(log3, lastUpdateTurn, 3500) || (memCard.value || "");
         if (memBlock.trim()) {
-          dlog(`[AID bg] Including ${card.title}'s memories since turn ${lastUpdateTurn} (len ${memBlock.length})`);
+          dlog2(`[AID bg] Including ${card.title}'s memories since turn ${lastUpdateTurn} (len ${memBlock.length})`);
           baseContext += `${card.title} has these memories (most recent first):
 ${memBlock}
 
 `;
         }
       }
+      const cryChKeyGen = (card.title || "").trim().toLowerCase();
+      const cryStateGen = await repo3.getCrystallizedState(shortId, cryChKeyGen);
+      const outlookLinesGen = (cryStateGen?.outlook || []).map((b) => `- ${b.text}`).join("\n");
+      const crystCardGen = findCrystallizedCard(cards, card.title || "");
+      const renderedFullGen = crystCardGen?.value?.trim() || "";
+      const outlookMarkerIdxGen = renderedFullGen.search(/(^|\n)\s*Outlook\s*:/i);
+      const groundingGen = (outlookMarkerIdxGen >= 0 ? renderedFullGen.slice(0, outlookMarkerIdxGen) : renderedFullGen).trim();
+      if (outlookLinesGen || groundingGen) {
+        let cblock = `${card.title}'s crystallized memories:
+`;
+        if (outlookLinesGen) cblock += `Current self-beliefs (Outlook):
+${outlookLinesGen}
+
+`;
+        if (groundingGen) cblock += groundingGen.slice(0, 1200);
+        baseContext += `${cblock.trim()}
+
+`;
+      }
+      if (!templateOverride) {
+        try {
+          let sourceValue = card.value || "";
+          if (extractFieldBlock(sourceValue, "Appearance") === null && extractFieldBlock(sourceValue, "Name") === null) {
+            const versions = await repo3.getVersions(shortId);
+            const behavioralLabelRe = /(?:^|\n)\s*[-*•]?\s*(Background|Personality|Conversational Style|Voice|Drive)\s*:/i;
+            const candidates = versions.filter((v2) => v2.cardId === card.id).sort((a2, b) => {
+              const aNonPending = a2.status !== "pending" ? 1 : 0;
+              const bNonPending = b.status !== "pending" ? 1 : 0;
+              if (aNonPending !== bNonPending) return bNonPending - aNonPending;
+              return a2.createdAt < b.createdAt ? 1 : a2.createdAt > b.createdAt ? -1 : 0;
+            });
+            const hasSaneAppearance = (v2) => {
+              const block = extractFieldBlock(v2.entry, "Appearance");
+              return block !== null && !behavioralLabelRe.test(block);
+            };
+            const fallbackVersion = candidates.find(hasSaneAppearance) ?? candidates.find((v2) => extractFieldBlock(v2.entry, "Name") !== null);
+            if (fallbackVersion) sourceValue = fallbackVersion.entry;
+          }
+          const characterKey = (card.title || "").trim().toLowerCase();
+          const recentActs = await repo3.getActions(shortId);
+          const cueText = gatherCharacterCueText(sourceValue, recentActs, card.title || "", card.keys || "");
+          const gender = resolveGender(sourceValue, cueText, card.title || "");
+          const population = settings?.phenotypePopulation === "global" ? "global" : "western";
+          const existingRecord = await repo3.getPhenotype(shortId, characterKey);
+          const ph = buildPhenotypeInputs({
+            shortId,
+            characterKey,
+            name: card.title || card.keys || "Unknown",
+            gender,
+            population,
+            cueText,
+            existingRecord: existingRecord ?? null,
+            hasEstablishedAppearance: hasEstablishedAppearance(sourceValue),
+            existingKeyPairLine: existingKeyPairLine(sourceValue)
+          });
+          await repo3.putPhenotype(ph.record);
+          coreCharPh = ph;
+          coreCharSourceValue = sourceValue;
+          coreCharPreservedAppearance = ph.rewriteAppearance ? "" : buildAppearanceBlock(sourceValue);
+        } catch (err) {
+          dlog2("[AID bg] phenotype appearance step failed (non-fatal):", err);
+        }
+        try {
+          const cryChKey = (card.title || "").trim().toLowerCase();
+          const importantNamesForGen = (adv?.memoraidCharacters || []).map((n3) => n3.trim().toLowerCase()).filter(Boolean);
+          if (settings?.enableCrystallized && importantNamesForGen.includes(cryChKey)) {
+            const cryState = await repo3.getCrystallizedState(shortId, cryChKey);
+            const snapshot = cryState ? snapshotOutlookForIncorporation(cryState, 2) : [];
+            if (snapshot.length > 0) {
+              coreCharOutlook = { key: cryChKey, snapshot };
+              baseContext += `${OUTLOOK_INCORPORATION_INSTRUCTION.trim().replace(/\{\{title\}\}/g, card.title || "this character")}
+
+`;
+            }
+          }
+        } catch (err) {
+          dlog2("[AID bg] outlook consolidation snapshot failed (non-fatal):", err);
+        }
+      }
     }
-    const allActions = await repo.getActions(shortId);
+    const allActions = await repo3.getActions(shortId);
     allActions.sort((a2, b) => {
       if (a2.createdAt && b.createdAt) {
         return a2.createdAt.localeCompare(b.createdAt);
@@ -23330,98 +27651,36 @@ ${memBlock}
     const finalContext = (baseContext + gameplayContext).trim();
     if (finalContext) {
       opts2.storyInformation = finalContext;
-      dlog("[AID bg] Populated storyInformation with length:", opts2.storyInformation.length);
+      dlog2("[AID bg] Populated storyInformation with length:", opts2.storyInformation.length);
     }
+    const isCoreCharacter = normalizeType(card.type) === "character" && !isMemoraid && !templateOverride;
     let entry = "";
-    if (normalizeType(card.type) === "character" && !isMemoraid && !settings?.useSinglePassGeneration) {
-      dlog(`[AID bg] Running multi-pass character card generation for ${card.title} using ${providerName}...`);
-      const currentFields = parseFields(card.value || "");
-      const passes = [
-        {
-          label: "Pass 1 (Core Identity, Physicality & Psychology)",
-          template: `Generate ONLY the Name, Appearance, Personality, Psychology, and Worldview fields for {{title}} in the third person based on narrative changes, taking into account their current profile:
-{existing}
-Focus strictly on {{title}} as an independent character (their own traits and core identity), rather than their interactions or relationship with {protagonist}. Format exactly as:
-Name: {{title}}
-Appearance: [1-2 sentences detailing complete physical features including height, build/body type, body proportions like long legs, and signature style/colors]
-Personality: [1-2 sentences on their core disposition, dominant traits, and how they project themselves to the world]
-Psychology: [1-2 sentences on their core internal contradiction, repressed vulnerability/shadow self, or psychological defense mechanism]
-Worldview: [1-2 sentences on how they perceive rules, morality, or social order, and their primary bias/filter for reality]
-Do not write or output any other fields.`
-        },
-        {
-          label: "Pass 2 (Behavior, Motives & Dynamics)",
-          template: `Generate ONLY the Quirks, Voice, Goals, and Dynamic ({protagonist}) fields for {{title}} in the third person based on narrative changes and {protagonist}, taking into account their current profile:
-{existing}
-Goals should focus on {{title}}'s independent desires and motivations. Dynamic ({protagonist}) is the only field that should focus on their relationship or attitude toward {protagonist}. Format exactly as:
-Quirks: [1-2 sentences on signature physical tells, nervous habits, and unconscious mannerisms under tension]
-Voice: [1-2 sentences on speech patterns, speed, tone, syntax, and vocabulary choices/dialogue style]
-Goals: [1-2 sentences on their primary desires, motivations, and what they seek or fear in the current situation]
-Dynamic ({protagonist}): [1-2 sentences on their specific relationship, psychological friction, or evolving attitude toward {protagonist}]
-
-[CRITICAL RELATIONSHIP PACING DIRECTIVE]
-When generating or updating the "Dynamic ({protagonist}):" field, you must enforce realistic psychological inertia and continuity based strictly on the character's pre-existing profile and the immediate context window. 
-1. NO SUDDEN ESCALATION: Relationships cannot leap from strangers or casual acquaintances to deep intimacy, unearned trust, or intense codependency\u2014nor to absolute hatred, permanent enmity, or extreme paranoia\u2014within a handful of scene turns, regardless of how high-stakes or dramatic the immediate actions are.
-2. EVALUATE TRANSITIONS: Read the current character profile. If the character's baseline configuration was guarded and defensive, or conversely highly trusting and friendly, the new dynamic text must capture the messy, realistic friction of that transition (e.g., emotional whiplash, cognitive dissonance, lingering caution, or structural shock).
-3. PROGRESSIVE TRACE: Allow behavioral walls to soften or harden organically, but explicitly forbid the character from displaying complete psychological submission, sudden romantic attachment, or instant implacable hatred unless a long, multi-scene chronological history of shared baseline safety or severe betrayal justifies it. Focus the current dynamic update strictly on the immediate realistic increment of their interaction.
-
-Do NOT repeat or output the existing Name, Appearance, Personality, Psychology, or Worldview fields.`
-        }
-      ];
-      for (const pass of passes) {
-        dlog(`[AID bg] Executing ${pass.label} using ${providerName}...`);
-        const existingStr = reconstructFields(currentFields, protagonist);
-        const passTemplate = pass.template.replace("{existing}", existingStr || "No existing profile.");
-        const resolvedPassCommand = resolveTitleToken(resolveCommand(passTemplate, protagonist), name);
-        const system = `You are a creative writing assistant updating a character card profile for the target character "${name}". CRITICAL: Do NOT confuse the target character "${name}" with the protagonist ("${protagonist}") or other characters present in the narrative context. All fields (Appearance, Personality, Psychology, Worldview, Quirks, Voice, Goals) must describe "${name}" and only "${name}". The "Dynamic (${protagonist})" field must describe "${name}"'s relationship and attitude towards the protagonist "${protagonist}". Do not mix them up. Follow the format and instructions exactly. CRITICAL LENGTH CONSTRAINT: Keep descriptions highly concise, dense, and condensed. Limit each field value strictly to 1-2 short, focused sentences (maximum 30 words per field). Avoid verbose, flowery, or redundant phrasing.
-CRITICAL: The entire generated card entry must be strictly under ${characterCardLimit} characters in length.`;
-        const cachePrefix = `Narrative Context:
+    if (isCoreCharacter) {
+      const ph = coreCharPh;
+      dlog2(`[AID bg] Running Core Character generation for ${card.title} (provenance=${ph?.record.provenance ?? "none"}, rewrite=${ph?.rewriteAppearance ?? false}) using ${providerName}...`);
+      const foldedTemplate = buildCoreCardCommand().replace("{appearanceGuidance}", ph?.appearanceGuidance || "");
+      const foldedCommand = resolveTitleToken2(resolveCommand(foldedTemplate, protagonist), name);
+      const system = `You are a creative writing assistant generating a character card for the target character "${name}". Write in third person about "${name}"; never confuse them with the protagonist ("${protagonist}") or other characters in the context. Follow the field format and instructions EXACTLY, and output only the labeled lines and nothing else.`;
+      const user = `Narrative Context:
 ${opts2.storyInformation || "No narrative context."}
 
-`;
-        const user = `Instructions:
-${resolvedPassCommand}`;
-        const rawResponse = await provider.complete(system, user, cachePrefix);
-        let passOutput = cleanLlmResponse(rawResponse).trim();
-        if (passOutput.startsWith("[") && passOutput.endsWith("]")) {
-          passOutput = passOutput.slice(1, -1).trim();
-        }
-        const newFields = parseFields(passOutput);
-        for (const [k2, v2] of Object.entries(newFields)) {
-          currentFields[k2] = v2;
-        }
-      }
-      entry = `[
-${reconstructFields(currentFields, protagonist)}
-]`;
-      dlog(`[AID bg] Multi-pass generation complete for ${card.title}. Total length: ${entry.length}`);
+Instructions:
+${foldedCommand}`;
+      const folded = cleanLlmResponse(await provider.complete(system, user)).trim().replace(/^\[+/, "").replace(/\]+$/, "").trim();
+      const appearanceBlock = ph?.rewriteAppearance ? extractFieldBlock(folded, "Appearance") || ph?.record.descriptorPhrase || coreCharPreservedAppearance || "" : coreCharPreservedAppearance || extractFieldBlock(folded, "Appearance") || "";
+      const behavioral = extractBehavioralBlock(folded);
+      const carryFields = extractCarriedTopLevelFields(coreCharSourceValue || card.value || "");
+      entry = assembleCoreCard({
+        name,
+        appearanceBlock,
+        behavioral,
+        carryFields,
+        keyPairLine: ph?.keyPairLine,
+        quirks: ph?.quirks
+      });
+      dlog2(`[AID bg] Core Character generation complete for ${card.title}. Total length: ${entry.length}`);
     } else {
-      let finalCommand = command;
-      if (normalizeType(card.type) === "character" && !isMemoraid && settings?.useSinglePassGeneration) {
-        dlog(`[AID bg] Running single-pass character card generation for ${card.title} using ${providerName}...`);
-        const combinedTemplate = `Generate the Name, Appearance, Personality, Psychology, Worldview, Quirks, Voice, Goals, and Dynamic ({protagonist}) fields for {{title}} in the third person based on narrative changes, taking into account their current profile:
-{existing}
-
-Format exactly as:
-Name: {{title}}
-Appearance: [1-2 sentences detailing complete physical features including height, build/body type, body proportions like long legs, and signature style/colors]
-Personality: [1-2 sentences on their core disposition, dominant traits, and how they project themselves to the world]
-Psychology: [1-2 sentences on their core internal contradiction, repressed vulnerability/shadow self, or psychological defense mechanism]
-Worldview: [1-2 sentences on how they perceive rules, morality, or social order, and their primary bias/filter for reality]
-Quirks: [1-2 sentences on signature physical tells, nervous habits, and unconscious mannerisms under tension]
-Voice: [1-2 sentences on speech patterns, speed, tone, syntax, and vocabulary choices/dialogue style]
-Goals: [1-2 sentences on their primary desires, motivations, and what they seek or fear in the current situation]
-Dynamic ({protagonist}): [1-2 sentences on their specific relationship, psychological friction, or evolving attitude toward {protagonist}]
-
-[CRITICAL RELATIONSHIP PACING DIRECTIVE]
-When generating or updating the "Dynamic ({protagonist}):" field, you must enforce realistic psychological inertia and continuity based strictly on the character's pre-existing profile and the immediate context window. 
-1. NO SUDDEN ESCALATION: Relationships cannot leap from strangers or casual acquaintances to deep intimacy, unearned trust, or intense codependency\u2014nor to absolute hatred, permanent enmity, or extreme paranoia\u2014within a handful of scene turns, regardless of how high-stakes or dramatic the immediate actions are.
-2. EVALUATE TRANSITIONS: Read the current character profile. If the character's baseline configuration was guarded and defensive, or conversely highly trusting and friendly, the new dynamic text must capture the messy, realistic friction of that transition (e.g., emotional whiplash, cognitive dissonance, lingering caution, or structural shock).
-3. PROGRESSIVE TRACE: Allow behavioral walls to soften or harden organically, but explicitly forbid the character from displaying complete psychological submission, sudden romantic attachment, or instant implacable hatred unless a long, multi-scene chronological history of shared baseline safety or severe betrayal justifies it. Focus the current dynamic update strictly on the immediate realistic increment of their interaction.`;
-        finalCommand = resolveCommand(combinedTemplate, protagonist);
-        finalCommand = finalCommand.replace("{existing}", card.value || "No existing profile.");
-      }
-      finalCommand = resolveTitleToken(finalCommand, name);
+      const finalCommand = resolveTitleToken2(command, name);
       const system = `You are a creative writing assistant updating a card for ${name}. Follow the format and instructions exactly. CRITICAL LENGTH CONSTRAINT: Keep descriptions highly concise, dense, and condensed. Limit each field value strictly to 1-2 short, focused sentences (maximum 30 words per field). Avoid verbose, flowery, or redundant phrasing.
 CRITICAL: The entire generated card entry must be strictly under ${characterCardLimit} characters in length.`;
       const user = `Narrative Context:
@@ -23429,31 +27688,23 @@ ${opts2.storyInformation || "No narrative context."}
 
 Instructions:
 ${finalCommand}`;
-      const rawResponse = await provider.complete(system, user);
-      entry = cleanLlmResponse(rawResponse);
-      if (normalizeType(card.type) === "character" && !isMemoraid && settings?.useSinglePassGeneration) {
-        let val = entry.trim();
-        if (!val.startsWith("[")) {
-          val = `[
-${val}
-]`;
-        }
-        entry = val;
-      }
+      entry = cleanLlmResponse(await provider.complete(system, user));
     }
     if (!isMemoraid) {
       entry = applyFormattingMode(entry, formattingMode);
     }
-    if (!isMemoraid && entry.length > characterCardLimit) {
+    const CORE_CHARACTER_CHAR_CAP = 2400;
+    const effectiveCardLimit = isCoreCharacter ? CORE_CHARACTER_CHAR_CAP : characterCardLimit;
+    if (!isMemoraid && entry.length > effectiveCardLimit) {
       if (entry.startsWith("[") && entry.endsWith("]")) {
-        entry = entry.slice(0, characterCardLimit - 2).trimEnd() + "\n]";
+        entry = entry.slice(0, effectiveCardLimit - 2).trimEnd() + "\n]";
       } else {
-        entry = entry.slice(0, characterCardLimit);
+        entry = entry.slice(0, effectiveCardLimit);
       }
     }
-    const totalActionsCount = await repo.getActionCount(shortId);
+    const totalActionsCount = await repo3.getActionCount(shortId);
     const id = crypto.randomUUID();
-    await repo.putVersion({
+    await repo3.putVersion({
       id,
       shortId,
       characterName: name,
@@ -23466,22 +27717,92 @@ ${val}
       cardId: card.id,
       cardType: card.type || "character"
     });
+    if (coreCharOutlook) {
+      await consolidateOutlookState(shortId, coreCharOutlook.key, coreCharOutlook.snapshot, totalActionsCount);
+    }
     return { id, characterName: name, changeSummary: `${providerName.toUpperCase()}-generated update (Action #${totalActionsCount})`, entry };
   }
+  async function runRerollAppearance(shortId, cardId) {
+    const cards = await repo3.getCards(shortId);
+    const card = cards.find((c2) => c2.id === cardId && !c2.deletedAt);
+    if (!card) return { error: "Story Card not found locally \u2014 try Backfill." };
+    const characterKey = (card.title || "").trim().toLowerCase();
+    const rec = await repo3.getPhenotype(shortId, characterKey);
+    if (!rec) return { error: "No sampled body to re-roll \u2014 generate this character first." };
+    const rr = rerollPhenotype(rec);
+    if (!rr) return { error: "No sampled body to re-roll \u2014 this character is non-human or ungendered." };
+    await repo3.putPhenotype(rr.record);
+    const providerOrError = await getActiveProvider();
+    if ("error" in providerOrError) return { error: providerOrError.error };
+    const provider = providerOrError;
+    const settings = await repo3.getSettings();
+    const adv = await repo3.getAdventure(shortId);
+    const protagonist = adv?.protagonistName && adv.protagonistName.trim() || parseProtagonistName(adv?.memory) || "the player character";
+    const sourceValue = card.value || "";
+    const appearanceCommand = resolveTitleToken2(resolveCommand(buildCoreAppearanceCommand().replace("{appearanceGuidance}", rr.appearanceGuidance), protagonist), card.title || "");
+    const system = `You are a creative writing assistant generating the physical description for "${card.title}". Write in third person about "${card.title}"; output ONLY the Appearance and Scent labeled lines and nothing else.`;
+    const user = `Instructions:
+${appearanceCommand}`;
+    let physicalRaw = "";
+    try {
+      physicalRaw = cleanLlmResponse(await provider.complete(system, user));
+    } catch (err) {
+      return { error: `Provider generation failed: ${err?.message || err}` };
+    }
+    const physical = `[
+${physicalRaw.trim().replace(/^\[+/, "").replace(/\]+$/, "").trim()}
+]`;
+    const appearanceBlock = extractFieldBlock(physical, "Appearance") || rr.record.descriptorPhrase || "";
+    const scentBlock = extractFieldBlock(physical, "Scent");
+    const behavioralFields = ["Background", "Personality", "Conversational Style", "Voice", "Drive"].map((f3) => {
+      const b = extractFieldBlock(sourceValue, f3);
+      return b ? `${f3}: ${b}` : null;
+    }).filter(Boolean).join("\n");
+    const behavioral = scentBlock ? `Scent: ${scentBlock}
+${behavioralFields}` : behavioralFields;
+    const carryFields = extractCarriedTopLevelFields(sourceValue);
+    const entry = assembleCoreCard({
+      name: card.title || card.keys || "Unknown",
+      appearanceBlock,
+      carryFields,
+      keyPairLine: rr.keyPairLine,
+      quirks: rr.quirks,
+      behavioral
+    });
+    const name = card.title || card.keys;
+    const totalActionsCount = await repo3.getActionCount(shortId);
+    const id = crypto.randomUUID();
+    await repo3.putVersion({
+      id,
+      shortId,
+      characterName: name,
+      entry,
+      changeSummary: `Body re-roll (Action #${totalActionsCount})`,
+      source: "card",
+      status: "pending",
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      actionCount: totalActionsCount,
+      cardId: card.id,
+      cardType: card.type || "character",
+      // The new body was persisted above; snapshot the PRIOR record so rejecting this proposal restores it.
+      phenotypeRollback: rec
+    });
+    return { id, characterName: name, changeSummary: `Body re-roll (Action #${totalActionsCount})`, entry };
+  }
   async function checkLookbackAutoUpdates(shortId, newActions) {
-    const settings = await repo.getSettings();
-    if (settings?.manualMode) return;
+    const settings = await repo3.getSettings();
+    if (!settings?.enableAutomaticUpdates) return;
     const lookbackSize = settings?.analyzeWindow ?? 20;
-    const allActions = await repo.getActions(shortId);
+    const allActions = await repo3.getActions(shortId);
     allActions.sort((a2, b) => {
       if (a2.createdAt && b.createdAt) {
         return a2.createdAt.localeCompare(b.createdAt);
       }
       return 0;
     });
-    const cards = await repo.getCards(shortId);
+    const cards = await repo3.getCards(shortId);
     const fellOutCards = determineFellOutCards(lookbackSize, allActions, newActions.length, cards);
-    const versions = await repo.getVersions(shortId);
+    const versions = await repo3.getVersions(shortId);
     const totalActionsCount = allActions.length;
     const currentActions = sliceLastActions(allActions, lookbackSize);
     const currentText = currentActions.map((a2) => a2.text || "").join(" ").toLowerCase();
@@ -23503,7 +27824,7 @@ ${val}
         const postRejectText = postRejectActions.map((a2) => a2.text || "").join(" ").toLowerCase();
         const wasMentionedAfterReject = isCharacterTriggered(postRejectText, card.title || "", card.keys || "");
         if (!wasMentionedAfterReject) {
-          dlog(`[AID bg] Skipping fell-out update for "${name}" because the last update was rejected and character has not been active since turn ${rejectTurn}.`);
+          dlog2(`[AID bg] Skipping fell-out update for "${name}" because the last update was rejected and character has not been active since turn ${rejectTurn}.`);
           continue;
         }
       }
@@ -23511,7 +27832,7 @@ ${val}
       if (totalActionsCount - lastUpdateActionCount >= lookbackSize) {
         toUpdateCards.push(card);
       } else {
-        dlog(`[AID bg] Skipping fell-out update for "${name}" because it was updated recently (${totalActionsCount} - ${lastUpdateActionCount} < ${lookbackSize} turns ago).`);
+        dlog2(`[AID bg] Skipping fell-out update for "${name}" because it was updated recently (${totalActionsCount} - ${lastUpdateActionCount} < ${lookbackSize} turns ago).`);
       }
     }
     const decisions = [];
@@ -23538,13 +27859,13 @@ ${val}
     );
     for (const card of toUpdateCards) {
       const name = card.title || card.keys;
-      dlog(`[AID bg] Triggering auto-update for "${name}"...`);
+      dlog2(`[AID bg] Triggering auto-update for "${name}"...`);
       const flightKey = `${shortId}:${card.id}`;
       if (autoUpdateInFlight.has(flightKey)) {
         console.info(`[AID bg] Auto-update for "${name}" already in flight. Skipping duplicate trigger.`);
         continue;
       }
-      const versionsNow = await repo.getVersions(shortId);
+      const versionsNow = await repo3.getVersions(shortId);
       const hasPending = versionsNow.some(
         (v2) => (v2.cardId === card.id || v2.characterName === name) && v2.status === "pending"
       );
@@ -23558,10 +27879,10 @@ ${val}
         if (result && !("error" in result)) {
           const cardTitle = card.title || card.keys || "";
           if (cardTitle) {
-            await repo.upsertAdventure({ shortId, lastAutoUpdatedCard: cardTitle });
+            await repo3.upsertAdventure({ shortId, lastAutoUpdatedCard: cardTitle });
           }
           console.info(`[AID bg] Auto-update proposal created for "${name}".`);
-          broadcastToTabs({
+          broadcastToTabs2({
             kind: "proposalCreated",
             shortId,
             characterName: name
@@ -23637,397 +27958,7 @@ ${val}
     }
     return formattedLoops.length > 0 ? formattedLoops.join("\n") : null;
   }
-  async function checkMemorAIDUpdates(shortId, pendingActionText, pendingActionType, recordTiming = false) {
-    await ensureAuth();
-    const updatedNames = [];
-    const timingStart = Date.now();
-    let didGenerate = false;
-    const cards = await repo.getCards(shortId);
-    dlog(`[MemorAID] checkMemorAIDUpdates called for ${shortId}. Total cards in local DB:`, cards ? cards.length : 0);
-    if (!cards || !cards.length) return updatedNames;
-    const settings = await repo.getSettings() || {
-      formattingMode: DEFAULT_FORMATTING_MODE,
-      cardCommands: DEFAULT_CARD_COMMANDS
-    };
-    const thoughtCardLimit = settings?.thoughtCardLimit ?? 2e3;
-    dlog(`[MemorAID] Settings loaded:`, await repo.getSettings() ? "yes" : "no (using defaults)");
-    const configCard = cards.find(
-      (c2) => !c2.deletedAt && (c2.title || "").toLowerCase() === "configure memoraid"
-    );
-    if (!configCard) {
-      dlog("[MemorAID] No Configure MemorAID card found. Skipping memory updates.");
-      return updatedNames;
-    }
-    const description = configCard.description || "";
-    dlog(`[MemorAID] Parsing Configure MemorAID card description: "${description}"`);
-    const match2 = description.match(/IMPORTANT_CHARACTERS\s*:\s*([\s\S]+?)(?=\n\s*[A-Z_]+:|$)/i);
-    if (!match2 || !match2[1]) {
-      dlog("[MemorAID] Configure MemorAID card description is missing IMPORTANT_CHARACTERS list. Skipping memory updates.");
-      return updatedNames;
-    }
-    const importantNames = match2[1].split(/[,\r\n]+/).map((name) => name.trim().toLowerCase()).filter((name) => name.length > 0);
-    dlog(`[MemorAID] Parsed important characters:`, importantNames);
-    if (importantNames.length === 0) {
-      dlog("[MemorAID] Configure MemorAID card lists 0 important characters. Skipping memory updates.");
-      return updatedNames;
-    }
-    const allActions = await repo.getActions(shortId);
-    allActions.sort((a2, b) => {
-      if (a2.createdAt && b.createdAt) return a2.createdAt.localeCompare(b.createdAt);
-      return 0;
-    });
-    const isContinue = pendingActionType === "continue";
-    const isRetry = pendingActionType === "retry";
-    const checkActions = [...allActions];
-    if (pendingActionText) {
-      checkActions.push({
-        id: "pending",
-        text: pendingActionText,
-        type: pendingActionType || "do",
-        createdAt: (/* @__PURE__ */ new Date()).toISOString()
-      });
-    } else if (isRetry && checkActions.length >= 2) {
-      checkActions.pop();
-    }
-    const latestAction = checkActions[checkActions.length - 1];
-    if (!latestAction || !latestAction.text && !isContinue) {
-      dlog("[MemorAID] No actions found or latest action has empty text.");
-      return updatedNames;
-    }
-    if (latestAction) {
-      dlog(`[MemorAID] Latest action text: "${(latestAction.text || "").slice(0, 100)}..."`);
-    }
-    const memoraidLookback = settings?.memoraidLookback ?? 8;
-    const memoraidPresenceLookback = settings?.memoraidPresenceLookback ?? 5;
-    const presenceActions = sliceLastActions(checkActions, memoraidPresenceLookback);
-    const presenceText = presenceActions.map((a2) => a2.text || "").join("\n");
-    const triggered = [];
-    for (const impName of importantNames) {
-      const baseCard = cards.find((c2) => {
-        if (c2.type.toLowerCase() !== "character") return false;
-        if (c2.deletedAt) return false;
-        if ((c2.title || "").toLowerCase().endsWith(" (memory)")) return false;
-        const titleLower = (c2.title || "").toLowerCase();
-        const keysList = (c2.keys || "").split(/[,;]+/).map((k2) => k2.trim().toLowerCase()).filter(Boolean);
-        if (titleLower === impName || keysList.includes(impName)) return true;
-        if (titleLower.includes(" and ") || titleLower.includes(" & ")) {
-          const parts = titleLower.split(/\s+(?:and|&)\s+/);
-          if (parts.includes(impName)) return true;
-        }
-        for (const k2 of keysList) {
-          if (k2.includes(" and ") || k2.includes(" & ")) {
-            const parts = k2.split(/\s+(?:and|&)\s+/);
-            if (parts.includes(impName)) return true;
-          }
-        }
-        return false;
-      });
-      const title = baseCard ? baseCard.title || "" : capitalizeWords(impName);
-      const keys = baseCard ? baseCard.keys || "" : impName;
-      const charId = baseCard ? baseCard.id : `virtual-${impName}`;
-      const isTriggered = isCharacterTriggered(presenceText, title, keys);
-      dlog(`[MemorAID] Character "${title}" (from important list: "${impName}") triggered in scene? ${isTriggered} (keys: "${keys}")`);
-      if (isTriggered) {
-        triggered.push({
-          id: charId,
-          title,
-          keys,
-          baseCard
-        });
-      }
-    }
-    const seenIds = /* @__PURE__ */ new Set();
-    const dedupledTriggered = [];
-    for (const item of triggered) {
-      if (!seenIds.has(item.id)) {
-        seenIds.add(item.id);
-        dedupledTriggered.push(item);
-      }
-    }
-    if (dedupledTriggered.length === 0) {
-      dlog("[MemorAID] No important characters were triggered in the active scene lookback window.");
-      return updatedNames;
-    }
-    const adv = await repo.getAdventure(shortId);
-    const creationsToRun = [];
-    const characterToMemCardMap = /* @__PURE__ */ new Map();
-    for (const c2 of dedupledTriggered) {
-      const titleVal = c2.title || "";
-      const memCardTitle = `${titleVal} (Memory)`;
-      const memCardKeys = c2.keys || titleVal;
-      const existingMemCard = cards.find(
-        (x) => (x.type.toLowerCase() === "memory" || x.type.toLowerCase() === "character") && !x.deletedAt && (x.title || "").toLowerCase() === memCardTitle.toLowerCase()
-      );
-      if (existingMemCard) {
-        characterToMemCardMap.set(c2.id, existingMemCard);
-      } else {
-        dlog(`[MemorAID] Queueing new memory card creation for ${c2.title}...`);
-        const createOp = await repo.getOp("SaveQueueStoryCard");
-        const createQuery = createOp?.query || DEFAULT_GQL_QUERIES.SaveQueueStoryCard;
-        const tempId = Math.floor(Math.random() * 1e9).toString();
-        const initialValue = "[\n - none\n]";
-        const newCardRow = {
-          id: tempId,
-          shortId,
-          type: "Memory",
-          title: memCardTitle,
-          keys: memCardKeys,
-          value: initialValue,
-          description: ""
-        };
-        const req = buildCardCreate(gqlEndpoint, createQuery, sessionToken, newCardRow, initialValue);
-        creationsToRun.push({ character: c2, cardRow: newCardRow, req });
-      }
-    }
-    if (creationsToRun.length > 0) {
-      await ensureAuth();
-      if (sessionToken && isSafeEndpoint(gqlEndpoint)) {
-        dlog(`[MemorAID] Batch creating ${creationsToRun.length} memory cards...`);
-        const creationOps = creationsToRun.map((item) => JSON.parse(item.req.body)[0]);
-        try {
-          const batchReq = buildGraphQLMutation(gqlEndpoint, creationOps, sessionToken);
-          const res = await fetch2(batchReq.url, { method: "POST", headers: batchReq.headers, body: batchReq.body });
-          if (!res.ok) {
-            console.error(`[MemorAID] Batch creation push HTTP failure:`, res.status);
-          } else {
-            const jsonArray = await res.json();
-            for (let i3 = 0; i3 < creationsToRun.length; i3++) {
-              const item = creationsToRun[i3];
-              const resJson = jsonArray[i3];
-              const returnedCard = resJson?.data?.updateStoryCard?.storyCard || resJson?.data?.saveQueueStoryCard?.storyCard || resJson?.data?.updateStoryCard || resJson?.data?.saveQueueStoryCard;
-              const isSuccess = resJson?.data?.updateStoryCard?.success || resJson?.data?.saveQueueStoryCard?.success || returnedCard;
-              if (!isSuccess) {
-                const msg = resJson?.data?.updateStoryCard?.message || resJson?.errors?.[0]?.message || "Mutation failed";
-                console.error(`[MemorAID] AI Dungeon rejected memory card creation for ${item.character.title}:`, msg);
-                continue;
-              }
-              const actualId = returnedCard?.id || item.cardRow.id;
-              const targetMemCard = {
-                ...item.cardRow,
-                id: actualId
-              };
-              await repo.putCards(shortId, [targetMemCard]);
-              characterToMemCardMap.set(item.character.id, targetMemCard);
-              dlog(`[MemorAID] Successfully created empty memory card for ${item.character.title} (ID: ${actualId})`);
-              broadcastToTabs({
-                kind: "approvedCardSync",
-                payload: { ok: true, source: "card", cardId: actualId, value: targetMemCard.value || "", description: targetMemCard.description || "" }
-              });
-            }
-          }
-        } catch (err) {
-          console.error(`[MemorAID] Failed to batch create memory cards:`, err);
-        }
-      } else {
-        console.warn("[MemorAID] Missing session token or endpoint. Cannot create memory cards.");
-      }
-    }
-    let turnNow = countActions(allActions);
-    if (pendingActionText || isContinue) {
-      turnNow += 1;
-    }
-    const generationResults = [];
-    if (dedupledTriggered.length > 0) {
-      const providerOrError = await getActiveProvider();
-      if ("error" in providerOrError) {
-        console.warn(`[MemorAID] Cannot generate memories: ${providerOrError.error}`);
-      } else {
-        const provider = providerOrError;
-        await Promise.all(dedupledTriggered.map(async (c2) => {
-          const targetMemCard = characterToMemCardMap.get(c2.id);
-          if (!targetMemCard) return;
-          let needsPruneSave = false;
-          const currentDesc = targetMemCard.description || "";
-          const prevNotes = parseMemoNotes(currentDesc);
-          const prunedDesc = buildMemoNotes(prevNotes);
-          if (currentDesc !== prunedDesc) {
-            dlog(`[MemorAID] Description for ${c2.title} is oversized or needs pruning (${currentDesc.length} -> ${prunedDesc.length} chars). Queueing self-healing save.`);
-            targetMemCard.description = prunedDesc;
-            needsPruneSave = true;
-          }
-          const hadThoughtForThisTurn = prevNotes.thoughtLog.some((e2) => e2.turn === turnNow);
-          if (isRetry) {
-            prevNotes.thoughtLog = prevNotes.thoughtLog.filter((e2) => e2.turn !== turnNow);
-            needsPruneSave = true;
-          }
-          if (prevNotes.thoughtLog.some((e2) => e2.turn === turnNow)) {
-            dlog(`[MemorAID] Already generated thought for turn ${turnNow} for ${c2.title}. Skipping generation.`);
-            if (needsPruneSave) {
-              generationResults.push({
-                character: c2,
-                targetMemCard,
-                trimmedMemory: targetMemCard.value || "",
-                newDesc: prunedDesc
-              });
-            }
-            return;
-          }
-          const existingMemCard = cards.find(
-            (x) => (x.type.toLowerCase() === "memory" || x.type.toLowerCase() === "character") && !x.deletedAt && (x.title || "").toLowerCase() === `${c2.title} (Memory)`.toLowerCase()
-          );
-          let isMentioned = isCharacterTriggered(latestAction.text || "", c2.title || "", c2.keys || "");
-          if (!isMentioned && (isContinue || latestAction.type === "continue")) {
-            let idx = checkActions.length - 1;
-            while (idx >= 0) {
-              const act = checkActions[idx];
-              if (!act) break;
-              if (isCharacterTriggered(act.text || "", c2.title || "", c2.keys || "")) {
-                isMentioned = true;
-                break;
-              }
-              if (act.type !== "continue") {
-                break;
-              }
-              idx--;
-            }
-          }
-          const hasRealThoughts = prevNotes.thoughtLog.some((e2) => e2.text && e2.text !== "[none]");
-          const shouldGenerate = isMentioned || isRetry && hadThoughtForThisTurn;
-          if (existingMemCard && hasRealThoughts && !shouldGenerate) {
-            dlog(`[MemorAID] Character ${c2.title} is not mentioned in the latest action and already has thoughts. Skipping thought generation to prevent repeat triggers.`);
-            return;
-          }
-          dlog(`[MemorAID] Generating memory for ${c2.title} using 3rd party provider...`);
-          const recentActions = sliceLastActions(checkActions, memoraidLookback);
-          const priorActionsText = recentActions.slice(0, -1).map((a2) => a2.text || "").join("\n").slice(0, 3e3);
-          const latestActionText = (latestAction.text || "").slice(0, 1500);
-          const presentEntities = detectPresentCards(presenceText, cards);
-          const template = settings?.cardCommands?.memoraid || DEFAULT_CARD_COMMANDS.memoraid || "";
-          const protagonist = adv?.protagonistName && adv.protagonistName.trim() || parseProtagonistName(adv?.memory) || "the player character";
-          const title = c2.title || "Character";
-          const titleWithKeys = c2.keys ? `${title} (also referred to as: ${c2.keys})` : title;
-          let resolvedCommand = resolveTitleToken(resolveCommand(template, protagonist), titleWithKeys);
-          if (title.toLowerCase().includes(" and ") || title.toLowerCase().includes(" & ")) {
-            const names = title.split(/\s+(?:and|&)\s+/i).map((n3) => n3.trim());
-            resolvedCommand += `
-
-[JOINT CHARACTER CARD DIRECTIVE]: Since ${title} is a joint character card representing multiple characters, you MUST generate separate, consecutive Intake-Thought-Action loops for each character individually, in this exact order: first a loop for ${names[0]}, and then a loop for ${names[1]}.
-- You must explicitly start each character's Intake line by referencing that character by name as the subject (for example: "- Intake: ${names[0]} perceives..." and "- Intake: ${names[1]} perceives...").
-- Output both loops sequentially within the single outer brackets, with each line starting with a bullet point. Do not combine their thoughts into a single loop.`;
-          }
-          const thoughtLookbackVal = settings?.memoraidThoughtLookback ?? 0;
-          const thoughtContext = thoughtLookbackVal > 0 ? buildThoughtContext(prevNotes.thoughtLog, thoughtLookbackVal, title, 3e3) : "";
-          let charProfile = c2.baseCard?.value ? `Character Profile for ${title}:
-${stripOuterBrackets(c2.baseCard.value)}
-
-` : "";
-          if (thoughtContext) {
-            charProfile = thoughtContext + "\n\n" + charProfile;
-          }
-          const system = `You are a creative writing assistant. Your task is to generate first-person subjective thoughts for a character based on their profile and the narrative context. Follow the instructions and formatting rules exactly.
-CRITICAL: The generated thoughts must be strictly under ${thoughtCardLimit} characters in length.`;
-          const { cachePrefix, user } = buildMemoraidPrompt({ charProfile, priorActionsText, latestActionText, presentEntities, instructions: resolvedCommand });
-          try {
-            didGenerate = true;
-            const rawResponse = dedupledTriggered.length >= 2 ? await provider.complete(system, user, cachePrefix) : await provider.complete(system, cachePrefix + user);
-            dlog(`[MemorAID] Raw provider response for ${c2.title}: ${JSON.stringify(rawResponse).slice(0, 600)}`);
-            let inner = cleanLlmResponse(rawResponse);
-            const lowerRaw = rawResponse.trim().toLowerCase();
-            const lowerInner = inner.trim().toLowerCase();
-            if (lowerRaw === "[none]" || lowerRaw === "none" || lowerInner === "[none]" || lowerInner === "none" || lowerInner === "- none") {
-              dlog(`[MemorAID] LLM returned none for ${c2.title}. Skipping value update, but saving thoughtLog check.`);
-              const newDesc2 = buildMemoNotes({
-                thoughtLog: pushThought(prevNotes.thoughtLog, { turn: turnNow, text: "[none]" })
-              });
-              generationResults.push({ character: c2, targetMemCard, trimmedMemory: targetMemCard.value || "", newDesc: newDesc2 });
-              return;
-            }
-            const cleanedInner = inner.replace(/^\s*\[?\s*[^\n\]]*\bThoughts:\s*/i, "").replace(/^[\s[]+/, "").replace(/[\s\]]+$/, "").trim();
-            const salvaged = extractThoughtLoop(cleanedInner);
-            if (looksLikeCharacterProfile(rawResponse) && !salvaged) {
-              console.warn(`[MemorAID] Discarded generation for ${c2.title}: model returned a character profile, not thoughts. The selected model is too weak for this task \u2014 use a more capable model (e.g. gemini-2.5-flash or a Claude model).`);
-              return;
-            }
-            if (isPlaceholderOrGarbageResponse(rawResponse) || isPlaceholderOrGarbageResponse(inner)) {
-              console.warn(`[MemorAID] Discarded generation for ${c2.title}: model returned template placeholders or example text, not actual thoughts.`);
-              return;
-            }
-            if (salvaged) {
-              dlog(`[MemorAID] Salvaged Intake/Thought/Action loop from messy output for ${c2.title}.`);
-              inner = salvaged;
-            } else {
-              inner = cleanedInner;
-            }
-            const thoughtsHeader = `${title.trim()}'s Thoughts:`;
-            const newThoughtBlock = `[${thoughtsHeader}
-${inner}
-]`;
-            const newLog = pushThought(prevNotes.thoughtLog, { turn: turnNow, text: newThoughtBlock });
-            const newDesc = buildMemoNotes({ thoughtLog: newLog });
-            const thoughtLookbackVal2 = settings?.memoraidThoughtLookback ?? 1;
-            let trimmedMemory = "";
-            if (thoughtLookbackVal2 > 1) {
-              trimmedMemory = renderThoughtWindow(newLog, thoughtLookbackVal2, title, thoughtCardLimit);
-            }
-            if (!trimmedMemory) {
-              trimmedMemory = newThoughtBlock;
-            }
-            const ENTRY_CAP = thoughtCardLimit;
-            if (trimmedMemory.length > ENTRY_CAP) {
-              trimmedMemory = trimmedMemory.slice(0, ENTRY_CAP - 1).trimEnd() + "]";
-            }
-            dlog(`[MemorAID] Successfully generated 3rd-party memories for ${c2.title}: "${trimmedMemory}"`);
-            generationResults.push({ character: c2, targetMemCard, trimmedMemory, newDesc });
-          } catch (err) {
-            console.error(`[MemorAID] 3rd party generation failed for ${c2.title}:`, err);
-          }
-        }));
-      }
-    }
-    const savesToRun = [];
-    const updateOp = await repo.getOp("UseAutoSaveStoryCard");
-    const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
-    for (const item of generationResults) {
-      const memCardKeys = item.targetMemCard.keys || item.character.title || "";
-      const updatedCard = { ...item.targetMemCard, type: "Memory", keys: memCardKeys, value: item.trimmedMemory, description: item.newDesc };
-      const req = buildCardSave(gqlEndpoint, updateQuery, sessionToken, updatedCard, item.trimmedMemory);
-      savesToRun.push({ character: item.character, targetMemCard: item.targetMemCard, trimmedMemory: item.trimmedMemory, newDesc: item.newDesc, req });
-    }
-    if (savesToRun.length > 0) {
-      await ensureAuth();
-      if (sessionToken && isSafeEndpoint(gqlEndpoint)) {
-        dlog(`[MemorAID] Batch saving ${savesToRun.length} updated memory cards...`);
-        const saveOps = savesToRun.map((item) => JSON.parse(item.req.body)[0]);
-        try {
-          const batchReq = buildGraphQLMutation(gqlEndpoint, saveOps, sessionToken);
-          const res = await fetch2(batchReq.url, { method: "POST", headers: batchReq.headers, body: batchReq.body });
-          if (!res.ok) {
-            console.error(`[MemorAID] Batch update push HTTP failure:`, res.status);
-          } else {
-            const jsonArray = await res.json();
-            for (let i3 = 0; i3 < savesToRun.length; i3++) {
-              const item = savesToRun[i3];
-              const resJson = jsonArray[i3];
-              const returnedCard = resJson?.data?.updateStoryCard?.storyCard || resJson?.data?.updateStoryCard;
-              const isSuccess = resJson?.data?.updateStoryCard?.success || returnedCard;
-              if (!isSuccess) {
-                const msg = resJson?.data?.updateStoryCard?.message || resJson?.errors?.[0]?.message || "Mutation failed";
-                console.error(`[MemorAID] AI Dungeon rejected memory card save for ${item.character.title}:`, msg);
-                continue;
-              }
-              const updatedCard = { ...item.targetMemCard, type: "Memory", keys: item.targetMemCard.keys || item.character.title || "", value: item.trimmedMemory, description: item.newDesc };
-              await repo.putCards(shortId, [updatedCard]);
-              dlog(`[MemorAID] Successfully saved updated memories to memory card for ${item.character.title}`);
-              updatedNames.push(item.character.title || "Character");
-              broadcastToTabs({
-                kind: "approvedCardSync",
-                payload: { ok: true, source: "card", cardId: item.targetMemCard.id, value: item.trimmedMemory, description: item.newDesc }
-              });
-            }
-          }
-        } catch (err) {
-          console.error(`[MemorAID] Failed to batch save memories:`, err);
-        }
-      } else {
-        console.warn("[MemorAID] Missing session token or endpoint. Cannot save memories.");
-      }
-    }
-    if (recordTiming && didGenerate) {
-      recordMemoraidTiming(Date.now() - timingStart);
-    }
-    return updatedNames;
-  }
-  async function broadcastToTabs(msg) {
+  async function broadcastToTabs2(msg) {
     try {
       const tabs = await browser.tabs.query({ url: "*://*.aidungeon.com/*" }).catch(() => []);
       for (const tab of tabs) {
@@ -24047,11 +27978,17 @@ ${inner}
     }
     const timer = setTimeout(async () => {
       try {
-        dlog(`[AID bg] Running debounced gameplay turn checks for ${shortId}`);
+        dlog2(`[AID bg] Running debounced gameplay turn checks for ${shortId}`);
         await checkLookbackAutoUpdates(shortId, upserts);
         await checkMemorAIDUpdates(shortId);
         await runProperNounAutoDetection(shortId).catch((err) => {
           console.error("[AID bg] Failed running proper noun auto detection:", err);
+        });
+        await checkCrystallizedUpdates(shortId).catch((err) => {
+          console.error("[AID bg] Crystallized update check threw:", err);
+        });
+        await refreshSceneAwareCrystallized(shortId).catch((err) => {
+          console.error("[AID bg] Crystallized scene-aware refresh threw:", err);
         });
       } catch (e2) {
         console.error("[AID bg] debounced gameplay turn checks threw:", e2);
@@ -24061,6 +27998,32 @@ ${inner}
     }, 1200);
     gameplayTurnCheckTimers.set(shortId, timer);
   }
+  function activePressurePairs(cards, adv, settings) {
+    const titlePrefix = settings?.livingCharactersTitlePrefix || "Life - ";
+    const keyPrefix = (settings?.livingCharactersKeyPrefix || "chaos-v2:").toLowerCase();
+    const prefixRe = new RegExp(`^${titlePrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i");
+    const archived = new Set(adv?.lcArchived || []);
+    const out2 = [];
+    for (const c2 of cards) {
+      if (c2.deletedAt || !c2.id || archived.has(c2.id)) continue;
+      const typeLower = (c2.type || "").toLowerCase();
+      const titleLower = (c2.title || "").toLowerCase();
+      const keysList = (c2.keys || "").split(/[,;]+/).map((k2) => k2.trim().toLowerCase()).filter(Boolean);
+      const isLife = typeLower === "life" || titleLower.startsWith(titlePrefix.toLowerCase()) || keysList.some((k2) => k2.startsWith(keyPrefix));
+      if (!isLife) continue;
+      const details = parseLifeCardEntry(c2.value);
+      const status = (details.status || "").toLowerCase();
+      if (status === "resolved" || status === "dormant" || status === "concluded") continue;
+      let owner = (c2.title || "").replace(prefixRe, "").trim();
+      if (!owner) {
+        const m3 = /^(.*?) Immediate Life Event:/m.exec(c2.value || "");
+        owner = m3 ? m3[1].trim() : "";
+      }
+      if (!owner || !details.target || !details.pressure) continue;
+      out2.push({ owner, target: details.target, pressure: details.pressure, momentum: details.momentum || "low" });
+    }
+    return out2;
+  }
   var NATIVE_MEMORY_CHAR_CAP = 1500;
   function capMemoryBankEntry(text) {
     if (!text || text.length <= NATIVE_MEMORY_CHAR_CAP) return text;
@@ -24069,12 +28032,25 @@ ${inner}
     if (brk > NATIVE_MEMORY_CHAR_CAP * 0.5) t3 = t3.slice(0, brk + 1);
     return t3.trim();
   }
+  function parseCombinedBlockResponse(raw, names) {
+    const povs = /* @__PURE__ */ new Map();
+    const esc = (s3) => s3.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const summaryMatch = raw.match(/===\s*SUMMARY\s*===\s*([\s\S]*?)(?====\s*POV\s*:|===\s*SUMMARY\s*===|$)/i);
+    let summary = summaryMatch && summaryMatch[1] ? summaryMatch[1].trim() : "";
+    for (const name of names) {
+      const re = new RegExp(`===\\s*POV\\s*:\\s*${esc(name)}\\s*===\\s*([\\s\\S]*?)(?====\\s*POV\\s*:|===\\s*SUMMARY\\s*===|$)`, "i");
+      const m3 = raw.match(re);
+      if (m3 && m3[1] && m3[1].trim()) povs.set(name.trim().toLowerCase(), m3[1].trim());
+    }
+    if (!summary && povs.size === 0) summary = raw.trim();
+    return { summary, povs };
+  }
   async function regenerateMemoryBlock(shortId, index3) {
-    await ensureAuth();
+    await ensureAuth2();
     if (!sessionToken || !gqlEndpoint) {
       return { ok: false, error: "No session token yet \u2014 interact with the page once, then retry." };
     }
-    const adv = await repo.getAdventure(shortId);
+    const adv = await repo3.getAdventure(shortId);
     if (!adv) {
       return { ok: false, error: "Adventure metadata not found in database." };
     }
@@ -24086,7 +28062,7 @@ ${inner}
       return { ok: false, error: `Invalid memory block index: ${index3}` };
     }
     const targetMemory = memories[index3];
-    const allActions = await repo.getActions(shortId);
+    const allActions = await repo3.getActions(shortId);
     if (allActions.length === 0) {
       return { ok: false, error: "No game actions found in database to summarize." };
     }
@@ -24116,15 +28092,43 @@ ${inner}
     const provider = providerOrError;
     const protagonist = adv.protagonistName && adv.protagonistName.trim() || parseProtagonistName(adv.memory) || "the player character";
     const system = `You are a creative writing assistant summarizing actions for an interactive story. Your task is to generate a detailed, single-sentence memory block summarizing ONLY the specific actions provided in the user message. Write in the second person (referencing the player as "You" and other characters by name). Format it strictly as a series of comma-separated clauses. The output must start with "You" and follow this exact style: "You [action], [Character] [action], she/he [reflection]...". Target approximately 100 tokens (between 80 and 120 tokens, or roughly 65-85 words) in size. Keep the summary concise and limit it to 4-5 key clauses to prevent exceeding 120 tokens. Under no circumstances should the output exceed 120 tokens. Do not use code blocks or quotes.`;
+    const blockText = targetActions.map((a2) => a2.text || "").join("\n");
     const user = `Actions to summarize:
-${targetActions.map((a2) => a2.text || "").join("\n")}`;
+${blockText}`;
+    const settingsForNpc = await repo3.getSettings();
+    const npcSources = settingsForNpc?.enableCrystallized && settingsForNpc?.crystallizedNpcMemoryEnabled !== false ? await presentNpcSourcesForBlock(shortId, blockText).catch(() => []) : [];
+    const npcPovs = /* @__PURE__ */ new Map();
     let generatedMemory = "";
     try {
-      dlog(`[AID bg] Generating memory summary using 3rd party provider...`);
-      const rawResponse = await provider.complete(system, user);
-      generatedMemory = cleanLlmResponse(rawResponse);
+      if (npcSources.length > 0) {
+        const names = npcSources.map((s3) => s3.title);
+        const combinedSystem = system + `
+
+AFTER the summary, also produce one first-person, past-tense recollection (1-2 sentences, feeling over fact) for EACH listed character, from their point of view. Output EXACTLY these delimited sections and nothing else:
+===SUMMARY===
+<the summary described above>
+` + names.map((n3) => `===POV:${n3}===
+<${n3}'s recollection>`).join("\n");
+        const combinedUser = `${user}
+
+Characters for POV sections: ${names.join(", ")}`;
+        dlog2(`[AID bg] Combined memory-block + NPC-POV generation for ${names.length} NPC(s)...`);
+        const raw = cleanLlmResponse(await provider.complete(combinedSystem, combinedUser));
+        const parsed = parseCombinedBlockResponse(raw, names);
+        generatedMemory = parsed.summary;
+        for (const [k2, v2] of parsed.povs) npcPovs.set(k2, v2);
+      } else {
+        dlog2(`[AID bg] Generating memory summary using 3rd party provider...`);
+        generatedMemory = cleanLlmResponse(await provider.complete(system, user));
+      }
     } catch (err) {
       return { ok: false, error: `3rd party memory generation exception: ${err?.message || err}` };
+    }
+    if (!generatedMemory.trim() && npcSources.length > 0) {
+      try {
+        generatedMemory = cleanLlmResponse(await provider.complete(system, user));
+      } catch {
+      }
     }
     let cleaned = generatedMemory.trim();
     if (cleaned.startsWith("[")) cleaned = cleaned.slice(1);
@@ -24147,17 +28151,32 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
       actionIds: newActionIds,
       lastRelevantActionId: lastActId
     };
-    await repo.upsertAdventure({ shortId, memoryBankEntries: updatedMemories });
-    const editOp = await repo.getOp("EditMemory");
+    await repo3.upsertAdventure({ shortId, memoryBankEntries: updatedMemories });
+    if (npcSources.length > 0) {
+      const anchor = { actionId: lastActId, actionIds: newActionIds };
+      for (const s3 of npcSources) {
+        try {
+          const pov = npcPovs.get(s3.title.trim().toLowerCase());
+          if (pov && pov.trim()) {
+            await storeNpcBlockFromPov(shortId, s3.title, anchor, pov, npcSources);
+          } else {
+            await generateNpcBlock(shortId, s3.title, { actionIds: newActionIds, lastRelevantActionId: lastActId }, npcSources);
+          }
+        } catch (err) {
+          dlog2(`[AID bg] combined NPC block persistence failed for ${s3.title}:`, err);
+        }
+      }
+    }
+    const editOp = await repo3.getOp("EditMemory");
     const editQuery = editOp?.query || DEFAULT_GQL_QUERIES.EditMemory;
     const actionId = oldMemory.actionIds && oldMemory.actionIds.length > 0 ? oldMemory.actionIds[oldMemory.actionIds.length - 1] : oldMemory.lastRelevantActionId;
     if (actionId) {
       try {
-        dlog(`[AID bg] Replaying EditMemory mutation to update memory on server for action ID: ${actionId}`);
+        dlog2(`[AID bg] Replaying EditMemory mutation to update memory on server for action ID: ${actionId}`);
         const req = buildEditMemory(gqlEndpoint, editQuery, sessionToken, shortId, actionId, cleaned);
         const res = await fetch2(req.url, { method: "POST", headers: req.headers, body: req.body });
         const json = await res.json();
-        dlog("[AID bg] EditMemory response:", JSON.stringify(json));
+        dlog2("[AID bg] EditMemory response:", JSON.stringify(json));
       } catch (err) {
         console.error("[AID bg] Failed to push memory edit to server:", err);
       }
@@ -24167,7 +28186,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
     return { ok: true, memories: updatedMemories };
   }
   async function regenerateLatestMemory(shortId) {
-    const adv = await repo.getAdventure(shortId);
+    const adv = await repo3.getAdventure(shortId);
     if (!adv) return { ok: false, error: "Adventure metadata not found." };
     const memories = adv.memoryBankEntries || [];
     if (memories.length === 0) {
@@ -24191,6 +28210,74 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
       }
     }
   });
+  var authorsNoteCaptured = /* @__PURE__ */ new Set();
+  async function consolidateOutlookForCharacter(shortId, characterTitle) {
+    await ensureAuth2();
+    if (!sessionToken || !isSafeEndpoint2(gqlEndpoint)) return { error: "Not authenticated with AI Dungeon yet." };
+    const settings = await repo3.getSettings();
+    if (!settings?.enableCrystallized) return { error: "Crystallized is disabled." };
+    const adv = await repo3.getAdventure(shortId);
+    const characterKey = characterTitle.trim().toLowerCase();
+    const importantNames = (adv?.memoraidCharacters || []).map((n3) => n3.trim().toLowerCase()).filter(Boolean);
+    if (!importantNames.includes(characterKey)) return { error: `${characterTitle} is not a Crystallized character.` };
+    const state = await repo3.getCrystallizedState(shortId, characterKey);
+    const snapshot = state ? snapshotOutlookForIncorporation(state, 2) : [];
+    if (!state || snapshot.length === 0) return { ok: true, incorporated: 0 };
+    const cards = await repo3.getCards(shortId);
+    const card = cards.find((c2) => !c2.deletedAt && (c2.title || "").trim().toLowerCase() === characterKey && (c2.type || "").toLowerCase() !== "memory" && !(c2.title || "").toLowerCase().endsWith(" (memory)"));
+    if (!card) return { error: `No character card found for ${characterTitle}.` };
+    const versions = await repo3.getVersions(shortId);
+    if (versions.some((v2) => (v2.cardId === card.id || v2.characterName === characterTitle) && v2.status === "pending")) {
+      return { error: "A pending proposal already exists for this character \u2014 resolve it first." };
+    }
+    const field = "Personality";
+    const currentFieldText = extractFieldBlock(card.value || "", field) || "";
+    const formattingMode = settings?.formattingMode || DEFAULT_FORMATTING_MODE;
+    const protagonist = adv?.protagonistName && adv.protagonistName.trim() || parseProtagonistName(adv?.memory) || "the player character";
+    const command = resolveCommand(buildBoundedRevisionCommand(field, currentFieldText) + OUTLOOK_INCORPORATION_INSTRUCTION, protagonist);
+    const evidence = `${characterTitle}'s settled self-beliefs (Outlook) to incorporate:
+${snapshot.map((b) => `- ${b.text}`).join("\n")}`;
+    const r2 = await generateCard(card, command, formattingMode, { storyInformation: evidence.slice(0, 4e3) });
+    if (!r2.ok) return { error: r2.message || "Generation failed." };
+    const newFieldText = r2.value.trim().replace(/^\[+/, "").replace(/\]+$/, "").trim();
+    if (!newFieldText) return { error: "Generation returned empty text." };
+    const entry = spliceField(card.value || "", field, newFieldText);
+    if (entry === card.value) return { error: `Card has no ${field} field to revise.` };
+    const totalActionsCount = await repo3.getActionCount(shortId);
+    await repo3.putVersion({
+      id: crypto.randomUUID(),
+      shortId,
+      characterName: card.title || card.keys,
+      entry,
+      changeSummary: `Outlook consolidated into ${field} (${snapshot.length} belief${snapshot.length === 1 ? "" : "s"})`,
+      source: "card",
+      status: "pending",
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      actionCount: totalActionsCount,
+      cardId: card.id,
+      cardType: card.type || "character"
+    });
+    await consolidateOutlookState(shortId, characterKey, snapshot, totalActionsCount);
+    return { ok: true, incorporated: snapshot.length };
+  }
+  async function consolidateOutlookState(shortId, characterKey, snapshot, turn) {
+    if (!snapshot.length) return;
+    const state = await repo3.getCrystallizedState(shortId, characterKey);
+    if (!state) return;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    await repo3.appendCrystallizedArchive(snapshot.map((b) => ({
+      id: crypto.randomUUID(),
+      shortId,
+      characterKey,
+      kind: "outlook",
+      text: b.text,
+      turn,
+      archivedAt: now,
+      reason: "incorporated"
+    })));
+    await repo3.putCrystallizedState(shortId, characterKey, clearIncorporatedOutlook(state, snapshot));
+    dlog2(`[AID bg] Consolidated ${snapshot.length} Outlook belief(s) into ${characterKey}'s card.`);
+  }
   async function handleMessage(msg) {
     try {
       switch (msg.kind) {
@@ -24205,9 +28292,11 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
         }
         case "processInterceptedAction": {
           try {
+            const settings = await repo3.getSettings();
+            const enableLc = settings?.enableLivingCharacters !== false;
+            let runMemorAID = true;
             const importantNames = cachedImportantCharacters.get(msg.shortId);
             if (importantNames && importantNames.length > 0) {
-              const settings = await repo.getSettings();
               const presenceLookback = settings?.memoraidPresenceLookback ?? 5;
               let recent = cachedRecentActions.get(msg.shortId);
               if (!recent) {
@@ -24217,7 +28306,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
               const isRetry = msg.type === "retry";
               const sliced = isRetry && recent.length >= 2 ? recent.slice(0, -1).slice(-presenceLookback) : recent.slice(-presenceLookback);
               const combinedText = (sliced.map((a2) => a2.text || "").join("\n") + "\n" + (msg.text || "")).toLowerCase();
-              const cards = await repo.getCards(msg.shortId) || [];
+              const cards = await repo3.getCards(msg.shortId) || [];
               const charactersToCheck = [];
               const seenTitles = /* @__PURE__ */ new Set();
               for (const impName of importantNames) {
@@ -24252,12 +28341,50 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
                 (c2) => isCharacterTriggered(combinedText, c2.title, c2.keys)
               );
               if (triggered.length === 0) {
-                dlog("[AID bg] Short-circuit: No tracked characters triggered in caching presence check.");
-                return { ok: true, updatedNames: [] };
+                dlog2("[AID bg] Short-circuit: No tracked characters triggered in caching presence check.");
+                runMemorAID = false;
+              }
+            } else {
+              runMemorAID = false;
+            }
+            let updatedNames = [];
+            if (runMemorAID) {
+              updatedNames = await checkMemorAIDUpdates(msg.shortId, msg.text);
+            }
+            const advInj = await repo3.getAdventure(msg.shortId);
+            const injMode = advInj?.livingConfig?.continueInjectionMode || "defer";
+            const fresh = [];
+            let injMeta;
+            if (enableLc && shouldFireLcOnAction(msg.type, injMode)) {
+              const lcResult = await checkLifeCardUpdates(msg.shortId, msg.text);
+              if (lcResult.seededPair) {
+                fresh.push({ ...lcResult.seededPair, text: formatLivingCharactersDirective(lcResult.seededPair) });
+                injMeta = { ...lcResult.seededPair };
               }
             }
-            const updatedNames = await checkMemorAIDUpdates(msg.shortId, msg.text, msg.type, true);
-            return { ok: true, updatedNames };
+            const cardsForGuard = await repo3.getCards(msg.shortId);
+            const activeKeys = new Set(activePressurePairs(cardsForGuard, advInj, settings).map((p5) => pressureKey(p5.owner, p5.pressure)));
+            const heldLive = filterLiveDirectives(coercePending(advInj?.pendingInjections), activeKeys);
+            const { injectText, nextPending } = planInjection(msg.type, fresh, heldLive);
+            const prevPending = advInj?.pendingInjections || [];
+            if (advInj && (nextPending.length !== prevPending.length || nextPending.some((d2, i3) => d2.text !== prevPending[i3]?.text))) {
+              advInj.pendingInjections = nextPending;
+              await repo3.upsertAdventure(advInj);
+            }
+            if (injectText) {
+              const turnCount = await repo3.getActionCount(msg.shortId);
+              await repo3.appendInjectionLog([{
+                id: crypto.randomUUID(),
+                shortId: msg.shortId,
+                turn: turnCount,
+                provider: "living-characters",
+                directiveText: injectText,
+                meta: injMeta,
+                createdAt: (/* @__PURE__ */ new Date()).toISOString()
+              }]);
+              dlog2(`[Injection] Appending directive to action: ${injectText}`);
+            }
+            return { ok: true, updatedNames, injectText };
           } catch (e2) {
             console.error("[AID bg] processInterceptedAction failed:", e2);
             return { error: e2?.message || String(e2) };
@@ -24275,14 +28402,14 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
         case "setActiveLocation": {
           try {
             const { shortId, cardId } = msg;
-            const adv = await repo.getAdventure(shortId);
+            const adv = await repo3.getAdventure(shortId);
             if (!adv) return { error: "Adventure not found" };
-            const settings = await repo.getSettings();
+            const settings = await repo3.getSettings();
             const mode = settings?.locationMode || "optionA";
             let locationTitle = null;
             let selectedLocationCard;
             if (cardId) {
-              const cards = await repo.getCards(shortId);
+              const cards = await repo3.getCards(shortId);
               selectedLocationCard = cards.find((c2) => c2.id === cardId && !c2.deletedAt);
               if (selectedLocationCard) {
                 locationTitle = selectedLocationCard.title || selectedLocationCard.keys;
@@ -24291,16 +28418,16 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
             let finalMemory = adv.memory;
             let hasMemoryChanged = false;
             if (mode === "optionB") {
-              await ensureAuth();
-              if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) {
+              await ensureAuth2();
+              if (!sessionToken || !isSafeEndpoint2(gqlEndpoint)) {
                 return { error: "No session token yet \u2014 interact with the page once, then retry." };
               }
-              const cards = await repo.getCards(shortId);
+              const cards = await repo3.getCards(shortId);
               let anchorCard = cards.find((c2) => !c2.deletedAt && c2.title === "Active Location Anchor" && c2.type === "custom");
               const value = selectedLocationCard ? selectedLocationCard.value : "";
               const description = selectedLocationCard ? selectedLocationCard.description || "" : "";
               if (!anchorCard) {
-                const createOp = await repo.getOp("SaveQueueStoryCard");
+                const createOp = await repo3.getOp("SaveQueueStoryCard");
                 const createQuery = createOp?.query || DEFAULT_GQL_QUERIES.SaveQueueStoryCard;
                 const tempId = Math.floor(Math.random() * 1e9).toString();
                 const cardRow = {
@@ -24321,13 +28448,13 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
                 const returnedCard = json?.[0]?.data?.updateStoryCard?.storyCard || json?.[0]?.data?.saveQueueStoryCard?.storyCard || json?.[0]?.data?.updateStoryCard || json?.[0]?.data?.saveQueueStoryCard;
                 const actualId = returnedCard?.id || tempId;
                 anchorCard = { ...cardRow, id: actualId };
-                await repo.putCards(shortId, [anchorCard]);
-                broadcastToTabs({
+                await repo3.putCards(shortId, [anchorCard]);
+                broadcastToTabs2({
                   kind: "approvedCardSync",
                   payload: { ok: true, source: "card", cardId: actualId, value, description }
                 });
               } else {
-                const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+                const updateOp = await repo3.getOp("UseAutoSaveStoryCard");
                 const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
                 const anchorCardRow = {
                   ...anchorCard,
@@ -24345,8 +28472,8 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
                   const msgStr = json?.[0]?.data?.updateStoryCard?.message || json?.[0]?.errors?.[0]?.message || "Mutation failed";
                   return { error: `AI Dungeon rejected Anchor update: ${msgStr}` };
                 }
-                await repo.putCards(shortId, [anchorCardRow]);
-                broadcastToTabs({
+                await repo3.putCards(shortId, [anchorCardRow]);
+                broadcastToTabs2({
                   kind: "approvedCardSync",
                   payload: { ok: true, source: "card", cardId: anchorCard.id, value, description }
                 });
@@ -24355,9 +28482,9 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
               const currentMemory = adv.memory || "";
               const newMemory = updatePlotEssentialsLocation(currentMemory, peTarget);
               if (newMemory !== currentMemory) {
-                await ensureAuth();
-                if (sessionToken && isSafeEndpoint(gqlEndpoint)) {
-                  const op = await repo.getOp("UpdateAdventurePlot");
+                await ensureAuth2();
+                if (sessionToken && isSafeEndpoint2(gqlEndpoint)) {
+                  const op = await repo3.getOp("UpdateAdventurePlot");
                   const query = op?.query || DEFAULT_GQL_QUERIES.UpdateAdventurePlot;
                   const req = buildMemorySave(gqlEndpoint, query, sessionToken, shortId, newMemory);
                   const res = await fetch2(req.url, { method: "POST", headers: req.headers, body: req.body });
@@ -24374,11 +28501,11 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
               const currentMemory = adv.memory || "";
               const newMemory = updatePlotEssentialsLocation(currentMemory, locationTitle);
               if (newMemory !== currentMemory) {
-                await ensureAuth();
-                if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) {
+                await ensureAuth2();
+                if (!sessionToken || !isSafeEndpoint2(gqlEndpoint)) {
                   return { error: "No session token yet \u2014 interact with the page once, then retry." };
                 }
-                const op = await repo.getOp("UpdateAdventurePlot");
+                const op = await repo3.getOp("UpdateAdventurePlot");
                 const query = op?.query || DEFAULT_GQL_QUERIES.UpdateAdventurePlot;
                 const req = buildMemorySave(gqlEndpoint, query, sessionToken, shortId, newMemory);
                 const res = await fetch2(req.url, { method: "POST", headers: req.headers, body: req.body });
@@ -24395,15 +28522,15 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
                 hasMemoryChanged = true;
               }
             }
-            await repo.upsertAdventure({
+            await repo3.upsertAdventure({
               shortId,
               activeLocationId: cardId || void 0,
               memory: finalMemory
             });
             if (hasMemoryChanged && finalMemory) {
-              broadcastToTabs({ kind: "memoryUpdated", shortId, memory: finalMemory, previousMemory: adv.memory || "" });
+              broadcastToTabs2({ kind: "memoryUpdated", shortId, memory: finalMemory, previousMemory: adv.memory || "" });
             }
-            broadcastToTabs({ kind: "stateUpdated", shortId });
+            broadcastToTabs2({ kind: "stateUpdated", shortId });
             return { ok: true };
           } catch (err) {
             console.error("[AID bg] setActiveLocation failed:", err);
@@ -24413,7 +28540,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
         case "respondToProperNounSuggestion": {
           try {
             const { shortId, properNoun, accept, type } = msg;
-            const adv = await repo.getAdventure(shortId);
+            const adv = await repo3.getAdventure(shortId);
             if (!adv) return { error: "Adventure not found" };
             const suggestions = adv.locationSuggestions || [];
             const logs = adv.properNounLogs || [];
@@ -24433,13 +28560,13 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
                 isCharacter: isChar,
                 type
               });
-              await repo.upsertAdventure({
+              await repo3.upsertAdventure({
                 shortId,
                 locationSuggestions: suggestions,
                 properNounLogs: logs
               });
-              await ensureAuth();
-              if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) {
+              await ensureAuth2();
+              if (!sessionToken || !isSafeEndpoint2(gqlEndpoint)) {
                 const tempId = Math.floor(Math.random() * 1e9).toString();
                 const cardRow = {
                   id: tempId,
@@ -24450,9 +28577,9 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
                   value: "",
                   description: ""
                 };
-                await repo.putCards(shortId, [cardRow]);
+                await repo3.putCards(shortId, [cardRow]);
               } else {
-                const createOp = await repo.getOp("SaveQueueStoryCard");
+                const createOp = await repo3.getOp("SaveQueueStoryCard");
                 const createQuery = createOp?.query || DEFAULT_GQL_QUERIES.SaveQueueStoryCard;
                 try {
                   const tempId = Math.floor(Math.random() * 1e9).toString();
@@ -24472,17 +28599,17 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
                     const returnedCard = json?.[0]?.data?.updateStoryCard?.storyCard || json?.[0]?.data?.saveQueueStoryCard?.storyCard || json?.[0]?.data?.updateStoryCard || json?.[0]?.data?.saveQueueStoryCard;
                     const actualId = returnedCard?.id || tempId;
                     const savedCard = { ...cardRow, id: actualId };
-                    await repo.putCards(shortId, [savedCard]);
-                    broadcastToTabs({
+                    await repo3.putCards(shortId, [savedCard]);
+                    broadcastToTabs2({
                       kind: "approvedCardSync",
                       payload: { ok: true, source: "card", cardId: actualId, value: "", description: "" }
                     });
                   } else {
-                    await repo.putCards(shortId, [cardRow]);
+                    await repo3.putCards(shortId, [cardRow]);
                   }
                 } catch (e2) {
                   console.error(`[AID bg] Failed to create ${type} card on server`, e2);
-                  await repo.putCards(shortId, [{
+                  await repo3.putCards(shortId, [{
                     id: Math.floor(Math.random() * 1e9).toString(),
                     shortId,
                     type,
@@ -24502,13 +28629,13 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
                 isLocation: false,
                 isCharacter: false
               });
-              await repo.upsertAdventure({
+              await repo3.upsertAdventure({
                 shortId,
                 locationSuggestions: suggestions,
                 properNounLogs: logs
               });
             }
-            broadcastToTabs({ kind: "stateUpdated", shortId });
+            broadcastToTabs2({ kind: "stateUpdated", shortId });
             return { ok: true };
           } catch (err) {
             console.error("[AID bg] respondToProperNounSuggestion failed:", err);
@@ -24518,18 +28645,18 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
         case "linkProperNounToCard": {
           try {
             const { shortId, properNoun, cardId } = msg;
-            const adv = await repo.getAdventure(shortId);
+            const adv = await repo3.getAdventure(shortId);
             if (!adv) return { error: "Adventure not found" };
-            const cards = await repo.getCards(shortId);
+            const cards = await repo3.getCards(shortId);
             const card = cards.find((c2) => c2.id === cardId && !c2.deletedAt);
             if (!card) return { error: "Target card not found in local database." };
             const newKeys = mergeTriggerKey(card.keys || "", properNoun);
             if (newKeys !== (card.keys || "")) {
-              await ensureAuth();
-              if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) {
+              await ensureAuth2();
+              if (!sessionToken || !isSafeEndpoint2(gqlEndpoint)) {
                 return { error: "No session token yet \u2014 interact with the page once, then retry." };
               }
-              const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+              const updateOp = await repo3.getOp("UseAutoSaveStoryCard");
               const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
               const updatedCard = { ...card, keys: newKeys };
               const req = buildCardSave(gqlEndpoint, updateQuery, sessionToken, updatedCard, updatedCard.value);
@@ -24542,8 +28669,8 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
                 const msgStr = json?.[0]?.data?.updateStoryCard?.message || json?.[0]?.errors?.[0]?.message || "Mutation failed";
                 return { error: `AI Dungeon rejected save: ${msgStr}` };
               }
-              await repo.putCards(shortId, [updatedCard]);
-              broadcastToTabs({
+              await repo3.putCards(shortId, [updatedCard]);
+              broadcastToTabs2({
                 kind: "approvedCardSync",
                 payload: { ok: true, source: "card", cardId: card.id, value: updatedCard.value, description: updatedCard.description || "", keys: newKeys, prevKeys: card.keys || "" }
               });
@@ -24575,8 +28702,8 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
                 ...linkFields
               });
             }
-            await repo.upsertAdventure({ shortId, locationSuggestions: suggestions, properNounLogs: logs });
-            broadcastToTabs({ kind: "stateUpdated", shortId });
+            await repo3.upsertAdventure({ shortId, locationSuggestions: suggestions, properNounLogs: logs });
+            broadcastToTabs2({ kind: "stateUpdated", shortId });
             return { ok: true };
           } catch (err) {
             console.error("[AID bg] linkProperNounToCard failed:", err);
@@ -24586,7 +28713,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
         case "updateProperNounLog": {
           try {
             const { shortId, properNoun, type } = msg;
-            const adv = await repo.getAdventure(shortId);
+            const adv = await repo3.getAdventure(shortId);
             if (!adv) return { error: "Adventure not found" };
             const logs = adv.properNounLogs || [];
             const entry = logs.find((l2) => l2.properNoun.toLowerCase() === properNoun.toLowerCase());
@@ -24597,11 +28724,11 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
               entry.isCharacter = tl === "character";
               if (t3) entry.type = t3;
               else delete entry.type;
-              await repo.upsertAdventure({
+              await repo3.upsertAdventure({
                 shortId,
                 properNounLogs: logs
               });
-              broadcastToTabs({ kind: "stateUpdated", shortId });
+              broadcastToTabs2({ kind: "stateUpdated", shortId });
             }
             return { ok: true };
           } catch (err) {
@@ -24612,15 +28739,15 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
         case "deleteProperNounLog": {
           try {
             const { shortId, properNoun } = msg;
-            const adv = await repo.getAdventure(shortId);
+            const adv = await repo3.getAdventure(shortId);
             if (!adv) return { error: "Adventure not found" };
             const logs = adv.properNounLogs || [];
             const filtered = logs.filter((l2) => l2.properNoun.toLowerCase() !== properNoun.toLowerCase());
-            await repo.upsertAdventure({
+            await repo3.upsertAdventure({
               shortId,
               properNounLogs: filtered
             });
-            broadcastToTabs({ kind: "stateUpdated", shortId });
+            broadcastToTabs2({ kind: "stateUpdated", shortId });
             return { ok: true };
           } catch (err) {
             console.error("[AID bg] deleteProperNounLog failed:", err);
@@ -24630,11 +28757,11 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
         case "clearProperNounLogs": {
           try {
             const { shortId } = msg;
-            await repo.upsertAdventure({
+            await repo3.upsertAdventure({
               shortId,
               properNounLogs: []
             });
-            broadcastToTabs({ kind: "stateUpdated", shortId });
+            broadcastToTabs2({ kind: "stateUpdated", shortId });
             return { ok: true };
           } catch (err) {
             console.error("[AID bg] clearProperNounLogs failed:", err);
@@ -24642,7 +28769,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
           }
         }
         case "memoryBankUpdate": {
-          const adv = await repo.getAdventure(msg.shortId);
+          const adv = await repo3.getAdventure(msg.shortId);
           const oldMemories = adv?.memoryBankEntries || [];
           const normalized = (msg.memories || []).map((m3) => {
             const text = typeof m3 === "string" ? m3 : m3?.text || "";
@@ -24653,8 +28780,8 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
             return typeof m3 === "string" ? { actionIds: [], text: m3 } : m3;
           });
           const update = { shortId: msg.shortId, memoryBankEntries: normalized };
-          await repo.upsertAdventure(update);
-          const settings = await repo.getSettings();
+          await repo3.upsertAdventure(update);
+          const settings = await repo3.getSettings();
           if (settings?.autoRegenerateMemoryBankEntry) {
             let shouldTrigger = false;
             if (normalized.length > oldMemories.length) {
@@ -24671,7 +28798,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
               }
             }
             if (shouldTrigger) {
-              dlog(`[AID bg] Auto-regenerating latest memory block for shortId: ${msg.shortId}`);
+              dlog2(`[AID bg] Auto-regenerating latest memory block for shortId: ${msg.shortId}`);
               regenerateLatestMemory(msg.shortId).catch((err) => {
                 console.error("[AID bg] Auto-regeneration of latest memory failed:", err);
               });
@@ -24680,11 +28807,11 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
           return;
         }
         case "updateMemoryBank": {
-          await ensureAuth();
+          await ensureAuth2();
           const normalized = msg.memories.map((m3) => typeof m3 === "string" ? { actionIds: [], text: m3 } : m3);
-          const adv = await repo.getAdventure(msg.shortId);
+          const adv = await repo3.getAdventure(msg.shortId);
           const oldMemories = adv?.memoryBankEntries || [];
-          await repo.upsertAdventure({ shortId: msg.shortId, memoryBankEntries: normalized });
+          await repo3.upsertAdventure({ shortId: msg.shortId, memoryBankEntries: normalized });
           let editedMemory = null;
           for (let i3 = 0; i3 < normalized.length; i3++) {
             const newMem = normalized[i3];
@@ -24701,14 +28828,14 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
               return;
             }
             if (sessionToken && gqlEndpoint) {
-              const op = await repo.getOp("EditMemory");
+              const op = await repo3.getOp("EditMemory");
               const query = op?.query || DEFAULT_GQL_QUERIES.EditMemory;
               try {
-                dlog("[AID bg] Replaying EditMemory mutation to AI Dungeon...");
+                dlog2("[AID bg] Replaying EditMemory mutation to AI Dungeon...");
                 const req = buildEditMemory(gqlEndpoint, query, sessionToken, msg.shortId, actionId, capMemoryBankEntry(editedMemory.text));
                 const res = await fetch2(req.url, { method: "POST", headers: req.headers, body: req.body });
                 const json = await res.json();
-                dlog("[AID bg] EditMemory response status:", res.status, JSON.stringify(json));
+                dlog2("[AID bg] EditMemory response status:", res.status, JSON.stringify(json));
               } catch (err) {
                 console.error("[AID bg] Failed to push memory edit to AI Dungeon:", err);
               }
@@ -24719,11 +28846,11 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
           return;
         }
         case "createConfigCard": {
-          await ensureAuth();
-          if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) {
+          await ensureAuth2();
+          if (!sessionToken || !isSafeEndpoint2(gqlEndpoint)) {
             return { error: "No session token yet \u2014 interact with the page once, then retry." };
           }
-          const createOp = await repo.getOp("SaveQueueStoryCard");
+          const createOp = await repo3.getOp("SaveQueueStoryCard");
           const createQuery = createOp?.query || DEFAULT_GQL_QUERIES.SaveQueueStoryCard;
           try {
             const tempId = Math.floor(Math.random() * 1e9).toString();
@@ -24753,8 +28880,8 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
               ...configCardRow,
               id: actualId
             };
-            await repo.putCards(msg.shortId, [savedCard]);
-            broadcastToTabs({
+            await repo3.putCards(msg.shortId, [savedCard]);
+            broadcastToTabs2({
               kind: "approvedCardSync",
               payload: { ok: true, source: "card", cardId: actualId, value: configCardRow.value, description: configCardRow.description || "" }
             });
@@ -24764,11 +28891,11 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
           }
         }
         case "createStoryCard": {
-          await ensureAuth();
-          if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) {
+          await ensureAuth2();
+          if (!sessionToken || !isSafeEndpoint2(gqlEndpoint)) {
             return { error: "No session token yet \u2014 interact with the page once, then retry." };
           }
-          const createOp = await repo.getOp("SaveQueueStoryCard");
+          const createOp = await repo3.getOp("SaveQueueStoryCard");
           const createQuery = createOp?.query || DEFAULT_GQL_QUERIES.SaveQueueStoryCard;
           try {
             const tempId = Math.floor(Math.random() * 1e9).toString();
@@ -24798,8 +28925,8 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
               ...cardRow,
               id: actualId
             };
-            await repo.putCards(msg.shortId, [savedCard]);
-            broadcastToTabs({
+            await repo3.putCards(msg.shortId, [savedCard]);
+            broadcastToTabs2({
               kind: "approvedCardSync",
               payload: { ok: true, source: "card", cardId: actualId, value: cardRow.value, description: cardRow.description || "" }
             });
@@ -24809,14 +28936,14 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
           }
         }
         case "saveCardKeys": {
-          await ensureAuth();
-          if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) {
+          await ensureAuth2();
+          if (!sessionToken || !isSafeEndpoint2(gqlEndpoint)) {
             return { error: "No session token yet \u2014 interact with the page once, then retry." };
           }
-          const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+          const updateOp = await repo3.getOp("UseAutoSaveStoryCard");
           const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
           try {
-            const cards = await repo.getCards(msg.shortId);
+            const cards = await repo3.getCards(msg.shortId);
             const card = cards.find((c2) => c2.id === msg.cardId);
             if (!card) {
               return { error: "Card not found in local database." };
@@ -24835,8 +28962,8 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
               const msgStr = json?.[0]?.data?.updateStoryCard?.message || json?.[0]?.errors?.[0]?.message || "Mutation failed";
               return { error: `AI Dungeon rejected save: ${msgStr}` };
             }
-            await repo.putCards(msg.shortId, [updatedCard]);
-            broadcastToTabs({
+            await repo3.putCards(msg.shortId, [updatedCard]);
+            broadcastToTabs2({
               kind: "approvedCardSync",
               payload: { ok: true, source: "card", cardId: msg.cardId, value: updatedCard.value, description: updatedCard.description || "", keys: msg.keys, prevKeys }
             });
@@ -24856,8 +28983,8 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
         case "applyOffMetaInstruction": {
           try {
             const { shortId, text, type, itemType } = msg;
-            await ensureAuth();
-            if (!isSafeEndpoint(gqlEndpoint) || !sessionToken) {
+            await ensureAuth2();
+            if (!isSafeEndpoint2(gqlEndpoint) || !sessionToken) {
               return { error: "No AI Dungeon GraphQL endpoint or session token observed yet. Please interact with the game first." };
             }
             const endpoint = gqlEndpoint;
@@ -24896,7 +29023,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
             const currentState = advData.state || {};
             const currentInstructions = currentState.instructions || {};
             const currentAIN = currentInstructions.custom || "";
-            const adv = await repo.getAdventure(shortId);
+            const adv = await repo3.getAdventure(shortId);
             const protagonist = adv?.protagonistName && adv.protagonistName.trim() || parseProtagonistName(currentPE) || "the player character";
             const processedText = text.replace(/\$\{character\.name\}/g, protagonist).replace(/\{protagonist\}/gi, protagonist);
             let toAppend = processedText;
@@ -24910,7 +29037,7 @@ ${targetActions.map((a2) => a2.text || "").join("\n")}`;
               }
               newAIN = newAIN ? `${newAIN}
 ${toAppend}` : toAppend;
-              const op = await repo.getOp("UpdateAdventureState");
+              const op = await repo3.getOp("UpdateAdventureState");
               const updateQuery = op?.query || DEFAULT_GQL_QUERIES.UpdateAdventureState;
               const updateReq = buildUpdateAdventureState(
                 endpoint,
@@ -24933,7 +29060,7 @@ ${toAppend}` : toAppend;
                 const errMsg = updateJson?.[0]?.data?.updateAdventureState?.message || updateJson?.[0]?.errors?.[0]?.message || "AI Dungeon rejected the update.";
                 return { error: `Failed to save AI Instructions: ${errMsg}` };
               }
-              broadcastToTabs({
+              broadcastToTabs2({
                 kind: "stateUpdated",
                 shortId,
                 type: "ain",
@@ -24957,7 +29084,7 @@ ${toAppend}` : toAppend;
                 newPE = newPE ? `${newPE}
 ${toAppend}` : toAppend;
               }
-              const op = await repo.getOp("UpdateAdventurePlot");
+              const op = await repo3.getOp("UpdateAdventurePlot");
               const updateQuery = op?.query || DEFAULT_GQL_QUERIES.UpdateAdventurePlot;
               const updateReq = buildMemorySave(endpoint, updateQuery, token, shortId, newPE, newAN);
               const updateRes = await fetch2(updateReq.url, { method: "POST", headers: updateReq.headers, body: updateReq.body });
@@ -24971,8 +29098,8 @@ ${toAppend}` : toAppend;
                 const errMsg = updateJson?.[0]?.data?.updateAdventurePlot?.message || updateJson?.[0]?.errors?.[0]?.message || "AI Dungeon rejected the update.";
                 return { error: `Failed to save update: ${errMsg}` };
               }
-              await repo.upsertAdventure({ shortId, memory: newPE });
-              broadcastToTabs({
+              await repo3.upsertAdventure({ shortId, memory: newPE });
+              broadcastToTabs2({
                 kind: "stateUpdated",
                 shortId,
                 type,
@@ -24992,7 +29119,7 @@ ${toAppend}` : toAppend;
             update.memory = msg.memory;
             const parsedLocTitle = parseLocationFromMemory(msg.memory);
             if (parsedLocTitle) {
-              const cards = await repo.getCards(msg.shortId);
+              const cards = await repo3.getCards(msg.shortId);
               const activeCards = cards.filter((c2) => !c2.deletedAt);
               let matchedCard = activeCards.find((c2) => c2.type === "location" && (c2.title?.trim().toLowerCase() === parsedLocTitle.toLowerCase() || c2.keys?.trim().toLowerCase() === parsedLocTitle.toLowerCase()));
               if (matchedCard) {
@@ -25007,12 +29134,12 @@ ${toAppend}` : toAppend;
           }
           if (msg.authorsNote !== void 0) update.authorsNote = msg.authorsNote;
           if (msg.instructions !== void 0) update.instructions = msg.instructions;
-          const advBefore = await repo.getAdventure(msg.shortId);
+          const advBefore = await repo3.getAdventure(msg.shortId);
           const hasMemoryChanged = msg.memory !== void 0 && (!advBefore || advBefore.memory !== msg.memory);
           const hasActiveLocationChanged = update.activeLocationId !== void 0 && (!advBefore || advBefore.activeLocationId !== update.activeLocationId);
-          await repo.upsertAdventure(update);
+          await repo3.upsertAdventure(update);
           if (hasMemoryChanged || hasActiveLocationChanged) {
-            broadcastToTabs({ kind: "stateUpdated", shortId: msg.shortId });
+            broadcastToTabs2({ kind: "stateUpdated", shortId: msg.shortId });
           }
           fetchOffMetaRepositoryIfNeeded().catch(() => {
           });
@@ -25022,13 +29149,13 @@ ${toAppend}` : toAppend;
           const { upserts, removeIds } = diffActionUpdate(msg.payload);
           const newActions = [];
           for (const a2 of upserts) {
-            const existing = await repo.getAction(msg.shortId, a2.id);
+            const existing = await repo3.getAction(msg.shortId, a2.id);
             if (!existing) {
               newActions.push(a2);
             }
           }
-          if (upserts.length) await repo.putActions(msg.shortId, upserts);
-          for (const id of removeIds) await repo.deleteAction(msg.shortId, id);
+          if (upserts.length) await repo3.putActions(msg.shortId, upserts);
+          for (const id of removeIds) await repo3.deleteAction(msg.shortId, id);
           await updateRecentActionsCache(msg.shortId);
           if (newActions.length > 0 && newActions.length <= 5) {
             debouncedGameplayTurnCheck(msg.shortId, newActions);
@@ -25041,7 +29168,7 @@ ${toAppend}` : toAppend;
           return;
         }
         case "exportRequest":
-          return exportAdventure(repo, msg.shortId);
+          return exportAdventure(repo3, msg.shortId);
         case "authToken":
           await rememberAuth({ token: msg.token });
           return;
@@ -25049,22 +29176,22 @@ ${toAppend}` : toAppend;
           if (msg.endpoint) await rememberAuth({ endpoint: msg.endpoint });
           for (const op of msg.ops) {
             const r2 = recordOp(op);
-            if (r2) await repo.putOp(r2);
+            if (r2) await repo3.putOp(r2);
             const vars = op.variables;
             if (op.operationName === "UpdateAdventurePlot" && vars?.input?.memory) {
               const shortId = vars.input.shortId;
               const memory = vars.input.memory;
               if (shortId && memory) {
-                dlog("[AID bg] Automatically captured memory from UpdateAdventurePlot for shortId:", shortId);
-                await repo.upsertAdventure({ shortId, memory });
+                dlog2("[AID bg] Automatically captured memory from UpdateAdventurePlot for shortId:", shortId);
+                await repo3.upsertAdventure({ shortId, memory });
               }
             }
             if (op.operationName === "UpdateAdventureState") {
               const shortId = vars?.input?.shortId;
               const instructions = vars?.input?.state?.instructions?.custom;
               if (shortId && typeof instructions === "string") {
-                dlog("[AID bg] Automatically captured instructions from UpdateAdventureState for shortId:", shortId);
-                await repo.upsertAdventure({ shortId, instructions });
+                dlog2("[AID bg] Automatically captured instructions from UpdateAdventureState for shortId:", shortId);
+                await repo3.upsertAdventure({ shortId, instructions });
               }
             }
           }
@@ -25072,24 +29199,32 @@ ${toAppend}` : toAppend;
         case "backfillRequest":
           return runBackfill(msg.shortId);
         case "cardsUpdate":
-          await repo.putCards(msg.shortId, msg.cards);
+          await repo3.putCards(msg.shortId, msg.cards);
           await updateConfigCache(msg.shortId);
           return;
         case "setSettings": {
-          const cur = await repo.getSettings();
-          await repo.setSettings({ ...cur, ...msg.settings, apiKeys: { ...cur?.apiKeys ?? {}, ...msg.settings.apiKeys ?? {} } });
-          if (msg.settings.showDebug !== void 0) debugEnabled = !!msg.settings.showDebug;
+          const cur = await repo3.getSettings();
+          await repo3.setSettings({ ...cur, ...msg.settings, apiKeys: { ...cur?.apiKeys ?? {}, ...msg.settings.apiKeys ?? {} } });
+          if (msg.settings.showDebug !== void 0) {
+            debugEnabled2 = !!msg.settings.showDebug;
+            setDebugEnabled(debugEnabled2);
+          }
           return;
         }
         case "setProtagonist":
-          await repo.upsertAdventure({ shortId: msg.shortId, protagonistName: msg.name });
+          await repo3.upsertAdventure({ shortId: msg.shortId, protagonistName: msg.name });
           return;
         case "analyzeRequest":
           return runAnalyze(msg.shortId);
         case "generateCard":
           return runGenerateCard(msg.shortId, msg.cardId);
         case "setVersionStatus":
-          await repo.setVersionStatus(msg.id, msg.status);
+          if (msg.status === "rejected") {
+            const rejectedVer = await repo3.getVersion(msg.id);
+            const rollback = rejectedVer?.phenotypeRollback;
+            if (rollback) await repo3.putPhenotype(rollback);
+          }
+          await repo3.setVersionStatus(msg.id, msg.status);
           if (msg.status === "applied") {
             await applyVersionLocally(msg.id);
             try {
@@ -25103,7 +29238,7 @@ ${toAppend}` : toAppend;
         case "applyToAid":
           return runApplyToAid(msg.id);
         case "listModels": {
-          const s3 = await repo.getSettings();
+          const s3 = await repo3.getSettings();
           const providerName = msg.provider || s3?.provider || "claude";
           const key = msg.apiKey !== void 0 ? msg.apiKey : s3?.apiKeys?.[providerName];
           if (!key && providerName !== "ollama") return { models: [] };
@@ -25122,13 +29257,353 @@ ${toAppend}` : toAppend;
             return { models: [] };
           }
         }
+        case "adventureMemories": {
+          const adv = await repo3.getAdventure(msg.shortId);
+          const oldMemories = adv?.memoryBankEntries || [];
+          const normalized = (msg.memories || []).map((m3) => {
+            const text = typeof m3 === "string" ? m3 : m3?.text || "";
+            const old = oldMemories.find((o2) => o2.text === text);
+            if (old) {
+              return old;
+            }
+            return typeof m3 === "string" ? { actionIds: [], text: m3 } : m3;
+          });
+          if (normalized.length === 0 && oldMemories.length > 0) {
+            return;
+          }
+          const update = { shortId: msg.shortId, memoryBankEntries: normalized };
+          await repo3.upsertAdventure(update);
+          const settings = await repo3.getSettings();
+          if (settings?.enableCrystallized && settings?.crystallizedNpcMemoryEnabled !== false && normalized.length > oldMemories.length && oldMemories.length > 0) {
+            const newBlocks = normalized.slice(oldMemories.length).filter((b) => b && b.actionIds && b.actionIds.length);
+            const latestEntry = normalized[normalized.length - 1];
+            const forwardAutoBlocks = settings.autoRegenerateMemoryBankEntry ? newBlocks.filter((b) => b !== latestEntry) : newBlocks;
+            for (const block of forwardAutoBlocks) {
+              generateNpcBlocksForNewNativeBlock(msg.shortId, block).catch((err) => {
+                console.error("[AID bg] NPC memory bank auto-generation failed:", err);
+              });
+            }
+          }
+          if (settings?.autoRegenerateMemoryBankEntry) {
+            let shouldTrigger = false;
+            if (normalized.length > oldMemories.length) {
+              const isInitialLoad = oldMemories.length === 0;
+              if (!isInitialLoad || normalized.length === 1) {
+                shouldTrigger = true;
+              }
+            } else if (normalized.length > 0 && oldMemories.length > 0) {
+              const lastIdx = normalized.length - 1;
+              const normIds = normalized[lastIdx]?.actionIds || [];
+              const oldIds = oldMemories[lastIdx]?.actionIds || [];
+              if (normIds.length !== oldIds.length || !normIds.every((id, idx) => id === oldIds[idx])) {
+                shouldTrigger = true;
+              }
+            }
+            if (shouldTrigger) {
+              dlog2(`[AID bg] Auto-regenerating latest memory natively for shortId: ${msg.shortId}`);
+              regenerateLatestMemory(msg.shortId).catch((err) => {
+                console.error("[AID bg] Auto-regeneration of latest memory failed:", err);
+              });
+            }
+          }
+          return;
+        }
+        case "updateAidMemories": {
+          const normalized = msg.memories.map((m3) => typeof m3 === "string" ? { actionIds: [], text: m3 } : m3);
+          const adv = await repo3.getAdventure(msg.shortId);
+          const oldMemories = adv?.memoryBankEntries || [];
+          await repo3.upsertAdventure({ shortId: msg.shortId, memoryBankEntries: normalized });
+          let editedMemory = null;
+          for (let i3 = 0; i3 < normalized.length; i3++) {
+            const newMem = normalized[i3];
+            const oldMem = oldMemories[i3];
+            if (oldMem && newMem.text !== oldMem.text) {
+              editedMemory = newMem;
+              break;
+            }
+          }
+          if (editedMemory) {
+            const actionId = editedMemory.actionIds && editedMemory.actionIds.length > 0 ? editedMemory.actionIds[editedMemory.actionIds.length - 1] : editedMemory.lastRelevantActionId;
+            if (!actionId) {
+              console.warn("[AID bg] Cannot edit memory: no lastRelevantActionId or actionId found for memory text:", editedMemory.text);
+              return;
+            }
+            await ensureAuth2();
+            if (sessionToken && gqlEndpoint) {
+              const op = await repo3.getOp("EditMemory");
+              const query = op?.query || DEFAULT_GQL_QUERIES.EditMemory;
+              try {
+                dlog2("[AID bg] Replaying EditMemory mutation to AI Dungeon...");
+                const req = buildEditMemory(gqlEndpoint, query, sessionToken, msg.shortId, actionId, editedMemory.text);
+                const res = await fetch2(req.url, { method: "POST", headers: req.headers, body: req.body });
+                const json = await res.json();
+                dlog2("[AID bg] EditMemory response status:", res.status, JSON.stringify(json));
+              } catch (err) {
+                console.error("[AID bg] Failed to push memory edit to AI Dungeon:", err);
+              }
+            }
+          } else if (normalized.length < oldMemories.length) {
+            console.warn("[AID bg] Memory was deleted. AI Dungeon does not support discrete memory deletion mutations natively; skipping push.");
+          }
+          return;
+        }
+        case "setMemoraidCharacters": {
+          try {
+            const characters = (msg.characters || []).map((c2) => String(c2 || "").trim()).filter(Boolean);
+            const advMc = await repo3.getAdventure(msg.shortId);
+            const prev = new Set((advMc?.memoraidCharacters || []).map((c2) => c2.trim().toLowerCase()));
+            const added = characters.filter((c2) => !prev.has(c2.trim().toLowerCase()));
+            const patch = { shortId: msg.shortId, memoraidCharacters: characters };
+            if (added.length && advMc?.userDeletedCards?.length) {
+              const titles = added.flatMap((n3) => [`${n3} (Memory)`, `${n3} - Crystallized`]);
+              patch.userDeletedCards = removeUserDeletedTitles(advMc.userDeletedCards, titles);
+            }
+            await repo3.upsertAdventure(patch);
+            await updateConfigCache(msg.shortId);
+            broadcastToTabs2({ kind: "stateUpdated", shortId: msg.shortId });
+            return { ok: true };
+          } catch (err) {
+            return { error: err?.message || String(err) };
+          }
+        }
+        case "setLivingConfig": {
+          try {
+            await repo3.upsertAdventure({ shortId: msg.shortId, livingConfig: msg.config || {} });
+            broadcastToTabs2({ kind: "stateUpdated", shortId: msg.shortId });
+            return { ok: true };
+          } catch (err) {
+            return { error: err?.message || String(err) };
+          }
+        }
+        case "saveCrystallizedSchema": {
+          try {
+            const cards = await repo3.getCards(msg.shortId);
+            const card = cards.find((c2) => c2.id === msg.cardId && !c2.deletedAt);
+            if (!card) return { error: "Crystallized card not found." };
+            const characterKey = (card.title || "").replace(/\s*-\s*crystallized$/i, "").trim().toLowerCase();
+            const state = await repo3.getCrystallizedState(msg.shortId, characterKey) || parseCrystallized(card.description);
+            state.schema = dedupeSchema(msg.schema);
+            return await saveCrystallizedState(msg.shortId, card, state);
+          } catch (e2) {
+            return { error: e2?.message || String(e2) };
+          }
+        }
+        case "savePreferences": {
+          try {
+            const cards = await repo3.getCards(msg.shortId);
+            const card = cards.find((c2) => c2.id === msg.cardId && !c2.deletedAt);
+            if (!card) return { error: "Crystallized card not found." };
+            const characterKey = (card.title || "").replace(/\s*-\s*crystallized$/i, "").trim().toLowerCase();
+            const state = await repo3.getCrystallizedState(msg.shortId, characterKey) || parseCrystallized(card.description);
+            state.preferences = applyManualPreferences(state.preferences || [], msg.prefs);
+            return await saveCrystallizedState(msg.shortId, card, state);
+          } catch (e2) {
+            return { error: e2?.message || String(e2) };
+          }
+        }
+        case "consolidateCrystallizedSchema": {
+          try {
+            const cards = await repo3.getCards(msg.shortId);
+            const card = cards.find((c2) => c2.id === msg.cardId && !c2.deletedAt);
+            if (!card) return { error: "Crystallized card not found." };
+            const characterKey = (card.title || "").replace(/\s*-\s*crystallized$/i, "").trim().toLowerCase();
+            const state = await repo3.getCrystallizedState(msg.shortId, characterKey) || parseCrystallized(card.description);
+            if (!state.schema.length) return { ok: true };
+            await ensureAuth2();
+            const settings = await repo3.getSettings();
+            const formattingMode = settings?.formattingMode || DEFAULT_FORMATTING_MODE;
+            const current = state.schema.map((s3) => `- [${formatSubjectLabel(s3)}] ${s3.text}`).join("\n");
+            const command = buildConsolidateCommand(current);
+            const r2 = await generateCard({ ...card, value: "" }, command, formattingMode, {});
+            if (!r2.ok) return { error: r2.message || "Consolidation generation failed." };
+            const parsed = parseLlmOutput(r2.value);
+            if (parsed.schema.length) state.schema = dedupeSchema(parsed.schema);
+            return await saveCrystallizedState(msg.shortId, card, state);
+          } catch (e2) {
+            return { error: e2?.message || String(e2) };
+          }
+        }
+        case "getCrystallizedState": {
+          try {
+            const cards = await repo3.getCards(msg.shortId);
+            const card = cards.find((c2) => c2.id === msg.cardId && !c2.deletedAt);
+            if (!card) return { error: "Crystallized card not found." };
+            const characterKey = (card.title || "").replace(/\s*-\s*crystallized$/i, "").trim().toLowerCase();
+            const state = await repo3.getCrystallizedState(msg.shortId, characterKey) || parseCrystallized(card.description);
+            return { ok: true, state };
+          } catch (e2) {
+            return { error: e2?.message || String(e2) };
+          }
+        }
+        case "deleteStoryCard": {
+          await ensureAuth2();
+          if (!sessionToken || !isSafeEndpoint2(gqlEndpoint)) {
+            return { error: "No session token yet \u2014 interact with the page once, then retry." };
+          }
+          try {
+            const cards = await repo3.getCards(msg.shortId);
+            const card = cards.find((c2) => c2.id === msg.cardId);
+            if (!card) {
+              return { error: "Card not found in local database." };
+            }
+            const del = await tryNativeCardDelete(msg.shortId, msg.cardId);
+            if (!del.ok) {
+              return { error: `AI Dungeon rejected delete: ${del.error || "unknown error"}` };
+            }
+            const delLifePrefix = (await repo3.getSettings())?.livingCharactersTitlePrefix || "Life - ";
+            const deletedAtStr = (/* @__PURE__ */ new Date()).toISOString();
+            const updatedCard = { ...card, deletedAt: deletedAtStr };
+            await repo3.putCards(msg.shortId, [updatedCard]);
+            const advDel = await repo3.getAdventure(msg.shortId);
+            if (advDel) {
+              advDel.userDeletedCards = addUserDeletedCards(advDel.userDeletedCards, [{ id: msg.cardId, title: card.title || "" }]);
+              await repo3.upsertAdventure(advDel);
+            }
+            broadcastToTabs2({
+              kind: "approvedCardSync",
+              // Only auto-cards (Life/MemorAID/Crystallized) get the AID-autosave block — they're the
+              // ones AID's editor resurrects. Regular cards keep their restore-by-reappearance flow.
+              payload: { ok: true, source: "card", cardId: msg.cardId, value: updatedCard.value, description: updatedCard.description || "", keys: updatedCard.keys, deletedAt: deletedAtStr, blockAutosave: isAutoCardTitle(card.title, delLifePrefix) }
+            });
+            return { ok: true };
+          } catch (err) {
+            return { error: err?.message || String(err) };
+          }
+        }
+        case "setLifeCardStatus": {
+          await ensureAuth2();
+          if (!sessionToken || !isSafeEndpoint2(gqlEndpoint)) {
+            return { error: "No session token yet \u2014 interact with the page once, then retry." };
+          }
+          try {
+            const cards = await repo3.getCards(msg.shortId);
+            const card = cards.find((c2) => c2.id === msg.cardId);
+            if (!card) return { error: "Card not found in local database." };
+            if (msg.status === "resolved") {
+              const arch = await archiveLifeCard(msg.shortId, card);
+              if (!arch.ok) return { error: `AI Dungeon rejected the resolve/delete: ${arch.error || "unknown error"}` };
+              const advRes = await repo3.getAdventure(msg.shortId);
+              if (advRes?.lcDormantSince && advRes.lcDormantSince[msg.cardId] != null) {
+                delete advRes.lcDormantSince[msg.cardId];
+                await repo3.upsertAdventure(advRes);
+              }
+              return { ok: true };
+            }
+            const newValue = setLifeCardStatusValue(card.value, msg.status);
+            const updateOp = await repo3.getOp("UseAutoSaveStoryCard");
+            const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
+            const updatedCard = { ...card, value: newValue };
+            const saveReq = buildCardSave(gqlEndpoint, updateQuery, sessionToken, updatedCard, newValue);
+            const saveRes = await fetch2(saveReq.url, { method: "POST", headers: saveReq.headers, body: saveReq.body });
+            if (!saveRes.ok) return { error: `Status update failed with HTTP ${saveRes.status}` };
+            await repo3.putCards(msg.shortId, [updatedCard]);
+            const adv = await repo3.getAdventure(msg.shortId);
+            if (adv) {
+              adv.lcDormantSince = adv.lcDormantSince || {};
+              if (msg.status === "dormant") adv.lcDormantSince[msg.cardId] = (await repo3.getActions(msg.shortId)).length;
+              else delete adv.lcDormantSince[msg.cardId];
+              await repo3.upsertAdventure(adv);
+            }
+            broadcastToTabs2({ kind: "approvedCardSync", payload: { ok: true, source: "card", cardId: msg.cardId, value: newValue, description: updatedCard.description || "" } });
+            return { ok: true };
+          } catch (err) {
+            return { error: err?.message || String(err) };
+          }
+        }
+        case "enqueueLifeInjection": {
+          try {
+            const adv = await repo3.getAdventure(msg.shortId);
+            if (!adv) return { error: "Adventure not found." };
+            const pair = { owner: msg.owner, target: msg.target, pressure: msg.pressure, momentum: msg.momentum || "low" };
+            const pending = coercePending(adv.pendingInjections);
+            pending.push({ ...pair, text: formatLivingCharactersDirective(pair) });
+            adv.pendingInjections = pending;
+            await repo3.upsertAdventure(adv);
+            const settings = await repo3.getSettings();
+            return { ok: true };
+          } catch (err) {
+            return { error: err?.message || String(err) };
+          }
+        }
+        case "cardsDeleted": {
+          if (Array.isArray(msg.cardIds) && msg.cardIds.length) {
+            const before2 = await repo3.getCards(msg.shortId);
+            await repo3.markCardsDeleted(msg.shortId, msg.cardIds);
+            const s3 = await repo3.getSettings();
+            const titlePrefix = s3?.livingCharactersTitlePrefix || "Life - ";
+            const adv = await repo3.getAdventure(msg.shortId);
+            if (adv) {
+              const turn = (await repo3.getActions(msg.shortId)).length;
+              adv.lcResolvedAt = adv.lcResolvedAt || {};
+              for (const id of msg.cardIds) {
+                const c2 = before2.find((x) => x.id === id);
+                const titleLower = (c2?.title || "").toLowerCase();
+                if (titleLower.startsWith(titlePrefix.toLowerCase())) {
+                  const owner = (c2.title || "").replace(new RegExp(`^${titlePrefix}`, "i"), "").trim().toLowerCase();
+                  if (owner) {
+                    adv.lcResolvedAt[owner] = turn;
+                  }
+                }
+              }
+              adv.userDeletedCards = addUserDeletedCards(
+                adv.userDeletedCards,
+                msg.cardIds.map((id) => ({ id, title: before2.find((x) => x.id === id)?.title || "" }))
+              );
+              await repo3.upsertAdventure(adv);
+            }
+            for (const id of msg.cardIds) {
+              broadcastToTabs2({ kind: "approvedCardSync", payload: { ok: true, source: "card", cardId: id, deletedAt: (/* @__PURE__ */ new Date()).toISOString() } });
+            }
+            await updateConfigCache(msg.shortId);
+          }
+          return { ok: true };
+        }
+        case "generateCompactCard":
+          return runGenerateCard(msg.shortId, msg.cardId, "backgroundCharacter");
+        case "rerollAppearance":
+          return runRerollAppearance(msg.shortId, msg.cardId);
+        case "distillCrystallized":
+          return runCrystallizedDistillationManual(msg.shortId, msg.cardId, msg.name);
+        case "backfillNpcMemories":
+          return backfillNpcMemories(msg.shortId, msg.characterTitle);
+        case "getNpcMemoryBank": {
+          const key = msg.characterTitle.trim().toLowerCase();
+          const blocks = (await repo3.getNpcMemoryBlocks(msg.shortId, key)).sort((a2, b) => b.turnEnd - a2.turnEnd);
+          const s3 = await repo3.getSettings();
+          const advM = await repo3.getAdventure(msg.shortId);
+          return { blocks, cap: advM?.crystallizedNpcMemoryCap ?? s3?.crystallizedNpcMemoryCap ?? 400 };
+        }
+        case "deleteNpcMemoryBlock":
+          await repo3.deleteNpcMemoryBlock(msg.shortId, msg.characterTitle.trim().toLowerCase(), msg.blockId);
+          return { ok: true };
+        case "regenerateNpcMemoryBlock":
+          return regenerateNpcMemoryBlock(msg.shortId, msg.characterTitle, msg.blockId);
+        case "setAuthorsNote":
+          authorsNoteCaptured.add(msg.shortId);
+          await repo3.upsertAdventure({ shortId: msg.shortId, authorsNote: msg.authorsNote });
+          return { ok: true };
+        case "saveNpcMemoryBlock": {
+          const key = msg.characterTitle.trim().toLowerCase();
+          const existing = (await repo3.getNpcMemoryBlocks(msg.shortId, key)).find((b) => b.blockId === msg.blockId);
+          if (!existing) return { error: "Memory block not found." };
+          const cards = await repo3.getCards(msg.shortId);
+          const known = new Set(
+            cards.flatMap((c2) => [c2.title, ...String(c2.keys || "").split(/[,;]+/)]).map((t3) => String(t3 || "").trim().toLowerCase()).filter(Boolean)
+          );
+          const { entities, keywords } = extractBlockTags(msg.povText, known);
+          await repo3.putNpcMemoryBlock({ ...existing, povText: msg.povText, entities, keywords });
+          return { ok: true };
+        }
+        case "consolidateOutlook":
+          return consolidateOutlookForCharacter(msg.shortId, msg.characterTitle);
         case "getState": {
-          const settings = await repo.getSettings();
-          debugEnabled = !!settings?.showDebug;
-          const adv = await repo.getAdventure(msg.shortId);
-          const cards = await migrateConfigCardType(msg.shortId, await repo.getCards(msg.shortId));
-          const actionsCount = await repo.getActionCount(msg.shortId);
-          const ops = await repo.getOps();
+          const settings = await repo3.getSettings();
+          debugEnabled2 = !!settings?.showDebug;
+          setDebugEnabled(debugEnabled2);
+          const adv = await repo3.getAdventure(msg.shortId);
+          const cards = await migrateConfigCardType(msg.shortId, await repo3.getCards(msg.shortId));
+          const actionsCount = await repo3.getActionCount(msg.shortId);
+          const ops = await repo3.getOps();
           const db = await openAidDb();
           const adventures = (await db.getAll("adventures").catch(() => [])).filter((a2) => !a2.hidden);
           const allCards = await db.getAll("cards").catch(() => []);
@@ -25202,13 +29677,13 @@ ${toAppend}` : toAppend;
           const needsBackfill = versions.some((v2) => v2.actionCount == null);
           let actions = null;
           if (needsBackfill) {
-            actions = await repo.getActions(msg.shortId);
+            actions = await repo3.getActions(msg.shortId);
             for (const v2 of versions) {
               if (v2.actionCount == null) {
                 const oldTurnCount = v2.turnCount;
                 const count = actions.filter((a2) => a2.createdAt && a2.createdAt <= v2.createdAt).length;
                 v2.actionCount = count > 0 ? count : oldTurnCount != null ? oldTurnCount : 0;
-                await repo.putVersion(v2);
+                await repo3.putVersion(v2);
               }
             }
           }
@@ -25231,7 +29706,7 @@ ${toAppend}` : toAppend;
               referencedActions = actions.filter((a2) => refIds.has(a2.id));
             } else {
               const loaded = await Promise.all(
-                Array.from(refIds).map((id) => repo.getAction(msg.shortId, id))
+                Array.from(refIds).map((id) => repo3.getAction(msg.shortId, id))
               );
               referencedActions = loaded.filter((a2) => a2 !== void 0);
             }
@@ -25268,11 +29743,41 @@ ${toAppend}` : toAppend;
               manualMode: !!settings.manualMode,
               memoraidBannerDismissed: !!settings.memoraidBannerDismissed,
               characterCardLimit: settings.characterCardLimit ?? 600,
-              thoughtCardLimit: settings.thoughtCardLimit ?? 2e3
+              thoughtCardLimit: settings.thoughtCardLimit ?? 2e3,
+              // Feature-enable flags + per-feature config the panel reads back to hydrate its toggles.
+              // Omitting any of these makes the corresponding checkbox render unchecked (or reset to
+              // default) on every getState refresh — the "Crystallized missing entirely" bug class.
+              enableAutomaticUpdates: !!settings.enableAutomaticUpdates,
+              enableMemorAID: settings.enableMemorAID !== false,
+              enableLivingCharacters: settings.enableLivingCharacters !== false,
+              livingCharactersTitlePrefix: settings.livingCharactersTitlePrefix ?? "Life - ",
+              livingCharactersKeyPrefix: settings.livingCharactersKeyPrefix ?? "chaos-v2:",
+              groupThoughtsInRoster: !!settings.groupThoughtsInRoster,
+              enableCrystallized: !!settings.enableCrystallized,
+              crystallizedInterval: settings.crystallizedInterval ?? 20,
+              crystallizedEntryMaxChars: settings.crystallizedEntryMaxChars ?? 900,
+              crystallizedNodeCap: settings.crystallizedNodeCap ?? 12,
+              crystallizedKnowsCap: settings.crystallizedKnowsCap ?? 2,
+              crystallizedRecallsCap: settings.crystallizedRecallsCap ?? 2,
+              crystallizedVividCap: settings.crystallizedVividCap ?? 4,
+              crystallizedOutlookCap: settings.crystallizedOutlookCap ?? 2,
+              crystallizedPreferencesCap: settings.crystallizedPreferencesCap ?? 4,
+              crystallizedNpcMemoryCap: settings.crystallizedNpcMemoryCap ?? 400,
+              // Per-pass LLM enable flags (default on / opt-out).
+              crystallizedKnowsEnabled: settings.crystallizedKnowsEnabled !== false,
+              crystallizedNodesEnabled: settings.crystallizedNodesEnabled !== false,
+              crystallizedOutlookEnabled: settings.crystallizedOutlookEnabled !== false,
+              crystallizedPreferencesEnabled: settings.crystallizedPreferencesEnabled !== false,
+              crystallizedNpcMemoryEnabled: settings.crystallizedNpcMemoryEnabled !== false
             } : null,
             protagonist: adv?.protagonistName ?? null,
             scenario: adv?.title ?? null,
             memory: adv?.memory ?? null,
+            // Per-adventure MemorAID roster + Living Characters sim config (incl. pairing pressure pools):
+            // the panel repopulates its editors from these, so getState must return them or a saved config
+            // silently fails to reload ("pairing pressure pools isn't saving").
+            memoraidCharacters: adv?.memoraidCharacters ?? [],
+            livingConfig: adv?.livingConfig ?? {},
             actionsCount,
             actionCount: actionsCount,
             actions: referencedActions.map((a2) => ({ id: a2.id, text: a2.text, type: a2.type })),
@@ -25292,7 +29797,7 @@ ${toAppend}` : toAppend;
             const adventures = (await db.getAll("adventures") || []).filter((a2) => !a2.hidden);
             const cards = await db.getAll("cards");
             const globalAssets = await db.getAll("globalAssets");
-            const settings = await repo.getSettings();
+            const settings = await repo3.getSettings();
             ensureAdventureTitles(adventures).catch((err) => {
               console.error("[AID bg] Error in background ensureAdventureTitles:", err);
             });
@@ -25311,7 +29816,7 @@ ${toAppend}` : toAppend;
         }
         case "hideAdventure": {
           try {
-            await repo.hideAdventure(msg.shortId);
+            await repo3.hideAdventure(msg.shortId);
             return { ok: true };
           } catch (err) {
             return { error: err?.message || String(err) };
@@ -25319,7 +29824,7 @@ ${toAppend}` : toAppend;
         }
         case "deleteAdventure": {
           try {
-            await repo.deleteAdventure(msg.shortId);
+            await repo3.deleteAdventure(msg.shortId);
             return { ok: true };
           } catch (err) {
             return { error: err?.message || String(err) };
@@ -25327,7 +29832,7 @@ ${toAppend}` : toAppend;
         }
         case "unhideAdventure": {
           try {
-            await repo.unhideAdventure(msg.shortId);
+            await repo3.unhideAdventure(msg.shortId);
             return { ok: true };
           } catch (err) {
             return { error: err?.message || String(err) };
@@ -25345,7 +29850,7 @@ ${toAppend}` : toAppend;
         }
         case "saveGlobalAsset": {
           try {
-            await repo.putGlobalAsset(msg.asset);
+            await repo3.putGlobalAsset(msg.asset);
             return { ok: true };
           } catch (err) {
             return { error: err?.message || String(err) };
@@ -25353,7 +29858,7 @@ ${toAppend}` : toAppend;
         }
         case "deleteGlobalAsset": {
           try {
-            await repo.deleteGlobalAsset(msg.id);
+            await repo3.deleteGlobalAsset(msg.id);
             return { ok: true };
           } catch (err) {
             return { error: err?.message || String(err) };
@@ -25362,8 +29867,8 @@ ${toAppend}` : toAppend;
         case "importGlobalAsset": {
           try {
             const { shortId, assetId } = msg;
-            await ensureAuth();
-            if (!isSafeEndpoint(gqlEndpoint) || !sessionToken) {
+            await ensureAuth2();
+            if (!isSafeEndpoint2(gqlEndpoint) || !sessionToken) {
               return { error: "No AI Dungeon GraphQL endpoint or session token observed yet. Please interact with the game first." };
             }
             const endpoint = gqlEndpoint;
@@ -25374,7 +29879,7 @@ ${toAppend}` : toAppend;
               return { error: "Global asset not found." };
             }
             if (asset.type === "sc") {
-              const createOp = await repo.getOp("SaveQueueStoryCard");
+              const createOp = await repo3.getOp("SaveQueueStoryCard");
               const createQuery = createOp?.query || DEFAULT_GQL_QUERIES.SaveQueueStoryCard;
               const tempId = Math.floor(Math.random() * 1e9).toString();
               const cardRow = {
@@ -25403,8 +29908,8 @@ ${toAppend}` : toAppend;
                 ...cardRow,
                 id: actualId
               };
-              await repo.putCards(shortId, [savedCard]);
-              broadcastToTabs({
+              await repo3.putCards(shortId, [savedCard]);
+              broadcastToTabs2({
                 kind: "approvedCardSync",
                 payload: { ok: true, source: "card", cardId: actualId, value: savedCard.value, description: savedCard.description || "", keys: savedCard.keys }
               });
@@ -25448,7 +29953,7 @@ ${toAppend}` : toAppend;
                 }
                 newAIN = newAIN ? `${newAIN}
 ${asset.value}` : asset.value;
-                const op = await repo.getOp("UpdateAdventureState");
+                const op = await repo3.getOp("UpdateAdventureState");
                 const updateQuery = op?.query || DEFAULT_GQL_QUERIES.UpdateAdventureState;
                 const updateReq = buildUpdateAdventureState(
                   endpoint,
@@ -25471,8 +29976,8 @@ ${asset.value}` : asset.value;
                   const errMsg = updateJson?.[0]?.data?.updateAdventureState?.message || updateJson?.[0]?.errors?.[0]?.message || "AI Dungeon rejected the update.";
                   return { error: `Failed to save AI Instructions: ${errMsg}` };
                 }
-                await repo.upsertAdventure({ shortId, instructions: newAIN });
-                broadcastToTabs({
+                await repo3.upsertAdventure({ shortId, instructions: newAIN });
+                broadcastToTabs2({
                   kind: "stateUpdated",
                   shortId,
                   type: "ain",
@@ -25503,7 +30008,7 @@ ${asset.value}` : asset.value;
                   newPE = newPE ? `${newPE}
 ${blockText}` : blockText;
                 }
-                const op = await repo.getOp("UpdateAdventurePlot");
+                const op = await repo3.getOp("UpdateAdventurePlot");
                 const updateQuery = op?.query || DEFAULT_GQL_QUERIES.UpdateAdventurePlot;
                 const updateReq = buildMemorySave(endpoint, updateQuery, token, shortId, newPE, newAN);
                 const updateRes = await fetch2(updateReq.url, { method: "POST", headers: updateReq.headers, body: updateReq.body });
@@ -25517,8 +30022,8 @@ ${blockText}` : blockText;
                   const errMsg = updateJson?.[0]?.data?.updateAdventurePlot?.message || updateJson?.[0]?.errors?.[0]?.message || "AI Dungeon rejected the update.";
                   return { error: `Failed to save update: ${errMsg}` };
                 }
-                await repo.upsertAdventure({ shortId, memory: newPE });
-                broadcastToTabs({
+                await repo3.upsertAdventure({ shortId, memory: newPE });
+                broadcastToTabs2({
                   kind: "stateUpdated",
                   shortId,
                   type: asset.type,
@@ -25533,14 +30038,14 @@ ${blockText}` : blockText;
           }
         }
         case "saveCardValue": {
-          await ensureAuth();
-          if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) {
+          await ensureAuth2();
+          if (!sessionToken || !isSafeEndpoint2(gqlEndpoint)) {
             return { error: "No session token yet \u2014 interact with the page once, then retry." };
           }
-          const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+          const updateOp = await repo3.getOp("UseAutoSaveStoryCard");
           const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
           try {
-            const cards = await repo.getCards(msg.shortId);
+            const cards = await repo3.getCards(msg.shortId);
             const card = cards.find((c2) => c2.id === msg.cardId);
             if (!card) {
               return { error: "Card not found in local database." };
@@ -25558,8 +30063,8 @@ ${blockText}` : blockText;
               const msgStr = json?.[0]?.data?.updateStoryCard?.message || json?.[0]?.errors?.[0]?.message || "Mutation failed";
               return { error: `AI Dungeon rejected save: ${msgStr}` };
             }
-            await repo.putCards(msg.shortId, [updatedCard]);
-            broadcastToTabs({
+            await repo3.putCards(msg.shortId, [updatedCard]);
+            broadcastToTabs2({
               kind: "approvedCardSync",
               payload: { ok: true, source: "card", cardId: msg.cardId, value: msg.value, description: updatedCard.description || "" }
             });
@@ -25570,7 +30075,7 @@ ${blockText}` : blockText;
         }
         case "exportAll": {
           try {
-            const data = await repo.exportAll();
+            const data = await repo3.exportAll();
             return { ok: true, data };
           } catch (err) {
             return { error: err?.message || String(err) };
@@ -25578,7 +30083,7 @@ ${blockText}` : blockText;
         }
         case "importAll": {
           try {
-            const res = await repo.importAll(msg.data);
+            const res = await repo3.importAll(msg.data);
             return res;
           } catch (err) {
             return { error: err?.message || String(err) };
@@ -25586,7 +30091,7 @@ ${blockText}` : blockText;
         }
         case "isDbEmpty": {
           try {
-            const empty = await repo.isDbEmpty();
+            const empty = await repo3.isDbEmpty();
             return { ok: true, empty };
           } catch (err) {
             return { error: err?.message || String(err) };

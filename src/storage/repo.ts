@@ -1,7 +1,12 @@
-import { openAidDb, type AdventureMeta, type ActionRow } from "./db";
+import { openAidDb, type AdventureMeta, type ActionRow, type VividMemoryLogEntry, type InjectionLogEntry, type CrystallizedArchiveEntry, type NpcMemoryBlock } from "./db";
 import type { CanonicalAction, OpRecord, CardRow, Version, Settings, GlobalAsset } from "../shared/types";
+import type { CrystallizedState } from "../inference/crystallized";
+import type { PhenotypeRecord } from "../inference/phenotype/types";
 
-const BACKUP_STORES = ["adventures", "actions", "operations", "cards", "versions", "settings", "globalAssets"] as const;
+export type { CrystallizedArchiveEntry, NpcMemoryBlock };
+
+/** Every IndexedDB store, for full backup/restore. */
+const BACKUP_STORES = ["adventures", "actions", "operations", "cards", "versions", "settings", "globalAssets", "crystallizedLog", "injectionLog", "crystallizedState", "crystallizedArchive", "phenotype", "npcMemoryBank"] as const;
 
 
 function byCreatedAt(a: CanonicalAction, b: CanonicalAction): number {
@@ -83,24 +88,42 @@ export class Repo {
 
   async deleteAdventure(shortId: string): Promise<void> {
     const db = await openAidDb();
-    const tx = db.transaction(["adventures", "actions", "cards", "versions"], "readwrite");
+    const tx = db.transaction(["adventures", "actions", "cards", "versions", "crystallizedLog", "injectionLog", "crystallizedState", "crystallizedArchive", "phenotype", "npcMemoryBank"], "readwrite");
     await tx.objectStore("adventures").delete(shortId);
-    
+
     const actionKeys = await tx.objectStore("actions").index("by-shortId").getAllKeys(shortId);
     for (const key of actionKeys) {
       await tx.objectStore("actions").delete(key);
     }
-    
+
     const cardKeys = await tx.objectStore("cards").index("by-shortId").getAllKeys(shortId);
     for (const key of cardKeys) {
       await tx.objectStore("cards").delete(key);
     }
-    
+
     const versionKeys = await tx.objectStore("versions").index("by-shortId").getAllKeys(shortId);
     for (const key of versionKeys) {
       await tx.objectStore("versions").delete(key);
     }
-    
+
+    const logKeys = await tx.objectStore("crystallizedLog").index("by-shortId").getAllKeys(shortId);
+    for (const key of logKeys) await tx.objectStore("crystallizedLog").delete(key);
+
+    const injKeys = await tx.objectStore("injectionLog").index("by-shortId").getAllKeys(shortId);
+    for (const key of injKeys) await tx.objectStore("injectionLog").delete(key);
+
+    const csKeys = await tx.objectStore("crystallizedState").index("by-shortId").getAllKeys(shortId);
+    for (const key of csKeys) await tx.objectStore("crystallizedState").delete(key);
+
+    const caKeys = await tx.objectStore("crystallizedArchive").index("by-shortId").getAllKeys(shortId);
+    for (const key of caKeys) await tx.objectStore("crystallizedArchive").delete(key);
+
+    const phKeys = await tx.objectStore("phenotype").index("by-shortId").getAllKeys(shortId);
+    for (const key of phKeys) await tx.objectStore("phenotype").delete(key);
+
+    const nmbKeys = await tx.objectStore("npcMemoryBank").index("by-shortId").getAllKeys(shortId);
+    for (const key of nmbKeys) await tx.objectStore("npcMemoryBank").delete(key);
+
     await tx.done;
   }
 
@@ -228,6 +251,20 @@ export class Repo {
       console.log("[AID repo] Migrating autoRegenerateNativeMemories ->", settings.autoRegenerateMemoryBankEntry, "(autoRegenerateMemoryBankEntry).");
       await this.setSettings(settings);
     }
+    // Migration: the former negative-polarity `manualMode` ("suppress automatic updates") toggle is
+    // replaced by the positive-polarity `enableAutomaticUpdates` (default OFF). Carry an explicit
+    // choice forward: a user who UNchecked manual mode (manualMode === false) wanted automatic
+    // updates → true; one who left it checked (true) did not → false. Prefer an already-set new key
+    // (if somehow both exist), then drop the stale one. Absent manualMode → no migration → new key
+    // stays undefined → reads as off.
+    if ((settings as any).manualMode !== undefined) {
+      if (settings.enableAutomaticUpdates === undefined) {
+        settings.enableAutomaticUpdates = ((settings as any).manualMode === false);
+      }
+      delete (settings as any).manualMode;
+      console.log("[AID repo] Migrating manualMode ->", settings.enableAutomaticUpdates, "(enableAutomaticUpdates).");
+      await this.setSettings(settings);
+    }
     if (settings.cardCommands?.memoraid) {
       const HISTORICAL_MEMORAID_DEFAULTS = [
         'Generate thoughts for {{title}} in the first-person perspective, capturing their subjective reactions and internal feelings about recent events, especially in relation to {protagonist}. Format the output strictly as a bulleted list inside square brackets, e.g. [\n- thought\n- thought\n]. Write exactly how {{title}} would think in this moment, using their profile and voice. Keep it under 300 characters total.',
@@ -240,10 +277,13 @@ export class Repo {
         // Pre-example default (had the [none] clause but no worked example / hard rules; weaker models like Gemma dumped a planning scaffold instead of the bracketed block).
         'Generate {{title}}\'s immediate, first-person thoughts as a short, high-impact bulleted list in their own distinct voice. Focus heavily on their specific background, social standing, and behavioral defense mechanisms. For romantic, high-tension, or attraction-based dynamics, express interest through psychological, verbal, or tactical engagement rather than defaulting to physical proximity. Characters must maintain realistic personal space and adhere to their internal boundaries unless a physical escalation is explicitly earned by the immediate narrative context.\n\nCRITICAL FOCUS DIRECTIVE: The thoughts generated must be the character\'s reaction strictly and exclusively to the VERY LATEST (the most recent/last) action shown in the Narrative Context. Do not generate thoughts about earlier events, past actions, or characters who have already exited the scene. If the character {{title}} is not present, mentioned, or active in the latest action, respond with exactly "[none]" (including brackets) and nothing else.\n\nYou MUST follow a strict cognitive loop of intake stimuli, thought reaction, and action output, formatting exactly as these three labeled bullets:\n- Intake: [1 sentence describing the direct sensory, physical, or verbal stimulus they are perceiving from {protagonist} or the environment in the latest action]\n- Thought: [1 sentence describing their internal opinion, cognitive conflict, or feeling about this latest stimulus]\n- Action: [1 sentence describing their immediate impulse, decision, or plan of action to resolve or advance the immediate interaction]\n\nDo not use markdown, prefix headers besides the three labels, or empty lines. Wrap the entire response in square brackets: [\n- Intake: ...\n- Thought: ...\n- Action: ...\n].',
         // Example-based default with <...> placeholders — the placeholders backfired: weak models (Gemma) echoed the placeholder descriptions and/or returned a character profile instead of thoughts.
-        'Generate {{title}}\'s immediate, first-person thoughts as a short, high-impact bulleted list in their own distinct voice. Focus heavily on their specific background, social standing, and behavioral defense mechanisms. For romantic, high-tension, or attraction-based dynamics, express interest through psychological, verbal, or tactical engagement rather than defaulting to physical proximity. Characters must maintain realistic personal space and adhere to their internal boundaries unless a physical escalation is explicitly earned by the immediate narrative context.\n\nCRITICAL FOCUS DIRECTIVE: Generate {{title}}\'s reaction strictly and exclusively to the VERY LATEST action shown in the context. Ignore earlier events and characters who have exited the scene. If {{title}} is not present, mentioned, or active in the latest action, output exactly [none] and nothing else.\n\nOUTPUT FORMAT — output ONLY a single bracketed block in EXACTLY this shape, with these three lines and nothing else:\n[\n- Intake: <one sentence: the direct sensory, physical, or verbal stimulus {{title}} perceives from {protagonist} or the environment in the latest action>\n- Thought: <one sentence: {{title}}\'s internal opinion, conflict, or feeling about that stimulus>\n- Action: <one sentence: {{title}}\'s immediate impulse, decision, or next move>\n]\n\nHARD RULES (weaker models tend to break these — do not):\n- Replace each <...> with a single plain sentence in {{title}}\'s own first-person voice. Base every line ONLY on facts present in the provided context; do not invent events, objects, or actions that did not occur.\n- Use ONLY the three labels "- Intake:", "- Thought:", "- Action:". NEVER output any other label such as "Character:", "Goal:", "Stimulus:", or "Latest Action:", and never restate {{title}}\'s profile.\n- Do NOT restate, summarize, plan, or narrate the action, the scene, the character, or your task. Just write the three thoughts.\n- Do NOT use markdown, asterisks (*), bold, headings, indentation, nested lists, or blank lines. Every line starts with "- ".\n- Output nothing before the opening "[" or after the closing "]".\n\nExample of a correctly formatted response (illustrative only — do NOT reuse its wording or facts):\n[\n- Intake: She slides the sealed letter across the table to me without a word.\n- Thought: This is a test of my discretion as much as it is an errand.\n- Action: I take it, tuck it into my sleeve, and hold her gaze evenly.\n]'
+        'Generate {{title}}\'s immediate, first-person thoughts as a short, high-impact bulleted list in their own distinct voice. Focus heavily on their specific background, social standing, and behavioral defense mechanisms. For romantic, high-tension, or attraction-based dynamics, express interest through psychological, verbal, or tactical engagement rather than defaulting to physical proximity. Characters must maintain realistic personal space and adhere to their internal boundaries unless a physical escalation is explicitly earned by the immediate narrative context.\n\nCRITICAL FOCUS DIRECTIVE: Generate {{title}}\'s reaction strictly and exclusively to the VERY LATEST action shown in the context. Ignore earlier events and characters who have exited the scene. If {{title}} is not present, mentioned, or active in the latest action, output exactly [none] and nothing else.\n\nOUTPUT FORMAT — output ONLY a single bracketed block in EXACTLY this shape, with these three lines and nothing else:\n[\n- Intake: <one sentence: the direct sensory, physical, or verbal stimulus {{title}} perceives from {protagonist} or the environment in the latest action>\n- Thought: <one sentence: {{title}}\'s internal opinion, conflict, or feeling about that stimulus>\n- Action: <one sentence: {{title}}\'s immediate impulse, decision, or next move>\n]\n\nHARD RULES (weaker models tend to break these — do not):\n- Replace each <...> with a single plain sentence in {{title}}\'s own first-person voice. Base every line ONLY on facts present in the provided context; do not invent events, objects, or actions that did not occur.\n- Use ONLY the three labels "- Intake:", "- Thought:", "- Action:". NEVER output any other label such as "Character:", "Goal:", "Stimulus:", or "Latest Action:", and never restate {{title}}\'s profile.\n- Do NOT restate, summarize, plan, or narrate the action, the scene, the character, or your task. Just write the three thoughts.\n- Do NOT use markdown, asterisks (*), bold, headings, indentation, nested lists, or blank lines. Every line starts with "- ".\n- Output nothing before the opening "[" or after the closing "]".\n\nExample of a correctly formatted response (illustrative only — do NOT reuse its wording or facts):\n[\n- Intake: She slides the sealed letter across the table to me without a word.\n- Thought: This is a test of my discretion as much as it is an errand.\n- Action: I take it, tuck it into my sleeve, and hold her gaze evenly.\n]',
+        // Prior public-fork default: worked-example + hard-rules 3-line Intake/Thought/Action block
+        // (superseded by the two-bullet Intake/Thought + OFFSTAGE lens/monologue template).
+        'Generate {{title}}\'s immediate, first-person thoughts as a short, high-impact bulleted list in their own distinct voice. Focus heavily on their specific background, social standing, and behavioral defense mechanisms. For romantic, high-tension, or attraction-based dynamics, express interest through psychological, verbal, or tactical engagement rather than defaulting to physical proximity. Characters must maintain realistic personal space and adhere to their internal boundaries unless a physical escalation is explicitly earned by the immediate narrative context.\n\nCRITICAL FOCUS DIRECTIVE: Generate {{title}}\'s reaction strictly and exclusively to the VERY LATEST action shown in the context. Ignore earlier events and characters who have exited the scene. If {{title}} is not present, mentioned, or active in the latest action, output exactly [none] and nothing else.\n\nOUTPUT: Write EXACTLY three lines, wrapped in square brackets, formatted like the example below — a "- Intake:" line, a "- Thought:" line, and a "- Action:" line. Each line is ONE concrete sentence written in {{title}}\'s own first-person voice reacting to the latest action (the player character is named {protagonist}), grounded only in facts from the provided context.\n\nExample of the required format (illustrative only — write your OWN content; do NOT reuse these words or facts):\n[\n- Intake: She slides the sealed letter across the table to me without a word.\n- Thought: This is a test of my discretion as much as it is an errand.\n- Action: I take it, tuck it into my sleeve, and hold her gaze evenly.\n]\n\nHARD RULES (weaker models break these — do not):\n- Write real, specific content — NOT a description of what each line should contain — and do NOT copy the example.\n- You are writing three momentary thoughts, NOT a character profile. NEVER output a profile field or any label other than "- Intake:", "- Thought:", "- Action:" — no "Appearance:", "Personality:", "Psychology:", "Worldview:", "Dynamic:", "Character:", "Goal:", "Latest Action:", or "Stimulus:".\n- Base every line ONLY on facts in the provided context; do not invent events, objects, or actions.\n- Do NOT restate, summarize, plan, or narrate the action, the scene, the character, or your task.\n- Do NOT use markdown, asterisks (*), bold, headings, indentation, or blank lines. Each line starts with "- ".\n- Output nothing before the opening "[" or after the closing "]".'
       ];
       if (HISTORICAL_MEMORAID_DEFAULTS.includes(settings.cardCommands.memoraid)) {
-        console.log("[AID repo] Migrating old memoraid card command to the new Intake-Thought-Action template.");
+        console.log("[AID repo] Migrating old memoraid card command to the two-bullet (Intake/Thought + OFFSTAGE) template.");
         const { DEFAULT_CARD_COMMANDS } = await import("../inference/card-command");
         settings.cardCommands.memoraid = DEFAULT_CARD_COMMANDS.memoraid!;
         await this.setSettings(settings);
@@ -340,6 +380,135 @@ export class Repo {
   async deleteGlobalAsset(id: string): Promise<void> {
     const db = await openAidDb();
     await db.delete("globalAssets", id);
+  }
+
+  /** Force-archive (soft-delete) specific local cards by id, e.g. tombstoned Life cards the server
+   *  still lists. Idempotent: already-deleted cards keep their original deletedAt. */
+  async markCardsDeleted(shortId: string, ids: string[]): Promise<void> {
+    if (!ids.length) return;
+    const db = await openAidDb();
+    const want = new Set(ids);
+    const tx = db.transaction("cards", "readwrite");
+    let cursor = await tx.store.index("by-shortId").openCursor(shortId);
+    while (cursor) {
+      const c = cursor.value as CardRow;
+      if (want.has(c.id) && c.deletedAt == null) {
+        await cursor.update({ ...c, deletedAt: new Date().toISOString() });
+      }
+      cursor = await cursor.continue();
+    }
+    await tx.done;
+  }
+
+  /** Hard-delete soft-deleted mirror rows that duplicate a PRESENT live card by (title, type) under a
+   *  different id — leftover rows from an id divergence that would otherwise mask the live card in the
+   *  roster. Genuine archives (no live same-title twin) and active rows are left untouched. Versions
+   *  are keyed by cardId separately and are not affected. */
+  async purgeStaleDeletedDuplicates(shortId: string, live: { id: string; title?: string; type?: string }[]): Promise<void> {
+    const norm = (s?: string) => String(s || "").trim().toLowerCase();
+    const key = (title?: string, type?: string) => `${norm(title)}::${norm(type) || "character"}`;
+    const liveByKey = new Map<string, string>();
+    for (const c of live) { const t = norm(c.title); if (t) liveByKey.set(key(c.title, c.type), c.id); }
+    const db = await openAidDb();
+    const tx = db.transaction("cards", "readwrite");
+    let cursor = await tx.store.index("by-shortId").openCursor(shortId);
+    while (cursor) {
+      const c = cursor.value as CardRow;
+      if (c.deletedAt) {
+        const liveId = liveByKey.get(key(c.title, c.type));
+        if (liveId && liveId !== c.id) await cursor.delete();
+      }
+      cursor = await cursor.continue();
+    }
+    await tx.done;
+  }
+
+  // ── Crystallized / Living Characters / phenotype / NPC memory stores ──
+  async appendVividMemories(entries: VividMemoryLogEntry[]): Promise<void> {
+    const db = await openAidDb();
+    const tx = db.transaction("crystallizedLog", "readwrite");
+    for (const entry of entries) {
+      await tx.store.put(entry);
+    }
+    await tx.done;
+  }
+
+  async getVividMemoryLog(shortId: string, characterKey?: string): Promise<VividMemoryLogEntry[]> {
+    const db = await openAidDb();
+    if (characterKey) {
+      return db.getAllFromIndex("crystallizedLog", "by-char", [shortId, characterKey]);
+    } else {
+      return db.getAllFromIndex("crystallizedLog", "by-shortId", shortId);
+    }
+  }
+
+  async appendInjectionLog(entries: InjectionLogEntry[]): Promise<void> {
+    const db = await openAidDb();
+    const tx = db.transaction("injectionLog", "readwrite");
+    for (const entry of entries) await tx.store.put(entry);
+    await tx.done;
+  }
+
+  async getInjectionLog(shortId: string): Promise<InjectionLogEntry[]> {
+    const db = await openAidDb();
+    return db.getAllFromIndex("injectionLog", "by-shortId", shortId);
+  }
+
+  async getCrystallizedState(shortId: string, characterKey: string): Promise<CrystallizedState | undefined> {
+    const db = await openAidDb();
+    const row = await db.get("crystallizedState", [shortId, characterKey]);
+    return row?.state;
+  }
+
+  async putCrystallizedState(shortId: string, characterKey: string, state: CrystallizedState): Promise<void> {
+    const db = await openAidDb();
+    await db.put("crystallizedState", { shortId, characterKey, state });
+  }
+
+  async appendCrystallizedArchive(entries: CrystallizedArchiveEntry[]): Promise<void> {
+    if (!entries.length) return;
+    const db = await openAidDb();
+    const tx = db.transaction("crystallizedArchive", "readwrite");
+    for (const e of entries) await tx.store.put(e);
+    await tx.done;
+  }
+
+  async getCrystallizedArchive(shortId: string): Promise<CrystallizedArchiveEntry[]> {
+    const db = await openAidDb();
+    return db.getAllFromIndex("crystallizedArchive", "by-shortId", shortId);
+  }
+
+  async getPhenotype(shortId: string, characterKey: string): Promise<PhenotypeRecord | undefined> {
+    const db = await openAidDb();
+    return db.get("phenotype", [shortId, characterKey]);
+  }
+
+  async putPhenotype(rec: PhenotypeRecord): Promise<void> {
+    const db = await openAidDb();
+    await db.put("phenotype", rec);
+  }
+
+  async getNpcMemoryBlocks(shortId: string, characterKey: string): Promise<NpcMemoryBlock[]> {
+    const db = await openAidDb();
+    return db.getAllFromIndex("npcMemoryBank", "by-char", [shortId, characterKey]);
+  }
+
+  async putNpcMemoryBlock(block: NpcMemoryBlock): Promise<void> {
+    const db = await openAidDb();
+    await db.put("npcMemoryBank", block);
+  }
+
+  async deleteNpcMemoryBlocks(shortId: string): Promise<void> {
+    const db = await openAidDb();
+    const tx = db.transaction("npcMemoryBank", "readwrite");
+    const keys = await tx.store.index("by-shortId").getAllKeys(shortId);
+    for (const key of keys) await tx.store.delete(key);
+    await tx.done;
+  }
+
+  async deleteNpcMemoryBlock(shortId: string, characterKey: string, blockId: string): Promise<void> {
+    const db = await openAidDb();
+    await db.delete("npcMemoryBank", [shortId, characterKey, blockId]);
   }
 }
 

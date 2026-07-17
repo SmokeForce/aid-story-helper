@@ -1,5 +1,40 @@
 "use strict";
 (() => {
+  // src/content/browser-helper.ts
+  var g = typeof globalThis !== "undefined" ? globalThis : typeof window !== "undefined" ? window : {};
+  var rawBrowser = g.browser || g.chrome;
+  var browser = rawBrowser ? new Proxy(rawBrowser, {
+    get(target, prop) {
+      if (prop === "runtime") {
+        const runtime = target.runtime;
+        if (!runtime) return void 0;
+        return new Proxy(runtime, {
+          get(rTarget, rProp) {
+            if (rProp === "sendMessage") {
+              return (...args) => {
+                try {
+                  if (!rTarget || !rTarget.id) {
+                    return Promise.reject(new Error("Extension context invalidated"));
+                  }
+                  return rTarget.sendMessage(...args).catch((err) => {
+                    if (err && err.message && err.message.includes("Extension context invalidated")) {
+                      return { error: "Extension context invalidated" };
+                    }
+                    throw err;
+                  });
+                } catch (e) {
+                  return Promise.reject(e);
+                }
+              };
+            }
+            return Reflect.get(rTarget, rProp);
+          }
+        });
+      }
+      return Reflect.get(target, prop);
+    }
+  }) : void 0;
+
   // node_modules/qr-creator/dist/qr-creator.es6.min.js
   var G = null;
   var H = class {
@@ -620,236 +655,9 @@
   }());
   var qr_creator_es6_min_default = QrCreator;
 
-  // src/inference/plot.ts
-  var LORE_HINTS = /inner circle|plot secret|^secret\b|^-?\s*plot\b/i;
-  function blockName(inner) {
-    const text = inner.trim();
-    const firstLine = (text.split("\n").find((l) => l.trim()) ?? "").trim();
-    const pm = text.match(/(?:Your|Player)\s+name:\s*([^\n]+)/i);
-    if (pm) return { name: pm[1].trim(), isPlayer: true };
-    if (LORE_HINTS.test(firstLine)) return null;
-    if (/^(?:Current|Active)\s+Location/i.test(firstLine)) return null;
-    const nm = firstLine.match(/^([A-Z][^\n:]*?)\s+(?:is|are)\b/);
-    if (nm) return { name: nm[1].trim(), isPlayer: false };
-    const hm = firstLine.match(/^([A-Z][\w '´.-]{1,40}):/);
-    if (hm && !LORE_HINTS.test(hm[1])) return { name: hm[1].trim(), isPlayer: false };
-    return null;
-  }
-  function parsePlotEssentials(memory) {
-    if (!memory) return [];
-    const blocks = [];
-    const re = /\[([^\]]+)\]|\{([^\}]+)\}/g;
-    let m;
-    while ((m = re.exec(memory)) !== null) {
-      const content = m[1] !== void 0 ? m[1] : m[2];
-      const info = blockName(content);
-      if (info) blocks.push({ name: info.name, text: content.trim(), isPlayer: info.isPlayer });
-    }
-    return blocks;
-  }
-  function getRestOfPlotEssentials(memory) {
-    if (!memory) return "";
-    const re = /\[([^\]]+)\]|\{([^\}]+)\}/g;
-    let lastIndex = 0;
-    let result = "";
-    let m;
-    while ((m = re.exec(memory)) !== null) {
-      const content = m[1] !== void 0 ? m[1] : m[2];
-      const info = blockName(content);
-      if (info) {
-        result += memory.slice(lastIndex, m.index);
-        lastIndex = re.lastIndex;
-      }
-    }
-    result += memory.slice(lastIndex);
-    return result.trim();
-  }
-
-  // src/inference/engine.ts
-  var DEFAULT_PROMPT_SECTION_1 = [
-    "You maintain character descriptions for an interactive, second-person, present-tense story.",
-    '"You"/"your" always refers to the player character named {protagonist}.',
-    "Each `characters` entry has a name, currentEntry, and source: 'plot' = part of the always-in-context Plot Essentials (central/player characters); 'card' = a Story Card (only present when triggered).",
-    "Propose action:\"update\" ONLY for characters in `characters` whose state the narrative has concretely changed. Preserve the Entry's existing labeled sections (e.g. 'Appearance:','Personality:') and revise only what the evidence supports.",
-    "Do NOT invent new characters and do NOT create Story Cards. Only update entries already provided in `characters`."
-  ].join("\n");
-  var DEFAULT_PROMPT_SECTION_2 = [
-    "CORE PERSONALITY ESSENCE & COMPRESSION RULES:",
-    "  - Focus strictly on 'Core Personality Trait' changes and behavioral shifts, keeping only the barest high-level context to explain why their personality has changed that way. We want to capture the character's essence, psychological filters, and worldview rather than log their story actions or situational scenes.",
-    "  - For Appearance, focus on what the character 'usually' looks like (e.g., physical features, default public wardrobe, characteristic style) and typical habits (e.g. public wardrobe choices vs. private/at-home preferences). Absolutely ban transient physical states or highly situational details (e.g., do NOT log smudged mascara, exhausted/red eyes, or specific outfits from a single scene; instead record: 'Usually dresses strategically in public to project a desired image, but now prefers oversized, comfortable clothing in private or safe settings').",
-    "  - Absolutely forbid narrative 'fluff', specific dialogue summaries, situational scene recaps, transient settings, item logs, or passing interactions (e.g. do NOT write about coffee orders, penthouse scenes, or specific conversations; instead, record the permanent psychological shift and its driver, e.g. 'Motivated by Smoke's public authenticity, she has discarded her manipulative schemes and is resolved to take ownership of her past rumor campaign against Mia').",
-    "  - DO NOT repeat or include descriptions of other characters' actions, status, or behaviors (e.g. do NOT write about how Smoke treats A-list women or what he does; focus *strictly* on the target character's own internal traits).",
-    "  - Reference established groups or roles where applicable (e.g. refer to a character's associates collectively as their 'inner circle' if defined in context, rather than listing individual names like Chloe, Jasmine, Marcus, etc. redundantly).",
-    "  - Treat entries as active, lightweight, high-density LLM instruction guides for roleplaying the character, not as a story timeline.",
-    "  - [CRITICAL RELATIONSHIP PACING DIRECTIVE]: When updating the 'Dynamic ({protagonist}):' relationship field, you must enforce realistic psychological inertia and continuity based strictly on the character's pre-existing profile. Relationships cannot leap from strangers or casual acquaintances to deep intimacy, unearned trust, or intense codependency\u2014nor to absolute hatred, permanent enmity, or extreme paranoia\u2014within a handful of turns. Transition updates must capture the messy, realistic friction of changes (e.g. emotional whiplash, caution, or cognitive dissonance) and show progressive organic softening or hardening, rather than sudden extreme swings or total psychological submission. Focus strictly on the immediate realistic increment of their interaction."
-  ].join("\n");
-  var DEFAULT_PROMPT_SECTION_3 = [
-    "PLOT ESSENTIALS vs. STORY CARDS LIMITS (CEILINGS, NOT TARGETS):",
-    "    * Limits are absolute emergency ceilings: 3,500 characters for the protagonist ({protagonist}), and 2,000 characters for all other central Plot Essentials or Story Cards.",
-    "    * Limits are NOT targets. Shorter, high-density entries are highly preferred. If a character description can be kept at 600 characters, do NOT write 1,900 characters. Padding or inflating an entry with decorative adjectives or unnecessary narrative history is a failure.",
-    "    * Do not use the available character budget just because it exists. Conserve as much space as possible so the total story context window remains large.",
-    "    * When proposing an update, prioritize pruning, condensing, or deleting outdated/redundant information so that new updates do not continuously grow the character's size."
-  ].join("\n");
-  var DEFAULT_PROMPT_SECTION_4 = [
-    "Never fabricate details absent from both the entry and the narrative. changeSummary is a short plain-English line describing what changed.",
-    'Respond with STRICT JSON only: {"proposals":[{"name","action":"update","newEntry","changeSummary","suggestedTriggers"?}]}. Return {"proposals":[]} if nothing changed.'
-  ].join("\n");
-  var DEFAULT_SYSTEM_PROMPT = [
-    DEFAULT_PROMPT_SECTION_1,
-    DEFAULT_PROMPT_SECTION_2,
-    DEFAULT_PROMPT_SECTION_3,
-    DEFAULT_PROMPT_SECTION_4
-  ].join("\n\n");
-
-  // src/inference/card-command.ts
-  var DEFAULT_CARD_COMMANDS = {
-    character: `Generate an information card entry for {{title}} in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. Update based strictly on concrete narrative changes, preserving existing labeled fields on their own lines. Keep it high-density and under 600 characters total to prevent server truncation. Focus on psychological realism by structuring the entry into these three fields:
-Appearance: 1-2 sentences on enduring physical features and style.
-Complexity (Paradox & Filters): 1-2 sentences on their central internal contradiction/repressed vulnerability and how they screen reality.
-Dynamic ({protagonist}): 1-2 sentences on their psychological friction or evolving attitude toward {protagonist}.
-[CRITICAL RELATIONSHIP PACING DIRECTIVE] Enforce realistic psychological inertia in "Dynamic ({protagonist})": relationships cannot leap from strangers or casual acquaintances to deep intimacy, unearned trust, or intense codependency\u2014nor to absolute hatred, permanent enmity, or extreme paranoia\u2014within a handful of turns. Transition updates must capture the messy, realistic friction of changes (e.g. emotional whiplash, caution, or cognitive dissonance) and show progressive organic softening or hardening, rather than sudden extreme swings or total psychological submission. Focus on the immediate realistic increment of their interaction.
-Forbid narrative fluff, scene recaps, and empty lines. Treat this as a high-density roleplay guide, not a story timeline.`,
-    class: `Generate an information card entry for {{title}}, a character class or archetype in the D&D/MMO sense, in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. Update based strictly on concrete narrative changes, preserving existing labeled fields (e.g., Role:, Abilities:, Progression:) on their own lines and revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Focus on the class's defining role, signature abilities and skills, mechanics, and how it has progressed or changed \u2014 not story events or scenes. Forbid narrative fluff, dialogue summaries, scene recaps, transient details, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
-    race: `Generate an information card entry for {{title}}, a species or race, in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. Update based strictly on concrete narrative changes, preserving existing labeled fields (e.g., Traits:, Culture:, Lore:) on their own lines and revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Focus on innate traits, culture, and lore \u2014 what the story reveals about the group as a whole \u2014 not individual scenes or transient events. Forbid narrative fluff, dialogue summaries, scene recaps, transient details, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
-    location: `Generate an information card entry for {{title}}, a place or location, in an interactive, second-person, present-tense story. Write the entry strictly in the third person about {{title}}: never use "you" or "your". The entry MUST begin with the field Name: {{title}} on its own first line \u2014 the entry text is injected into the story without its card title, so it must self-identify which place it describes. Then continue with the fields Type:, Located In:, and Ownership:. The Located In: field is MANDATORY and must trace the spatial containment hierarchy from the immediate parent outward to the largest relevant container (room > building/structure > settlement/town > region/realm or border), separated by " > ", in the exact form: Located In: [immediate parent structure] > [settlement or town] > [region, realm, or border]. Always reuse the exact names of places already established in the story or on other location cards so hierarchies stay consistent and their triggers fire; if a parent place is not yet named, state the most specific container the narrative supports rather than omitting the field. Then continue with these labeled fields, each on its own line, without markdown or empty lines:
-Description: what the place IS and its enduring strategic or narrative purpose \u2014 what it is suited for and why it matters.
-Inhabitants: who lives in, works in, or frequents the place (peoples, professions, factions) and any enduring social dynamic among them (e.g., an uneasy truce).
-Atmosphere: 1-2 sentences on the place's lasting character and how it is experienced, including defining contrasts (e.g., intimidating from outside but warm and livable within).
-Features: permanent structural features and layout.
-Notable Items: specific permanent contents. You must preserve the literal names of specific books, exact instrument models, and unique trophies from the source text; never generalize or substitute them with generic placeholders. Keep the entry high-density and well under the absolute emergency ceiling of 2,000 characters; do not pad. Prune transient scene recaps, story events, and redundant decorative wording, but PRESERVE the enduring flavor that defines the place \u2014 its atmosphere, social fabric, and narrative role are required content, not fluff. The entry must serve as both a spatial and a narrative guide for the AI engine.`,
-    faction: `Generate an information card entry for {{title}}, a group, organization, or faction, in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. Update based strictly on concrete narrative changes, preserving existing labeled fields (e.g., Goals:, Membership:, Leadership:, Status:) on their own lines and revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Focus on the faction's goals, membership, leadership, alliances and rivalries, and shifts in power or status \u2014 not individual scenes. Forbid narrative fluff, dialogue summaries, scene recaps, transient details, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
-    custom: `Generate an information card entry for {{title}} in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant to {{title}}. Update based strictly on concrete narrative changes, preserving existing labeled fields on their own lines and revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Track whatever is most salient and enduring for this kind of entry as the story reveals it; capture lasting state, not transient scenes. Forbid narrative fluff, dialogue summaries, scene recaps, transient settings, item logs, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
-    memoraid: `Generate {{title}}'s immediate, first-person thoughts as a short, high-impact bulleted list in their own distinct voice. Focus heavily on their specific background, social standing, and behavioral defense mechanisms. For romantic, high-tension, or attraction-based dynamics, express interest through psychological, verbal, or tactical engagement rather than defaulting to physical proximity. Characters must maintain realistic personal space and adhere to their internal boundaries unless a physical escalation is explicitly earned by the immediate narrative context.
-
-CRITICAL FOCUS DIRECTIVE: Generate {{title}}'s reaction strictly and exclusively to the VERY LATEST action shown in the context. Ignore earlier events and characters who have exited the scene. If {{title}} is not present, mentioned, or active in the latest action, output exactly [none] and nothing else.
-
-OUTPUT: Write EXACTLY three lines, wrapped in square brackets, formatted like the example below \u2014 a "- Intake:" line, a "- Thought:" line, and a "- Action:" line. Each line is ONE concrete sentence written in {{title}}'s own first-person voice reacting to the latest action (the player character is named {protagonist}), grounded only in facts from the provided context.
-
-Example of the required format (illustrative only \u2014 write your OWN content; do NOT reuse these words or facts):
-[
-- Intake: She slides the sealed letter across the table to me without a word.
-- Thought: This is a test of my discretion as much as it is an errand.
-- Action: I take it, tuck it into my sleeve, and hold her gaze evenly.
-]
-
-HARD RULES (weaker models break these \u2014 do not):
-- Write real, specific content \u2014 NOT a description of what each line should contain \u2014 and do NOT copy the example.
-- You are writing three momentary thoughts, NOT a character profile. NEVER output a profile field or any label other than "- Intake:", "- Thought:", "- Action:" \u2014 no "Appearance:", "Personality:", "Psychology:", "Worldview:", "Dynamic:", "Character:", "Goal:", "Latest Action:", or "Stimulus:".
-- Base every line ONLY on facts in the provided context; do not invent events, objects, or actions.
-- Do NOT restate, summarize, plan, or narrate the action, the scene, the character, or your task.
-- Do NOT use markdown, asterisks (*), bold, headings, indentation, or blank lines. Each line starts with "- ".
-- Output nothing before the opening "[" or after the closing "]".`
-  };
-  var DEFAULT_FORMATTING_MODE = "squareBrackets";
-
-  // src/shared/types.ts
-  function isLocalDbEmpty(state) {
-    const actions = state.actionCount ?? state.actionsCount ?? 0;
-    return (state.adventures?.length ?? 0) === 0 && actions === 0 && (state.cards?.length ?? 0) === 0;
-  }
-
-  // src/content/browser-helper.ts
-  var g = typeof globalThis !== "undefined" ? globalThis : typeof window !== "undefined" ? window : {};
-  var rawBrowser = g.browser || g.chrome;
-  var browser = rawBrowser ? new Proxy(rawBrowser, {
-    get(target, prop) {
-      if (prop === "runtime") {
-        const runtime = target.runtime;
-        if (!runtime) return void 0;
-        return new Proxy(runtime, {
-          get(rTarget, rProp) {
-            if (rProp === "sendMessage") {
-              return (...args) => {
-                try {
-                  if (!rTarget || !rTarget.id) {
-                    return Promise.reject(new Error("Extension context invalidated"));
-                  }
-                  return rTarget.sendMessage(...args).catch((err) => {
-                    if (err && err.message && err.message.includes("Extension context invalidated")) {
-                      return { error: "Extension context invalidated" };
-                    }
-                    throw err;
-                  });
-                } catch (e) {
-                  return Promise.reject(e);
-                }
-              };
-            }
-            return Reflect.get(rTarget, rProp);
-          }
-        });
-      }
-      return Reflect.get(target, prop);
-    }
-  }) : void 0;
-
-  // src/content/panel.ts
-  var TYPE_KEYS = ["character", "class", "race", "location", "faction", "custom", "memoraid"];
-  function setSafeHTML(el, html) {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, "text/html");
-    el.textContent = "";
-    while (doc.head.firstChild) {
-      el.appendChild(doc.head.firstChild);
-    }
-    while (doc.body.firstChild) {
-      el.appendChild(doc.body.firstChild);
-    }
-  }
-  var refreshCb = null;
-  function triggerRefresh() {
-    if (refreshCb) {
-      refreshCb();
-    } else {
-      window.dispatchEvent(new CustomEvent("aid-refresh-panel"));
-    }
-  }
-  function mountPanel() {
-    const getManifestVersion = () => {
-      try {
-        if (typeof browser !== "undefined" && browser.runtime?.getManifest) {
-          const manifest = browser.runtime.getManifest();
-          if (manifest && manifest.version) return manifest.version;
-        }
-      } catch (e) {
-      }
-      try {
-        const g2 = globalThis;
-        if (typeof g2.chrome !== "undefined" && g2.chrome.runtime?.getManifest) {
-          const manifest = g2.chrome.runtime.getManifest();
-          if (manifest && manifest.version) return manifest.version;
-        }
-      } catch (e) {
-      }
-      return "0.2.5";
-    };
-    const version = getManifestVersion();
-    let setActiveLocationCb = null;
-    let respondToProperNounSuggestionCb = null;
-    let updateProperNounLogCb = null;
-    let linkProperNounToCardCb = null;
-    let deleteProperNounLogCb = null;
-    let clearProperNounLogsCb = null;
-    let saveGlobalAssetCb = null;
-    let deleteGlobalAssetCb = null;
-    let importGlobalAssetCb = null;
-    let providerChangeCb = null;
-    let backupAllCb = null;
-    let restoreAllCb = null;
-    let saveCardValueCb = null;
-    let selfHealDismissed = false;
-    let managerShowSettings = false;
-    let api;
-    const host = document.createElement("div");
-    const savedLeft = localStorage.getItem("aid-tracker-pos-left");
-    const savedTop = localStorage.getItem("aid-tracker-pos-top");
-    if (savedLeft && savedTop) {
-      host.style.cssText = `position:fixed;z-index:2147483647;left:${savedLeft};top:${savedTop};bottom:auto;`;
-    } else {
-      host.style.cssText = "position:fixed;z-index:2147483647;bottom:12px;left:12px;";
-    }
-    const root = host.attachShadow({ mode: "open" });
-    setSafeHTML(root, `
+  // src/content/panel-template.ts
+  function buildPanelTemplate(version) {
+    return `
     <style>
       :host {
         color-scheme: dark;
@@ -861,6 +669,7 @@ HARD RULES (weaker models break these \u2014 do not):
         --accent-glow: rgba(16, 185, 129, 0.2);
         --accent-border: #059669;
         --theme-text-color: #34d399;
+        --bg-panel-solid: #121216;
         --bg-card: rgba(255, 255, 255, 0.02);
         --btn-bg: rgba(255, 255, 255, 0.04);
         --btn-hover: rgba(255, 255, 255, 0.1);
@@ -870,31 +679,35 @@ HARD RULES (weaker models break these \u2014 do not):
         transition: none !important;
       }
       
-      .theme-emerald, .box.theme-emerald {
+      .theme-emerald {
         --accent-color: #10b981;
         --accent-glow: rgba(16, 185, 129, 0.2);
         --accent-border: #059669;
         --theme-text-color: #34d399;
+        --bg-panel-solid: #121216;
       }
-      .theme-synthwave, .box.theme-synthwave {
+      .theme-synthwave {
         --accent-color: #d946ef;
         --accent-glow: rgba(217, 70, 239, 0.2);
         --accent-border: #c026d3;
         --theme-text-color: #f472b6;
         --bg-glass: rgba(20, 16, 32, 0.88);
+        --bg-panel-solid: #141020;
       }
-      .theme-amber, .box.theme-amber {
+      .theme-amber {
         --accent-color: #f59e0b;
         --accent-glow: rgba(245, 158, 11, 0.2);
         --accent-border: #d97706;
         --theme-text-color: #fbbf24;
+        --bg-panel-solid: #121216;
       }
-      .theme-sapphire, .box.theme-sapphire {
+      .theme-sapphire {
         --accent-color: #06b6d4;
         --accent-glow: rgba(6, 182, 212, 0.2);
         --accent-border: #0891b2;
         --theme-text-color: #22d3ee;
         --bg-glass: rgba(15, 20, 32, 0.88);
+        --bg-panel-solid: #0f1420;
       }
 
       .box {
@@ -920,7 +733,7 @@ HARD RULES (weaker models break these \u2014 do not):
         display: flex;
         flex-direction: column;
         opacity: .99;
-        transition: opacity 0.2s ease, box-shadow 0.3s ease;
+        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
         box-sizing: border-box;
         box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
       }
@@ -1034,7 +847,110 @@ HARD RULES (weaker models break these \u2014 do not):
           border-radius: 14px !important;
         }
       }
-      
+
+      /* Narrow-viewport (phone) layout: cap the expanded panel's height so it never covers the
+         whole screen \u2014 the story underneath must stay scrollable and touch-reachable. The panel's
+         own scroll containers (.tab-pane / .scrollable-panel) become self-contained so a scroll
+         gesture that hits the top/bottom of the panel's content never chains into the page scroll.
+         Threshold intentionally matches applyPosition()'s "window.innerWidth <= 600" branch in
+         panel.ts exactly \u2014 anything above 600px must stay on the desktop floating/resizable path
+         (user-set inline height from localStorage) with zero interference from this block.
+         Only max-height is set here, not height: on mobile, applyPosition() already sizes the
+         outer host to "min(70dvh, 70vh)" and sets "box.style.height = 100%", so the box fills
+         the host with no gap for short content. The earlier "@media (max-width: 600px)" block
+         above already applies "height: 100% !important" / "max-height: none !important" to this
+         same selector; this block comes later in source order so, at equal specificity, its
+         max-height (below) is the one that wins and supplies the real cap \u2014 while the fill
+         ("height: 100%") from the earlier block is left standing. Forcing "height: auto" here
+         would fight that fill and reopen a gap under short content, so it's deliberately omitted. */
+      @media (max-width: 600px) {
+        .box:not(.minimized) {
+          max-height: 70vh !important;
+          max-height: min(70dvh, 70vh) !important;
+        }
+        /* Mobile top-chrome compaction: the adventure title must never wrap to a second line
+           (one-line ellipsis), and the header/stats strips shed their desktop breathing room \u2014
+           vertical space is the scarcest resource on a phone. !important where the element
+           carries inline template styles. */
+        .box:not(.minimized) #st {
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          min-width: 0;
+          flex: 1;
+          font-size: 12.5px;
+        }
+        .box:not(.minimized) #drag-handle {
+          padding-bottom: 5px;
+          margin-bottom: 5px;
+        }
+        /* Adaptive nav (Mobile Rethink Phase A, spec 1): #view-tracker is a flex column, so pure
+           CSS order docks the tab bar at the bottom directly above the pinned footer on mobile.
+           Desktop keeps document order (tabs on top). No DOM reparenting. */
+        .box:not(.minimized) #main-tab-nav {
+          order: 98;
+          margin-bottom: 0 !important;
+          margin-top: 8px;
+        }
+        .box:not(.minimized) #main-footer {
+          order: 99;
+          margin-top: 6px !important;
+        }
+        /* Touch targets: the tiny icon/micro buttons (delete \u2715, edit \u270F, regen \u26A1, Clear, \u2026) are
+           14px glyphs with a few px of padding \u2014 far under the ~40px recommended hit area, and a
+           mis-tap near a red delete is the expensive kind. Grow their HIT AREA on mobile without
+           growing the glyphs. !important beats the inline padding most of them carry. */
+        .box:not(.minimized) .btn-icon,
+        .box:not(.minimized) .btn-micro,
+        .box:not(.minimized) .knows-del,
+        .box:not(.minimized) .pref-del,
+        .box:not(.minimized) .lc-pairing-del {
+          min-width: 36px !important;
+          min-height: 36px !important;
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+        }
+        /* Drawer/summary rows (NPC drawers, Knows/Preferences/Memory Bank sections, ALM, config
+           groups): denser-than-tappable text rows on a phone \u2014 pad them toward touch height. */
+        .box:not(.minimized) summary {
+          padding-top: 8px !important;
+          padding-bottom: 8px !important;
+        }
+        /* Mobile editing surfaces: textareas can't be corner-resized on touch, so give every one a
+           usable base height up front, and bump input/select rows toward comfortable touch-target
+           height. !important because most fields carry inline template styles (font-size:11px,
+           min-height:60px, etc.) that would otherwise win. The focused textarea additionally
+           auto-grows in keyboard mode (panel.ts growFocusedTextarea). */
+        .box:not(.minimized) textarea {
+          min-height: 88px !important;
+          font-size: 12px !important;
+        }
+        .box:not(.minimized) input[type="text"],
+        .box:not(.minimized) input[type="number"],
+        .box:not(.minimized) select {
+          min-height: 34px !important;
+          font-size: 12px !important;
+        }
+        /* The banners container (Active Location + "New Noun Detected" suggestion) sits ABOVE the
+           scrollable results area with flex-shrink:0 \u2014 a tall suggestion banner otherwise extends
+           past the panel's 70dvh cap with its Add Card/Ignore/Link buttons unreachable (user report:
+           "the create/ignore/link buttons aren't on my screen"). Bound it and give it its own
+           self-contained scroll so every control can always be reached. */
+        .box:not(.minimized) #location-banners-container {
+          max-height: 45vh;
+          max-height: min(45dvh, 45vh);
+          overflow-y: auto;
+          overscroll-behavior: contain;
+          touch-action: pan-y;
+        }
+        .tab-pane,
+        .scrollable-panel {
+          overscroll-behavior: contain;
+          touch-action: pan-y;
+        }
+      }
+
       /* Rounded translucent scrollbars */
       ::-webkit-scrollbar {
         width: 8px;
@@ -1095,31 +1011,82 @@ HARD RULES (weaker models break these \u2014 do not):
       button:active {
         transform: translateY(0);
       }
-      #an {
+      /* ---- Reusable button classes ---- */
+      /* Gradient CTA \u2014 replaces the old #an / #uc per-ID rules and inline gradient buttons.
+         :hover is required to beat the generic button:hover background override. */
+      .btn-primary {
         background: linear-gradient(135deg, var(--accent-color), var(--accent-border));
         border: none;
         color: #ffffff;
         font-weight: 600;
+        border-radius: 6px;
+        cursor: pointer;
         box-shadow: 0 4px 12px var(--accent-glow);
       }
-      #an:hover {
+      .btn-primary:hover {
         background: linear-gradient(135deg, var(--accent-color), var(--accent-color));
         box-shadow: 0 6px 16px var(--accent-glow);
         color: #ffffff;
         transform: translateY(-1px);
       }
-      #uc {
-        background: linear-gradient(135deg, var(--accent-color), var(--accent-border));
+
+      /* Ghost icon button */
+      .btn-icon {
+        background: none;
         border: none;
-        color: #ffffff;
-        font-weight: 600;
-        box-shadow: 0 4px 12px var(--accent-glow);
+        padding: 2px;
+        margin: 0;
+        cursor: pointer;
+        color: var(--text-secondary);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
       }
-      #uc:hover {
-        background: linear-gradient(135deg, var(--accent-color), var(--accent-color));
-        box-shadow: 0 6px 16px var(--accent-glow);
-        color: #ffffff;
-        transform: translateY(-1px);
+      .btn-icon:hover {
+        color: var(--text-primary);
+        background: none;
+        box-shadow: none;
+        transform: none;
+        border-color: transparent;
+      }
+
+      /* Export / download row button */
+      .btn-export {
+        justify-content: flex-start;
+        background: rgba(16, 185, 129, 0.05);
+        color: #34d399;
+        border: 1px solid rgba(16, 185, 129, 0.2);
+        padding: 6px 10px;
+        text-align: left;
+        width: 100%;
+        box-sizing: border-box;
+      }
+
+      /* Small CRUD action button + color modifiers */
+      .btn-micro {
+        margin: 0;
+        padding: 2px 6px;
+        font-size: 9.5px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-weight: 500;
+        width: auto;
+        min-height: unset;
+      }
+      .btn-micro--green { background: rgba(16, 185, 129, 0.12); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+      .btn-micro--blue  { background: rgba(59, 130, 246, 0.12); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+      .btn-micro--red   { background: rgba(239, 68, 68, 0.12); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+      .btn-micro--amber { background: rgba(245, 158, 11, 0.12); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+
+      /* Cancel / dismiss button */
+      .btn-cancel {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-color);
+        color: var(--text-secondary);
+        padding: 4px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 10px;
       }
       
       /* Premium glass-morphic input fields */
@@ -1145,6 +1112,97 @@ HARD RULES (weaker models break these \u2014 do not):
       select option {
         background-color: #121216;
         color: var(--text-primary);
+      }
+      /* Compact inputs for dense UI sections (LC, overlays, Adventures Manager) */
+      .input-compact {
+        padding: 4px 8px;
+        font-size: 11px;
+        border-radius: 6px;
+        height: auto;
+      }
+      /* Dark-bg inputs for inline editing contexts */
+      .input-dark {
+        background: rgba(0, 0, 0, 0.3);
+      }
+      .location-manager-banner summary::-webkit-details-marker {
+        display: none; /* the summary is a styled flex row; the default triangle doubles the affordance */
+      }
+      /* Back-to-top: floats bottom-right above the toolbar, shown only once the active scroll
+         container is meaningfully scrolled (panel.ts). Helps desktop too \u2014 long rosters/memory
+         lists scroll far on every form factor. */
+      #back-to-top {
+        display: none;
+        position: absolute;
+        right: 14px;
+        bottom: 52px;
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg-glass);
+        color: var(--accent-color);
+        border: 1px solid var(--border-color);
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+        font-size: 16px;
+        font-weight: 700;
+        cursor: pointer;
+        z-index: 50;
+        padding: 0;
+        margin: 0;
+      }
+      #back-to-top:hover {
+        border-color: var(--accent-color);
+      }
+      /* NPC drawer navigation rows: large tappable buttons whose chevron signals "opens its own
+         panel view" (Knows / Preferences / Memory Bank). */
+      .npc-section-btn {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 10px 12px;
+        margin: 0;
+        background: rgba(255, 255, 255, 0.03);
+        color: var(--text-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        text-align: left;
+      }
+      .npc-section-btn:hover {
+        background: rgba(255, 255, 255, 0.06);
+        border-color: var(--accent-color);
+      }
+      .npc-section-chevron {
+        color: var(--text-secondary);
+        font-size: 15px;
+        line-height: 1;
+      }
+      /* Home tab: search-result / queue rows + section titles (Mobile Rethink Phase A). */
+      .home-result-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 11.5px;
+        color: var(--text-primary);
+      }
+      .home-result-row:hover { background: rgba(255, 255, 255, 0.06); }
+      .home-result-sub { color: var(--text-secondary); font-size: 10px; flex-shrink: 0; }
+      .home-section-title {
+        font-weight: 700;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--theme-text-color);
+        margin: 2px 0 4px;
       }
       #clear-active-location:hover {
         background: rgba(239, 68, 68, 0.25) !important;
@@ -1183,10 +1241,10 @@ HARD RULES (weaker models break these \u2014 do not):
         background: rgba(0, 0, 0, 0.4);
       }
       
-      #open-settings svg, #open-settings-manager svg {
+      #open-settings svg {
         transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s;
       }
-      #open-settings:hover svg, #open-settings-manager:hover svg {
+      #open-settings:hover svg {
         transform: rotate(45deg);
         color: var(--accent-color);
       }
@@ -1224,7 +1282,7 @@ HARD RULES (weaker models break these \u2014 do not):
         text-shadow: none;
       }
       #min-toggle:hover {
-        transform: scale(1.25);
+        color: var(--theme-text-color);
         box-shadow: none;
         background: none;
         border: none;
@@ -1363,20 +1421,26 @@ HARD RULES (weaker models break these \u2014 do not):
         min-height: 0;
         overflow-y: auto;
       }
-      #view-tracker-scrollable {
+      /* Shared scrollable container \u2014 replaces per-ID rules and duplicated inline styles */
+      .scrollable-panel {
         flex: 1;
         overflow-y: auto;
         padding-right: 4px;
-        margin-top: 8px;
         min-height: 0;
         max-height: none;
+        box-sizing: border-box;
       }
-      #analyze-body {
-        flex: 1;
-        overflow-y: auto;
-        padding-right: 4px;
-        min-height: 0;
-        max-height: none;
+      .scrollable-panel--column {
+        display: flex;
+        flex-direction: column;
+      }
+      /* Direct children must keep their natural height. Without this, accordion
+         children (.box details have overflow:hidden, so their flex min-height
+         resolves to 0) shrink to fit the column instead of overflowing it, so
+         overflow-y:auto never engages and the content is clipped rather than
+         scrolled. */
+      .scrollable-panel--column > * {
+        flex-shrink: 0;
       }
       
       /* Accordion formatting */
@@ -1399,8 +1463,9 @@ HARD RULES (weaker models break these \u2014 do not):
         user-select: none;
         outline: none;
         transition: all 0.2s;
-        position: relative;
-        padding-right: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         list-style: none; /* Hide standard list-marker in Firefox */
       }
       .box summary::-webkit-details-marker {
@@ -1414,14 +1479,13 @@ HARD RULES (weaker models break these \u2014 do not):
         color: var(--text-secondary);
         font-size: 10px;
         transition: transform 0.2s;
-        position: absolute;
-        right: 12px;
-        top: 50%;
-        transform: translateY(-50%);
         display: inline-block;
+        margin-left: auto;
+        flex-shrink: 0;
+        padding-left: 8px;
       }
       .box details[open] > summary::after {
-        transform: translateY(-50%) rotate(-180deg);
+        transform: rotate(-180deg);
       }
 
       /* ---- Type-group header rows (Characters, Locations, etc.) ---- */
@@ -1970,6 +2034,60 @@ HARD RULES (weaker models break these \u2014 do not):
         margin-top: 8px;
         box-sizing: border-box;
       }
+      /* Main panel tab panes (Card Manager / Memory Bank / Living Characters).
+         Display (flex/none) is toggled in JS; structural props live here. */
+      .main-tab-pane {
+        flex-direction: column;
+        flex: 1;
+        overflow: hidden;
+        min-height: 0;
+      }
+
+      /* Shared sub-tab nav row (settings tabs + offmeta + manager groups) */
+      .sub-tab-nav {
+        display: flex;
+        border-bottom: 1px solid var(--border-color);
+        padding-bottom: 6px;
+        gap: 4px;
+        overflow-x: auto;
+      }
+
+      /* Shared underline-style sub-tab buttons (offmeta + manager groups).
+         Hover resets neutralize the generic button:hover lift/glow. */
+      .input-caption {
+        flex: 1;
+        text-align: center;
+        font-size: 10px;
+        color: var(--text-secondary);
+        margin: 0;
+      }
+      .subtab-btn {
+        flex: 1;
+        white-space: nowrap;
+        margin: 0;
+        padding: 4px 8px;
+        background: none;
+        border: none;
+        border-bottom: 2px solid transparent;
+        color: var(--text-secondary);
+        cursor: pointer;
+        font-size: 10.5px;
+        font-weight: 500;
+        transition: color 0.2s, border-color 0.2s;
+      }
+      .subtab-btn:hover {
+        color: var(--text-primary);
+        background: none;
+        box-shadow: none;
+        transform: none;
+        border-color: transparent;
+      }
+      .subtab-btn.active,
+      .subtab-btn.active:hover {
+        color: var(--accent-color);
+        border-bottom-color: var(--accent-color);
+        font-weight: 600;
+      }
       .main-tab-btn {
         background: rgba(255, 255, 255, 0.02);
         border: 1px solid var(--border-color);
@@ -2066,7 +2184,7 @@ HARD RULES (weaker models break these \u2014 do not):
         color: #ef4444;
       }
 
-      /* AID Memories timeline cards */
+      /* Memory Bank timeline cards */
       .box .memory-card {
         border: 1px solid var(--border-color);
         border-radius: 8px;
@@ -2118,50 +2236,235 @@ HARD RULES (weaker models break these \u2014 do not):
         <div id="st">AID Story Helper</div>
         <button id="min-toggle">\u2014</button>
       </div>
-      <div id="self-heal-banner" style="display:none;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:10px;margin:8px;box-sizing:border-box;">
-        <div style="font-weight:700;color:#f87171;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;">Empty Database Detected</div>
-        <div class="note" style="margin:4px 0 8px 0;font-size:11px;line-height:1.4;color:var(--text-secondary);">It looks like your local IndexedDB is empty. If you have a backup, you can restore it now.</div>
-        <div style="display:flex;gap:6px;align-items:center;">
-          <button class="db-restore-trigger" style="background:rgba(239,68,68,0.2);color:#f87171;border:1px solid rgba(239,68,68,0.4);padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px;font-weight:600;min-height:unset;width:auto;">Restore from Backup</button>
-          <button id="dismiss-self-heal-btn" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:10px;font-weight:600;padding:4px 8px;text-decoration:underline;margin:0;min-height:unset;width:auto;">Dismiss</button>
-        </div>
-      </div>
+      <button id="back-to-top" type="button" title="Back to top">\u2191</button>
       <div id="toast">Settings saved</div>
       
       <div id="content-body" style="width:100%; flex:1; display:flex; flex-direction:column; overflow:hidden; min-height:0;">
         <!-- VIEW: TRACKER -->
         <div id="view-tracker" style="display:flex; flex-direction:column; flex:1; overflow:hidden; min-height:0;">
-          <div id="meta-stats" style="margin:8px 0;padding:8px 12px;background:rgba(0,0,0,0.25);border-radius:8px;border:1px solid var(--border-color);display:flex;justify-content:space-between;font-size:10px;color:var(--text-secondary);font-family:SFMono-Regular,Consolas,monospace;">
-            <div>Actions: <span id="stat-turn" style="color:var(--accent-color);font-weight:bold;">0</span></div>
-            <div>Last Auto-Updated: <span id="stat-last-auto" style="color:var(--accent-color);font-weight:bold;">-</span></div>
+          <!-- Tab Navigation for Main Panel (Home first + default; adaptive bottom bar on mobile) -->
+          <div id="main-tab-nav" class="main-tab-nav" style="margin-bottom:8px;">
+            <button class="main-tab-btn active" data-tab="main-tab-home" style="flex:1;white-space:nowrap;margin:0;position:relative;">Home<span id="home-pending-badge" style="display:none;"></span></button>
+            <button class="main-tab-btn" data-tab="main-tab-tracker" style="flex:1;white-space:nowrap;margin:0;position:relative;">Cards</button>
+            <button class="main-tab-btn" data-tab="main-tab-memories" style="flex:1;white-space:nowrap;margin:0;position:relative;">Memory<span id="unread-memories-badge" style="display:none;"></span></button>
+            <button class="main-tab-btn" data-tab="main-tab-living-characters" style="flex:1;white-space:nowrap;margin:0;position:relative;">Living</button>
           </div>
 
-          <!-- Tab Navigation for Main Panel -->
-          <div class="main-tab-nav" style="margin-bottom:8px;">
-            <button class="main-tab-btn active" data-tab="main-tab-tracker" style="flex:1;white-space:nowrap;margin:0;position:relative;">Card Manager<span id="tracker-proposals-badge" style="display:none;"></span></button>
-            <button class="main-tab-btn" data-tab="main-tab-memories" style="flex:1;white-space:nowrap;margin:0;position:relative;">Memory Bank<span id="unread-memories-badge" style="display:none;"></span></button>
+          <!-- Main Pane 0: Home (task-first landing \u2014 Mobile Rethink Phase A \xA72) -->
+          <div id="main-tab-home" class="main-tab-pane" style="display:flex; flex-direction:column;">
+            <div style="position:relative; flex-shrink:0;">
+              <input id="home-search" type="text" class="input-compact input-dark" placeholder="Search cards, NPCs\u2026" autocomplete="off" style="width:100%; box-sizing:border-box; padding:7px 10px; font-size:12px;" />
+              <div id="home-search-results" style="display:none; flex-direction:column; gap:2px; margin-top:4px; background:rgba(0,0,0,0.35); border:1px solid var(--border-color); border-radius:8px; padding:4px; max-height:220px; overflow-y:auto;"></div>
+            </div>
+            <div class="scrollable-panel" style="margin-top:8px; display:flex; flex-direction:column; gap:8px;">
+              <div id="home-status" style="padding:8px 12px;background:rgba(0,0,0,0.25);border-radius:8px;border:1px solid var(--border-color);display:flex;justify-content:space-between;font-size:10px;color:var(--text-secondary);font-family:SFMono-Regular,Consolas,monospace;flex-shrink:0;">
+                <div>Actions: <span id="stat-turn" style="color:var(--accent-color);font-weight:bold;">0</span></div>
+                <div>Last Auto-Updated: <span id="stat-last-auto" style="color:var(--accent-color);font-weight:bold;">-</span></div>
+              </div>
+              <div id="home-pending"></div>
+              <div id="home-recent"></div>
+            </div>
           </div>
 
           <!-- Main Pane 1: Card Manager -->
-          <div id="main-tab-tracker" class="main-tab-pane" style="display:flex; flex-direction:column; flex:1; overflow:hidden; min-height:0;">
+          <div id="main-tab-tracker" class="main-tab-pane" style="display:none;">
             <div id="location-banners-container" style="flex-shrink:0;"></div>
-            <div id="view-tracker-scrollable">
+            <div id="setup-helper-container" style="flex-shrink:0; display:none;"></div>
+            <div id="view-tracker-scrollable" class="scrollable-panel" style="margin-top:8px;">
               <div id="results"></div>
+              <div id="debug-container"></div>
             </div>
           </div>
 
-          <!-- Main Pane 2: AID Memories Timeline -->
-          <div id="main-tab-memories" class="main-tab-pane" style="display:none; flex-direction:column; flex:1; overflow:hidden; min-height:0;">
-            <div style="display:flex; gap:6px; margin-bottom:8px;">
-              <button id="refine-mem" style="flex:1; margin:0; background:linear-gradient(135deg, var(--accent-color), var(--accent-border)); color:#fff; font-weight:600; padding:6px; border-radius:6px; border:none; cursor:pointer; font-size:10px;">\u26A1 Regenerate Latest</button>
+          <!-- Main Pane 2: Memory Bank (Player timeline / NPC point-of-view banks) -->
+          <div id="main-tab-memories" class="main-tab-pane" style="display:none; flex-direction:column;">
+            <div class="tab-nav sub-tab-nav">
+              <button class="subtab-btn active" data-mbtab="mb-player" style="flex:1;white-space:nowrap;margin:0;">Player</button>
+              <button class="subtab-btn" data-mbtab="mb-npc" style="flex:1;white-space:nowrap;margin:0;">NPC</button>
             </div>
-            <div id="aid-memories-scrollable" style="flex:1; overflow-y:auto; padding-right:4px; min-height:0;">
-              <div id="aid-memories-list" style="display:flex; flex-direction:column; gap:8px;"></div>
+            <div id="mb-player" class="mb-pane" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+              <div style="display:flex; gap:6px; margin-bottom:8px;">
+                <button id="refine-mem" class="btn-primary" style="flex:1; margin:0; padding:6px; font-size:10px;">\u26A1 Regenerate Latest</button>
+              </div>
+              <div id="aid-memories-scrollable" class="scrollable-panel">
+                <div id="aid-memories-list" style="display:flex; flex-direction:column; gap:8px;"></div>
+              </div>
+            </div>
+            <div id="mb-npc" class="mb-pane scrollable-panel scrollable-panel--column" style="display:none; gap:8px;"></div>
+          </div>
+
+          <!-- Main Pane 3: Living Characters -->
+          <div id="main-tab-living-characters" class="main-tab-pane" style="display:none; gap:8px;">
+            <div id="lc-status-banner" style="flex-shrink:0;"></div>
+            <div id="lc-scrollable" class="scrollable-panel scrollable-panel--column" style="gap:12px;">
+              
+              <!-- SECTION: ACTIVE RELATIONSHIP STATUS (LIFE CARDS) -->
+              <details class="group-header" open style="border-left-color:var(--accent-color) !important;">
+                <summary style="color:var(--accent-color) !important; font-weight:700; font-size:11.5px; cursor:pointer;">
+                  <span>\u{1F331} Active Relationships (Life Cards)</span>
+                </summary>
+                <div style="padding:10px; display:flex; flex-direction:column; gap:8px; background:rgba(255,255,255,0.01); border-top:1px solid var(--border-color); box-sizing:border-box; width:100%;">
+                  <div id="lc-active-list" style="display:flex; flex-direction:column; gap:8px;"></div>
+                  <button id="lc-btn-add-card" class="action-btn" style="background:rgba(192,132,252,0.12); color:#c084fc; border:1px solid rgba(192,132,252,0.3); font-weight:600; padding:6px; border-radius:6px; cursor:pointer; font-size:10px; align-self:flex-start; margin-top:4px; width:auto; min-height:unset;">\u2795 Seed Custom Life Card</button>
+                  
+                  <!-- Form: Add Custom Life Card (Hidden by default) -->
+                  <div id="lc-add-card-form" style="display:none; flex-direction:column; gap:8px; border:1px solid var(--border-color); border-radius:12px; padding:10px; background:rgba(0,0,0,0.2); box-sizing:border-box; width:100%; margin-top:8px;">
+                    <div style="font-weight:700; color:var(--text-primary); font-size:11px;">\u{1F331} Seed Custom Life Card</div>
+                    
+                    <div style="display:flex; flex-direction:column; gap:2px;">
+                      <label style="font-weight:600; font-size:10px;">Owner Character (who feels the pressure)</label>
+                      <select id="lc-add-owner" class="input-compact input-dark"></select>
+                    </div>
+
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; box-sizing:border-box; width:100%;">
+                      <div style="display:flex; flex-direction:column; gap:2px;">
+                        <label style="font-weight:600; font-size:10px;">Target Name</label>
+                        <input type="text" id="lc-add-target" class="input-compact input-dark" placeholder="Bob" />
+                      </div>
+                      <div style="display:flex; flex-direction:column; gap:2px;">
+                        <label style="font-weight:600; font-size:10px;">Pressure</label>
+                        <input type="text" id="lc-add-pressure" class="input-compact input-dark" placeholder="jealousy" />
+                      </div>
+                    </div>
+
+                    <div style="display:flex; gap:6px; justify-content:flex-end; margin-top:2px;">
+                      <button id="lc-add-cancel-btn" style="background:rgba(255,255,255,0.05); border:1px solid var(--border-color); color:var(--text-primary); font-size:10px; padding:3px 8px; border-radius:4px; cursor:pointer; width:auto; min-height:unset;">Cancel</button>
+                      <button id="lc-add-submit-btn" style="background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); color:#c084fc; font-size:10px; padding:3px 8px; border-radius:4px; cursor:pointer; font-weight:600; width:auto; min-height:unset;">Create Life Card</button>
+                    </div>
+                  </div>
+                </div>
+              </details>
+
+              <!-- SECTION: CONFIGURATION -->
+              <details class="group-header" style="--accent-color:#38bdf8; --accent-glow:rgba(56,189,248,0.15); border-left-color:#38bdf8 !important;">
+                <summary style="color:#38bdf8 !important; font-weight:700; font-size:11.5px; cursor:pointer;">
+                  <span>\u2699\uFE0F Simulation Configuration</span>
+                </summary>
+                <div style="padding:10px; display:flex; flex-direction:column; gap:8px; background:rgba(255,255,255,0.01); border-top:1px solid var(--border-color); font-size:10.5px; color:var(--text-secondary); box-sizing:border-box; width:100%;">
+                  
+                  <div style="display:flex; flex-direction:column; gap:3px;">
+                    <label style="font-weight:600;">NPC Characters Roster (one name per line)</label>
+                    <textarea id="lc-config-roster" rows="4" class="input-compact input-dark" style="resize:vertical;" placeholder="Alice&#10;Bob&#10;Charlie"></textarea>
+                  </div>
+
+                  <div style="display:flex; flex-direction:column; gap:3px; margin-top:4px;">
+                    <label style="font-weight:600;">Active Pressures Pool (one per line)</label>
+                    <textarea id="lc-config-pressures" rows="4" class="input-compact input-dark" style="resize:vertical;" placeholder="friendship&#10;jealousy&#10;rivalry&#10;trust&#10;curiosity"></textarea>
+                    <div style="font-size:9px; color:var(--text-secondary); opacity:0.8;">The DEFAULT pool. Used for any pair without its own pairing below.</div>
+                  </div>
+
+                  <div style="display:flex; flex-direction:column; gap:3px; margin-top:4px;">
+                    <label style="font-weight:600;">Pairing Pressure Pools</label>
+                    <div style="font-size:9px; color:var(--text-secondary); opacity:0.8; margin-bottom:2px;">Give a specific couple their own pressures. Symmetric (either direction) and exclusive \u2014 when both characters are the pair, pressures come ONLY from here, not the default pool.</div>
+                    <datalist id="lc-character-names"></datalist>
+                    <div id="lc-pairing-pools" style="display:flex; flex-direction:column; gap:6px;"></div>
+                    <button id="lc-add-pairing" class="action-btn" style="background:rgba(192,132,252,0.10); color:#c084fc; border:1px solid rgba(192,132,252,0.3); font-weight:600; padding:4px 8px; border-radius:6px; cursor:pointer; font-size:10px; align-self:flex-start; width:auto; min-height:unset; margin-top:2px;">+ Add pairing</button>
+                  </div>
+
+                  <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:4px; box-sizing:border-box; width:100%;">
+                    <div style="display:flex; flex-direction:column; gap:3px;">
+                      <label style="font-weight:600;">Protagonist Name</label>
+                      <input id="lc-config-protagonist" type="text" class="input-compact input-dark" placeholder="Frank" />
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:3px;">
+                      <label style="font-weight:600;">Protagonist Involvement</label>
+                      <select id="lc-config-involvement" class="input-compact input-dark">
+                        <option value="off">Off (NPCs only)</option>
+                        <option value="normal">Normal</option>
+                        <option value="high">High</option>
+                        <option value="always">Always</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:4px; box-sizing:border-box; width:100%;">
+                    <div style="display:flex; flex-direction:column; gap:3px;">
+                      <label style="font-weight:600;">Seed Interval (actions between new relationships)</label>
+                      <input id="lc-config-interval" type="number" min="1" step="1" placeholder="15" class="input-compact input-dark" />
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:3px;">
+                      <label style="font-weight:600;">Max Active Relationships</label>
+                      <select id="lc-config-max" class="input-compact input-dark">
+                        <option value="1">1 (Focused)</option>
+                        <option value="2">2 (Layered)</option>
+                        <option value="3">3 (Busy)</option>
+                        <option value="4">4 (Chaos)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:4px; box-sizing:border-box; width:100%;">
+                    <div style="display:flex; flex-direction:column; gap:3px;">
+                      <label style="font-weight:600;">Scene Relevance Gate</label>
+                      <select id="lc-config-relevance" class="input-compact input-dark">
+                        <option value="off">Off (Seed regardless of who's present)</option>
+                        <option value="strict">Strict (Seed only around present characters)</option>
+                      </select>
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:3px;">
+                      <label style="font-weight:600;">Dormancy Timeout (Actions)</label>
+                      <input id="lc-config-dormancy" type="number" min="0" step="1" placeholder="7" class="input-compact input-dark" />
+                    </div>
+                  </div>
+
+                  <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:4px; box-sizing:border-box; width:100%;">
+                    <div style="display:flex; flex-direction:column; gap:3px;">
+                      <label style="font-weight:600;">Reseed Cooldown (Actions)</label>
+                      <input id="lc-config-reseed-cooldown" type="number" min="0" step="1" placeholder="15" class="input-compact input-dark" />
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:3px;">
+                      <label style="font-weight:600;">Activity Lifespan (actions)</label>
+                      <input id="lc-config-stale" type="number" min="0" step="1" placeholder="14" class="input-compact input-dark" />
+                    </div>
+                  </div>
+
+                  <div style="display:flex; flex-direction:column; gap:3px; margin-top:8px;">
+                    <label style="font-weight:600;">Max Lifetime (actions)</label>
+                    <input id="lc-config-max-lifetime" type="number" min="0" step="1" placeholder="4" class="input-compact input-dark" />
+                    <span style="font-size:9.5px; color:var(--text-secondary);">Hard cap: a pressure is retired after this many actions even while it stays active \u2014 most resolve within 3-5. Catches threads the resolution judge never concludes. 0 disables the cap.</span>
+                  </div>
+
+                  <div style="display:flex; flex-direction:column; gap:3px; margin-top:8px;">
+                    <label style="font-weight:600;">Continue / Retry Actions</label>
+                    <select id="lc-config-continue-mode" class="input-compact input-dark">
+                      <option value="defer">Defer directive to next action (recommended)</option>
+                      <option value="skip">Don't run on Continue/Retry</option>
+                    </select>
+                    <span style="font-size:9.5px; color:var(--text-secondary);">Continue/Retry can't carry an injected pressure directive. "Defer" still runs the simulation and surfaces the directive on the next Do/Say/Story; "Skip" pauses the simulation on those actions.</span>
+                  </div>
+
+                  <button id="lc-btn-save-config" class="action-btn" style="margin-top:8px; background:linear-gradient(135deg, #0ea5e9, #0284c7); border:none; padding:6px; font-weight:600; border-radius:6px; color:#fff; cursor:pointer; width:100%; min-height:unset;">\u{1F4BE} Save Simulation Config</button>
+                </div>
+              </details>
+
+              <!-- SECTION: PRESSURES PRESETS LIBRARY -->
+              <details class="group-header" style="--accent-color:#10b981; --accent-glow:rgba(16,185,129,0.15); border-left-color:#10b981 !important;">
+                <summary style="color:#10b981 !important; font-weight:700; font-size:11.5px; cursor:pointer;">
+                  <span>\u{1F3AD} Pressures & Presets Library</span>
+                </summary>
+                <div style="padding:10px; display:flex; flex-direction:column; gap:10px; background:rgba(255,255,255,0.01); border-top:1px solid var(--border-color); font-size:10.5px; color:var(--text-secondary); box-sizing:border-box; width:100%;">
+                  <div>
+                    <div style="font-weight:700; margin-bottom:4px; color:var(--text-primary);">Core Pressures</div>
+                    <div style="display:flex; flex-wrap:wrap; gap:5px;" id="lc-core-pills-container"></div>
+                  </div>
+
+                  <div style="margin-top:4px; width:100%;">
+                    <div style="font-weight:700; margin-bottom:6px; color:var(--text-primary);">Preset Modes (Click to Apply)</div>
+                    <div style="display:flex; flex-direction:column; gap:8px; box-sizing:border-box; width:100%;" id="lc-modes-container"></div>
+                  </div>
+
+                  <div style="margin-top:4px; margin-bottom:4px;">
+                    <div style="font-weight:700; margin-bottom:4px; color:var(--text-primary);">Wildcard Spark Injections</div>
+                    <div style="display:flex; flex-wrap:wrap; gap:5px;" id="lc-wild-pills-container"></div>
+                  </div>
+                </div>
+              </details>
+
             </div>
           </div>
 
           <!-- Pinned Main Footer -->
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:8px;border-top:1px solid var(--border-color);box-sizing:border-box;">
+          <div id="main-footer" style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:8px;border-top:1px solid var(--border-color);box-sizing:border-box;">
             <div style="display:flex;gap:12px;align-items:center;">
               <button id="open-settings" style="background:none;border:none;padding:4px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;" title="Settings">
                 <svg style="width:16px;height:16px;fill:currentColor;" viewBox="0 0 24 24">
@@ -2177,7 +2480,7 @@ HARD RULES (weaker models break these \u2014 do not):
 
             <div style="display:flex;gap:6px;align-items:center;">
               <div style="font-size:10px;color:var(--text-secondary);font-family:system-ui;">v${version}</div>
-              <button id="info-help" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About & How it works">
+              <button id="info-help" type="button" class="btn-icon" title="About & How it works">
                 <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                   <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
                 </svg>
@@ -2189,10 +2492,11 @@ HARD RULES (weaker models break these \u2014 do not):
         <!-- VIEW: SETTINGS -->
         <div id="view-settings" style="display:none;flex-direction:column;gap:10px;margin-top:8px;flex:1;overflow:hidden;min-height:0;">
           <!-- Tab Navigation -->
-          <div class="tab-nav" style="display:flex;border-bottom:1px solid var(--border-color);padding-bottom:6px;gap:4px;overflow-x:auto;">
+          <div class="tab-nav sub-tab-nav">
             <button class="tab-btn active" data-tab="tab-gen" style="flex:1;white-space:nowrap;margin:0;">General</button>
             <button class="tab-btn" data-tab="tab-prov" style="flex:1;white-space:nowrap;margin:0;">AI Provider</button>
             <button class="tab-btn" data-tab="tab-memoraid" style="flex:1;white-space:nowrap;margin:0;">MemorAID</button>
+            <button class="tab-btn" data-tab="tab-living-characters" style="flex:1;white-space:nowrap;margin:0;">Living Characters</button>
             <button class="tab-btn" data-tab="tab-prompts" style="flex:1;white-space:nowrap;margin:0;">Prompts</button>
             <button class="tab-btn" data-tab="tab-offmeta" style="flex:1;white-space:nowrap;margin:0;">OffMeta's AIN</button>
             <button class="tab-btn" data-tab="tab-manager" style="flex:1;white-space:nowrap;margin:0;">Adventures Manager</button>
@@ -2223,23 +2527,25 @@ HARD RULES (weaker models break these \u2014 do not):
               
               <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
                 <label style="margin:0;flex:1;">Action Lookback Window</label>
-                <button id="info-action-lookback" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About Action Lookback Window">
+                <button id="info-action-lookback" type="button" class="btn-icon" title="About Action Lookback Window">
                   <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
                   </svg>
                 </button>
               </div>
-              <input id="win" type="number" min="1" placeholder="20" style="margin:4px 0 4px 0;" />
-              
+              <input id="win" type="number" min="1" placeholder="20" style="margin:4px 0 8px 0;" />
+
+              <!-- Dummy setting strictly for visual screenshot matching with public version -->
               <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
                 <label style="margin:0;flex:1;">Character Card Character Limit</label>
               </div>
               <input id="char-card-limit" type="number" min="100" max="2000" placeholder="600" style="margin:4px 0 8px 0;" />
 
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:4px 0 10px 0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;">
-                <input id="enable-manual-mode" type="checkbox" style="width:auto;margin:0;" />
-                Enable Manual Mode - No Automatic Updates
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:4px 0 2px 0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;">
+                <input id="enable-automatic-updates" type="checkbox" style="width:auto;margin:0;" />
+                Auto-Update Character Cards
               </label>
+              <div class="note" style="margin:0 0 10px 22px;">When on, the extension proposes Story Card updates on its own as characters leave a scene or stay active. Off by default \u2014 "Generate Core Character" always works manually.</div>
 
               <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
                 <label style="margin:0;flex:1;">Active Location Sync Mode</label>
@@ -2261,25 +2567,32 @@ HARD RULES (weaker models break these \u2014 do not):
                 Grant AI Dungeon Permissions
               </button>
             </div>
-            
+
             <!-- Pane: MemorAID Settings -->
             <div id="tab-memoraid" class="tab-pane" style="display:none; flex-direction:column; gap:8px;">
-              <div id="memoraid-tab-config-banner-container"></div>
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;flex:1;">
+                  <input id="enable-memoraid" type="checkbox" style="width:auto;margin:0;" />
+                  Enable MemorAID Thought Tracking?
+                </label>
+              </div>
+              <div class="note" style="margin:0 0 8px;">Add the characters to track in the Card Manager \u2192 \u{1F9E0} MemorAID section (per adventure).</div>
               <div style="display:flex;align-items:center;gap:6px;margin:8px 0 12px 0;">
                 <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;flex:1;">
                   <input id="use-memories" type="checkbox" style="width:auto;margin:0;" />
                   Use Memories in Plot Essentials?
                 </label>
-                <button id="info-memories" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="How Memories work">
+                <button id="info-memories" type="button" class="btn-icon" title="How Memories work">
                   <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
                   </svg>
                 </button>
               </div>
-              
+
+              <!-- Dummy setting strictly for visual screenshot matching with public version -->
               <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
                 <label style="margin:0;flex:1;">MemorAID Action Lookback Window</label>
-                <button id="info-memoraid-lookback" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About MemorAID Action Lookback Window">
+                <button id="info-memoraid-lookback" type="button" class="btn-icon" title="About MemorAID Action Lookback Window">
                   <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
                   </svg>
@@ -2289,17 +2602,15 @@ HARD RULES (weaker models break these \u2014 do not):
 
               <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
                 <label style="margin:0;flex:1;">MemorAID Thought Lookback (previous thoughts)</label>
-                <button id="info-memoraid-thought" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About MemorAID Thought Lookback">
+                <button id="info-memoraid-thought" type="button" class="btn-icon" title="About MemorAID Thought Lookback">
                   <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
                   </svg>
                 </button>
               </div>
-              <input id="memoraid-thought-win" type="number" min="1" placeholder="1" style="margin:4px 0 2px 0;" />
-              <div style="font-size:11px;color:var(--text-secondary);margin-bottom:8px;">
-                <i>* Braced rolling window format is used when setting is greater than 1.</i>
-              </div>
+              <input id="memoraid-thought-win" type="number" min="1" placeholder="1" style="margin:4px 0 8px 0;" />
 
+              <!-- Dummy setting strictly for visual screenshot matching with public version -->
               <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
                 <label style="margin:0;flex:1;">Thought Card Character Limit</label>
               </div>
@@ -2307,7 +2618,7 @@ HARD RULES (weaker models break these \u2014 do not):
 
               <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
                 <label style="margin:0;flex:1;">MemorAID Scene Presence Lookback</label>
-                <button id="info-memoraid-presence" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About MemorAID Scene Presence Lookback">
+                <button id="info-memoraid-presence" type="button" class="btn-icon" title="About MemorAID Scene Presence Lookback">
                   <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
                   </svg>
@@ -2317,17 +2628,109 @@ HARD RULES (weaker models break these \u2014 do not):
 
               <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
                 <label style="margin:0;flex:1;">Action Intercept Timeout (Seconds)</label>
-                <button id="info-intercept-timeout" type="button" style="background:none;border:none;padding:2px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="About Action Intercept Timeout">
+                <button id="info-intercept-timeout" type="button" class="btn-icon" title="About Action Intercept Timeout">
                   <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
                   </svg>
                 </button>
               </div>
-              <input id="intercept-timeout" type="number" min="1" placeholder="10" style="margin:4px 0 4px 0;" />
-              <div id="intercept-timing-stats" style="margin:0 0 10px 0;font-size:10px;color:var(--text-secondary);line-height:1.5;letter-spacing:normal;text-transform:none;">
-                <span>Last MemorAID run: <strong id="intercept-timing-last" style="color:var(--text-primary);">\u2013</strong></span>
-                <span style="opacity:0.5;"> &middot; </span>
-                <span>Session avg: <strong id="intercept-timing-avg" style="color:var(--text-primary);">\u2013</strong></span>
+              <input id="intercept-timeout" type="number" min="1" placeholder="4" style="margin:4px 0 8px 0;" />
+
+              <div style="display:flex;align-items:center;gap:6px;margin:12px 0 4px 0;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;flex:1;">
+                  <input id="enable-crystallized" type="checkbox" style="width:auto;margin:0;" />
+                  Enable Crystallized Memory (Long-Term)?
+                </label>
+              </div>
+              <div class="note" style="margin:0 0 8px;">Distills short-term thoughts into decaying episodic snapshots and permanent facts.</div>
+
+              <div class="note" style="margin:8px 0 4px;font-weight:bold;color:var(--text-secondary);">Distillation layers \u2014 produced together in ONE LLM call per NPC per window; turn a layer off to drop it from the call:</div>
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0 0 3px 8px;font-weight:normal;text-transform:none;letter-spacing:normal;">
+                <input id="crystallized-knows-enabled" type="checkbox" style="width:auto;margin:0;" /> Knows (permanent facts)
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0 0 3px 8px;font-weight:normal;text-transform:none;letter-spacing:normal;">
+                <input id="crystallized-nodes-enabled" type="checkbox" style="width:auto;margin:0;" /> Vivid Memories (decaying snapshots)
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0 0 3px 8px;font-weight:normal;text-transform:none;letter-spacing:normal;">
+                <input id="crystallized-outlook-enabled" type="checkbox" style="width:auto;margin:0;" /> Outlook (settled beliefs)
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0 0 3px 8px;font-weight:normal;text-transform:none;letter-spacing:normal;">
+                <input id="crystallized-preferences-enabled" type="checkbox" style="width:auto;margin:0;" /> Preferences (personal texture)
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0 0 8px 8px;font-weight:normal;text-transform:none;letter-spacing:normal;">
+                <input id="crystallized-npc-memory-enabled" type="checkbox" style="width:auto;margin:0;" /> NPC Memory Bank (per-NPC POV recollections)
+              </label>
+
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">Crystallized Distillation Interval (K turns)</label>
+              </div>
+              <input id="crystallized-interval" type="number" min="1" placeholder="20" style="margin:4px 0 8px 0;" />
+
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">Crystallized Entry Max Characters</label>
+              </div>
+              <input id="crystallized-max-chars" type="number" min="100" max="1000" placeholder="900" style="margin:4px 0 8px 0;" />
+
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">Crystallized Node Cap (max active nodes)</label>
+              </div>
+              <input id="crystallized-node-cap" type="number" min="1" placeholder="12" style="margin:4px 0 8px 0;" />
+
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">Crystallized NPC Memory Bank size (max stored memories)</label>
+              </div>
+              <input id="crystallized-npc-memory-cap" type="number" min="1" placeholder="400" style="margin:4px 0 8px 0;" />
+
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">Rendered layer caps</label>
+              </div>
+              <div style="display:flex;gap:6px;margin:4px 0 2px 0;">
+                <input id="crystallized-knows-cap" class="input-compact" type="number" min="1" placeholder="2" title="Max Knows lines (characters prioritized)" style="margin:0;flex:1;" />
+                <input id="crystallized-recalls-cap" class="input-compact" type="number" min="0" placeholder="2" title="Max Recalls lines (scene memory pulls; 0 disables)" style="margin:0;flex:1;" />
+                <input id="crystallized-vivid-cap" class="input-compact" type="number" min="1" placeholder="4" title="Max Vivid Memory lines" style="margin:0;flex:1;" />
+                <input id="crystallized-outlook-cap" class="input-compact" type="number" min="1" placeholder="2" title="Max Outlook lines" style="margin:0;flex:1;" />
+                <input id="crystallized-preferences-cap" class="input-compact" type="number" min="1" placeholder="4" title="Max Preferences lines (concrete texture: tastes, quirks, habits)" style="margin:0;flex:1;" />
+              </div>
+              <div style="display:flex;gap:6px;margin:0 0 8px 0;">
+                <label class="input-caption">Knows</label>
+                <label class="input-caption">Recalls</label>
+                <label class="input-caption">Vivid</label>
+                <label class="input-caption">Outlook</label>
+                <label class="input-caption">Prefs</label>
+              </div>
+            </div>
+
+            <!-- Pane: Living Characters Settings -->
+            <div id="tab-living-characters" class="tab-pane" style="display:none; flex-direction:column; gap:8px;">
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 12px 0;">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;flex:1;">
+                  <input id="enable-living-characters" type="checkbox" style="width:auto;margin:0;" />
+                  Enable Living Characters Integration?
+                </label>
+              </div>
+
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">Life Card Title Prefix</label>
+              </div>
+              <input id="lc-title-prefix" type="text" placeholder="Life - " style="margin:4px 0 8px 0;" />
+
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">Life Card Key Prefix</label>
+              </div>
+              <input id="lc-key-prefix" type="text" placeholder="chaos-v2:" style="margin:4px 0 8px 0;" />
+
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 12px 0;">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-weight:bold;color:var(--text-secondary);font-size:11px;text-transform:none;letter-spacing:normal;flex:1;">
+                  <input id="group-thoughts-in-roster" type="checkbox" style="width:auto;margin:0;" />
+                  Group Thought Cards in Roster?
+                </label>
+              </div>
+
+              <div class="note" style="margin-top:12px; padding:10px; border-radius:6px; border:1px solid var(--border-color); background:rgba(255,255,255,0.02); font-size:10.5px; line-height:1.4; color:var(--text-secondary);">
+                <strong>Living Characters Engine</strong><br/>
+                Developed by <a href="https://github.com/LivingNarratives" target="_blank" style="color:var(--accent-color); text-decoration:none; font-weight:600;">Living Narratives</a> (<a href="https://www.reddit.com/user/Jrowe0311/" target="_blank" style="color:var(--accent-color); text-decoration:none; font-weight:600;">u/Jrowe0311</a>).
+                <br/>
+                Incorporated with explicit permission to simulate autonomous NPC thoughts, relationships, and social dynamics.
               </div>
             </div>
             
@@ -2342,18 +2745,10 @@ HARD RULES (weaker models break these \u2014 do not):
               </select>
               
               <label id="key-lbl">Claude API key</label>
-              <input id="key" type="text" autocomplete="off" placeholder="sk-ant-..." style="-webkit-text-security: disc; margin:4px 0 8px 0;" />
+              <input id="key" type="password" placeholder="sk-ant-..." style="margin:4px 0 8px 0;" />
               
               <label>Model</label>
-              <div id="model-combo" style="position:relative;margin:4px 0 8px 0;">
-                <input id="model-search" type="text" autocomplete="off" spellcheck="false" placeholder="Search models\u2026" style="margin:0;width:100%;box-sizing:border-box;" />
-                <div id="model-list" role="listbox" style="display:none;position:absolute;left:0;right:0;top:calc(100% + 2px);z-index:60;max-height:240px;overflow-y:auto;background:var(--bg-glass);border:1px solid var(--border-color);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.45);"></div>
-                <select id="model" style="display:none;"><option value="">(enter API key)</option></select>
-              </div>
-              
-              <div id="gemma-disclaimer" class="note" style="margin-top:12px;padding:8px;border-radius:6px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.25);color:#fca5a5;font-size:10.5px;line-height:1.4;display:none;">
-                <strong>Disclaimer:</strong> Google's Gemma models (Gemma 4 26B &amp; Gemma 4 31B) have strict Layer 2 NSFW restrictions on the API. Because these filters can cause the API to fail, they may only work intermittently depending on the content of your story.
-              </div>
+              <select id="model" style="margin:4px 0 8px 0;"><option value="">(enter API key)</option></select>
             </div>
             
             <!-- Pane: Prompts -->
@@ -2368,11 +2763,11 @@ HARD RULES (weaker models break these \u2014 do not):
                     <div style="margin-top:3px;"><code style="color:var(--accent-color);font-weight:bold;">{{title}}</code> - Resolved by AI Dungeon to the Story Card's title. Required in every Card Command.</div>
                   </div>
                 </details>
-                <button id="revert-prompt" style="background:rgba(239,68,68,0.05);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);padding:2px 6px;font-size:9.5px;border-radius:4px;margin:0;white-space:nowrap;align-self:flex-start;">\u21BA Revert All</button>
+                <button id="revert-prompt" class="btn-micro btn-micro--red" style="white-space:nowrap;align-self:flex-start;">\u21BA Revert All</button>
               </div>
 
               <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Plot Essentials Prompt (your AI provider)</h4>
-              <div class="note" style="margin-bottom:4px;">Drives Plot Essentials updates via your configured provider (Claude/GPT/etc). Story Card templates are configured below.</div>
+              <div class="note" style="margin-bottom:4px;">Drives Plot Essentials updates via your configured provider (Claude/GPT/etc). Story Cards are generated through the same provider below.</div>
               <label style="margin-top:6px;">1. General Instructions</label>
               <textarea id="prompt-s1" rows="5" style="margin:4px 0 8px 0;"></textarea>
               
@@ -2386,8 +2781,8 @@ HARD RULES (weaker models break these \u2014 do not):
               <textarea id="prompt-s4" rows="5" style="margin:4px 0 8px 0;"></textarea>
 
               <div style="margin-top:12px;border-top:1px solid var(--border-color);padding-top:8px;">
-                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Per-Type Card Command Templates (AI Provider)</h4>
-                <div class="note" style="margin-bottom:6px;">Executed through your configured AI Provider \u2014 uses the model and settings from the AI Provider tab. Use <code>{{title}}</code> (required; replaced by card title) and <code>{protagonist}</code>. Custom covers any user-named type (e.g. "Song").</div>
+                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Per-Type Card Command Templates</h4>
+                <div class="note" style="margin-bottom:6px;">Sent to your configured AI provider to generate the card. Use <code>{{title}}</code> (required) and <code>{protagonist}</code>. Custom covers any user-named type (e.g. "Song").</div>
 
                 <label style="margin-top:6px;">Entry Formatting</label>
                 <select id="fmt-mode" style="margin:4px 0 8px 0;">
@@ -2412,22 +2807,22 @@ HARD RULES (weaker models break these \u2014 do not):
               <div class="note" style="margin-bottom:8px;">Select an export type to download the data:</div>
               
               <div style="display:flex;flex-direction:column;gap:6px;width:100%;">
-                <button id="ex-story" style="justify-content:flex-start;background:rgba(16,185,129,0.05);color:#34d399;border:1px solid rgba(16,185,129,0.2);padding:6px 10px;text-align:left;width:100%;box-sizing:border-box;">
+                <button id="ex-story" class="btn-export">
                   <span>\u2B07 Just Story Actions JSON</span>
                 </button>
-                <button id="ex-cards" style="justify-content:flex-start;background:rgba(16,185,129,0.05);color:#34d399;border:1px solid rgba(16,185,129,0.2);padding:6px 10px;text-align:left;width:100%;box-sizing:border-box;">
+                <button id="ex-cards" class="btn-export">
                   <span>\u2B07 Just Story Cards JSON</span>
                 </button>
-                <button id="ex-pe" style="justify-content:flex-start;background:rgba(16,185,129,0.05);color:#34d399;border:1px solid rgba(16,185,129,0.2);padding:6px 10px;text-align:left;width:100%;box-sizing:border-box;">
+                <button id="ex-pe" class="btn-export">
                   <span>\u2B07 Just Plot Essentials Plaintext</span>
                 </button>
-                <button id="ex-aidmemories" style="justify-content:flex-start;background:rgba(16,185,129,0.05);color:#34d399;border:1px solid rgba(16,185,129,0.2);padding:6px 10px;text-align:left;width:100%;box-sizing:border-box;">
+                <button id="ex-aidmemories" class="btn-export">
                   <span>\u2B07 Just Memory Bank JSON</span>
                 </button>
-                <button id="ex-propernouns" style="justify-content:flex-start;background:rgba(16,185,129,0.05);color:#34d399;border:1px solid rgba(16,185,129,0.2);padding:6px 10px;text-align:left;width:100%;box-sizing:border-box;">
+                <button id="ex-propernouns" class="btn-export">
                   <span>\u2B07 Just Proper Noun Logs JSON</span>
                 </button>
-                <button id="ex-all" style="justify-content:flex-start;background:rgba(245,158,11,0.05);color:#fbbf24;border:1px solid rgba(245,158,11,0.25);padding:6px 10px;text-align:left;width:100%;box-sizing:border-box;">
+                <button id="ex-all" class="btn-export" style="background:rgba(245,158,11,0.05);color:#fbbf24;border:1px solid rgba(245,158,11,0.25);">
                   <span>\u2B07 All Combined Backup JSON</span>
                 </button>
               </div>
@@ -2452,7 +2847,7 @@ HARD RULES (weaker models break these \u2014 do not):
               <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
                   <h4 style="margin:0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Proper Noun Log Editor</h4>
-                  <button id="clear-pn-logs" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Clear All</button>
+                  <button id="clear-pn-logs" class="btn-micro btn-micro--red">Clear All</button>
                 </div>
                 <div class="note" style="margin-bottom:6px;">Review or delete proper nouns processed by auto-detection.</div>
                 <div id="pn-logs-list" style="max-height:150px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;background:rgba(0,0,0,0.2);border:1px solid var(--border-color);border-radius:6px;padding:6px;box-sizing:border-box;">
@@ -2465,7 +2860,7 @@ HARD RULES (weaker models break these \u2014 do not):
                 <div class="note" style="margin-bottom:8px;">Generate a QR code to sync settings (excluding API keys) directly to your mobile device.</div>
                 <button id="gen-qr-btn" type="button" class="btn" style="justify-content:center;background:rgba(168,85,247,0.08);color:#c084fc;border:1px solid rgba(168,85,247,0.25);padding:6px 12px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;width:100%;box-sizing:border-box;">Generate Sync QR Code</button>
               </div>
-              
+
               <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
                 <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Full Database Backup & Restore</h4>
                 <div class="note" style="margin-bottom:8px;">Back up the entire local database (settings, cards, versions, operations, histories) to a single file.</div>
@@ -2482,11 +2877,11 @@ HARD RULES (weaker models break these \u2014 do not):
               <div class="note" style="margin-bottom:4px; font-size:11px;">Apply curated instructions directly to your AI Instructions, Author's Note, or Plot Essentials.</div>
               
               <!-- Sub Tab Navigation -->
-              <div class="offmeta-subtab-nav" style="display:flex;border-bottom:1px solid var(--border-color);padding-bottom:4px;margin-bottom:6px;gap:2px;overflow-x:auto;">
-                <button class="offmeta-subtab-btn active" data-subtab="offmeta-subtab-intro" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--theme-text-color);border-bottom:2px solid var(--theme-text-color);font-weight:700;cursor:pointer;transition:all 0.2s;">Introduction</button>
-                <button class="offmeta-subtab-btn" data-subtab="offmeta-subtab-premade" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--text-secondary);border-bottom:2px solid transparent;cursor:pointer;transition:all 0.2s;">Premade AIN</button>
-                <button class="offmeta-subtab-btn" data-subtab="offmeta-subtab-anpe" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--text-secondary);border-bottom:2px solid transparent;cursor:pointer;transition:all 0.2s;">AN/PE</button>
-                <button class="offmeta-subtab-btn" data-subtab="offmeta-subtab-individual" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--text-secondary);border-bottom:2px solid transparent;cursor:pointer;transition:all 0.2s;">Individual AIN</button>
+              <div class="offmeta-subtab-nav sub-tab-nav" style="padding-bottom:4px;margin-bottom:6px;gap:2px;">
+                <button class="subtab-btn offmeta-subtab-btn active" data-subtab="offmeta-subtab-intro">Introduction</button>
+                <button class="subtab-btn offmeta-subtab-btn" data-subtab="offmeta-subtab-premade">Premade AIN</button>
+                <button class="subtab-btn offmeta-subtab-btn" data-subtab="offmeta-subtab-anpe">AN/PE</button>
+                <button class="subtab-btn offmeta-subtab-btn" data-subtab="offmeta-subtab-individual">Individual AIN</button>
               </div>
 
               <!-- Search box and status feedback -->
@@ -2496,7 +2891,7 @@ HARD RULES (weaker models break these \u2014 do not):
               </div>
 
               <!-- Repository container -->
-              <div id="offmeta-repo-container" style="display:flex; flex-direction:column; gap:12px; flex:1; overflow-y:auto; padding-right:4px; min-height:0;">
+              <div id="offmeta-repo-container" class="scrollable-panel scrollable-panel--column" style="gap:12px;">
                 <!-- Loading State placeholder -->
                 <div style="text-align:center; padding:30px; color:var(--text-secondary);">
                   <div class="spinner" style="width:16px; height:16px; margin-bottom:6px; border-width:2px;"></div>
@@ -2507,27 +2902,26 @@ HARD RULES (weaker models break these \u2014 do not):
             
             <!-- Pane: Adventures Manager -->
             <div id="tab-manager" class="tab-pane" style="display:none; flex-direction:column; gap:8px; overflow:hidden;">
-              <div style="display:flex; justify-content:space-between; align-items:center; margin:4px 0;">
-                <h4 style="margin:0;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Adventures Manager</h4>
-                <button id="open-settings-manager" style="background:none;border:none;padding:4px;margin:0;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;" title="Settings">
-                  <svg style="width:16px;height:16px;fill:currentColor;" viewBox="0 0 24 24">
-                    <path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.13,5.91,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87 C2.62,9.08,2.67,9.34,2.85,9.48l2.03,1.58C4.83,11.36,4.81,11.69,4.81,12c0,0.31,0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.43-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/>
-                  </svg>
-                </button>
-              </div>
+              <h4 style="margin:4px 0;font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Adventures Manager</h4>
               <div class="note" style="margin-bottom:4px; font-size:11px;">Manage your Favorites library and explore locally stored adventure data.</div>
-              
+
+              <!-- Full DB Backup / Restore (entire IndexedDB incl. adventures, cards, thoughts, settings & Favorites) -->
+              <div style="display:flex;gap:6px;margin-bottom:6px;">
+                <button class="db-backup-trigger" style="flex:1;margin:0;padding:6px 8px;font-size:10.5px;font-weight:700;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.25);border-radius:6px;cursor:pointer;" title="Back up the entire local database to a JSON file (survives swapping the signed XPI for a test build)">\u2B07 Back Up Database</button>
+                <button class="db-restore-trigger" style="flex:1;margin:0;padding:6px 8px;font-size:10.5px;font-weight:700;background:rgba(245,158,11,0.1);color:#fbbf24;border:1px solid rgba(245,158,11,0.25);border-radius:6px;cursor:pointer;" title="Restore the entire local database from a backup JSON file">\u2B06 Restore Database</button>
+              </div>
+
               <!-- Sub Tab Navigation -->
-              <div class="manager-subtab-nav" style="display:flex;border-bottom:1px solid var(--border-color);padding-bottom:4px;margin-bottom:6px;gap:2px;">
-                <button id="btn-subtab-global" class="manager-subtab-btn active" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--theme-text-color);border-bottom:2px solid var(--theme-text-color);font-weight:700;cursor:pointer;">Favorites</button>
-                <button id="btn-subtab-explorer" class="manager-subtab-btn" style="flex:1;white-space:nowrap;margin:0;padding:5px 6px;font-size:11px;background:none;border:none;color:var(--text-secondary);border-bottom:2px solid transparent;cursor:pointer;">Local DB Explorer</button>
+              <div class="manager-subtab-nav sub-tab-nav" style="padding-bottom:4px;margin-bottom:6px;gap:2px;">
+                <button id="btn-subtab-global" class="subtab-btn active">Favorites</button>
+                <button id="btn-subtab-explorer" class="subtab-btn">Local DB Explorer</button>
               </div>
 
               <!-- Main Manager Container -->
-              <div id="manager-panels" style="display:flex; flex-direction:column; gap:8px; flex:1; overflow-y:auto; padding-right:4px; min-height:0;">
+              <div id="manager-panels" class="scrollable-panel scrollable-panel--column" style="gap:8px;">
                 <!-- Subpane: Favorites -->
                 <div id="subpane-global" style="display:flex; flex-direction:column; gap:8px;">
-                  <button id="btn-show-add-global" style="width:100%;margin:0;background:linear-gradient(135deg, var(--accent-color), var(--accent-border));color:#fff;font-weight:600;padding:6px;border-radius:6px;border:none;cursor:pointer;font-size:11px;">+ Add New Favorite</button>
+                  <button id="btn-show-add-global" class="btn-primary" style="width:100%;margin:0;padding:6px;font-size:11px;">+ Add New Favorite</button>
                   
                   <!-- Form: Add Favorite (hidden by default) -->
                   <div id="form-add-global" style="display:none; flex-direction:column; gap:6px; background:rgba(0,0,0,0.25); border:1px solid var(--border-color); border-radius:8px; padding:10px; box-sizing:border-box;">
@@ -2566,12 +2960,12 @@ HARD RULES (weaker models break these \u2014 do not):
                     <textarea id="global-value" rows="4" placeholder="Enter content or instructions here..." style="margin:2px 0 6px 0; font-size:11.5px; padding:4px; font-family:inherit; resize:vertical;"></textarea>
 
                     <div style="display:flex; gap:6px; justify-content:flex-end; margin-top:4px;">
-                      <button id="btn-cancel-global" style="margin:0; padding:4px 10px; font-size:11px; background:rgba(255,255,255,0.05); border-radius:6px; border:1px solid var(--border-color); color:var(--text-secondary);">Cancel</button>
+                      <button id="btn-cancel-global" class="btn-cancel" style="margin:0;">Cancel</button>
                       <button id="btn-save-global" style="margin:0; padding:4px 10px; font-size:11px; background:var(--accent-color); color:#fff; border-radius:6px; border:none; font-weight:600;">Create</button>
                     </div>
                   </div>
 
-                  <!-- Favorites Categorized Lists -->
+                  <!-- Global Assets Categorized Lists -->
                   <div id="global-assets-list" style="display:flex; flex-direction:column; gap:8px;"></div>
                 </div>
 
@@ -2583,22 +2977,13 @@ HARD RULES (weaker models break these \u2014 do not):
                   </div>
                 </div>
               </div>
-              
-              <div style="margin-top:14px;border-top:1px solid var(--border-color);padding-top:10px;">
-                <h4 style="margin:4px 0;font-size:10.5px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Full Database Backup & Restore</h4>
-                <div class="note" style="margin-bottom:8px;">Back up the entire local database (settings, cards, versions, operations, histories) to a single file.</div>
-                <div style="display:flex;gap:6px;width:100%;">
-                  <button class="db-backup-trigger" style="flex:1;justify-content:center;background:rgba(16,185,129,0.08);color:#34d399;border:1px solid rgba(16,185,129,0.25);padding:6px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;">Back Up Database</button>
-                  <button class="db-restore-trigger" style="flex:1;justify-content:center;background:rgba(245,158,11,0.08);color:#fbbf24;border:1px solid rgba(245,158,11,0.25);padding:6px;font-weight:600;font-size:11px;border-radius:6px;cursor:pointer;">Restore from Backup</button>
-                </div>
-              </div>
             </div>
           </div>
           
           <!-- Actions footer for settings view -->
           <div id="settings-footer" style="display:flex;justify-content:flex-end;gap:8px;border-top:1px solid var(--border-color);padding-top:8px;margin-top:4px;">
-            <button id="cancel-settings" style="margin:0;background:rgba(255,255,255,0.02);padding:4px 10px;border-radius:6px;">Cancel</button>
-            <button id="save" style="margin:0;background:linear-gradient(135deg, var(--accent-color), var(--accent-border));color:#fff;font-weight:600;min-width:70px;padding:4px 10px;border-radius:6px;border:none;">Save</button>
+            <button id="cancel-settings" class="btn-cancel" style="margin:0;">Cancel</button>
+            <button id="save" class="btn-primary" style="margin:0;min-width:70px;padding:4px 10px;">Save</button>
           </div>
         </div>
 
@@ -2608,7 +2993,16 @@ HARD RULES (weaker models break these \u2014 do not):
             <div style="font-weight:600;color:var(--accent-color);font-size:13px;">\u27F3 Update Plot Essentials</div>
             <button id="analyze-back" style="margin:0;background:rgba(255,255,255,0.02);padding:4px 10px;border-radius:6px;">\u2190 Back</button>
           </div>
-          <div id="analyze-body"></div>
+          <div id="analyze-body" class="scrollable-panel"></div>
+        </div>
+
+        <!-- VIEW: FULL-PANEL EDITOR (Mobile Rethink Phase B) -->
+        <div id="view-editor" style="display:none;flex-direction:column;gap:10px;margin-top:8px;flex:1;overflow:hidden;min-height:0;">
+          <div style="display:flex;justify-content:flex-start;align-items:center;gap:10px;border-bottom:1px solid var(--border-color);padding-bottom:6px;">
+            <button id="editor-back" style="margin:0;background:rgba(255,255,255,0.02);padding:4px 10px;border-radius:6px;flex-shrink:0;">\u2190 Back</button>
+            <div id="editor-title" style="font-weight:600;color:var(--accent-color);font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Editor</div>
+          </div>
+          <div id="editor-body" class="scrollable-panel" style="display:flex;flex-direction:column;gap:8px;"></div>
         </div>
 
         <!-- OVERLAY: MEMORIES HELP -->
@@ -2650,20 +3044,19 @@ HARD RULES (weaker models break these \u2014 do not):
             <button class="overlay-close" type="button" data-close="overlay-memoraid-lookback">\xD7</button>
           </div>
           <div class="overlay-content">
-            <p>This setting controls how many actions (turns) of recent gameplay context the extension retrieves to use as additional context for the NPC's Thought Card generation.</p>
-            <p><strong>How it works:</strong><br/>When generating a MemorAID thought card (sensory Intake \u2192 internal Thought \u2192 next Action), the extension looks back at this number of turns of active history to build the narrative generation context. Adjusting this allows for more detailed context reflection but consumes more text from the history budget.</p>
+            <p>This setting controls how many prior actions are sent to the model for thought generation.</p>
           </div>
         </div>
 
-        <!-- OVERLAY: MEMORAID THOUGHT HELP -->
+        <!-- OVERLAY: MEMORAID THOUGHT LOOKBACK HELP -->
         <div id="overlay-memoraid-thought" class="overlay">
           <div class="overlay-header">
-            <div class="overlay-title">MemorAID Thought Lookback</div>
+            <div class="overlay-title">MemorAID Thought Lookback (previous thoughts)</div>
             <button class="overlay-close" type="button" data-close="overlay-memoraid-thought">\xD7</button>
           </div>
           <div class="overlay-content">
-            <p>This setting controls how many prior thoughts generated by MemorAID are kept in the card value and fed back to the AI provider as rolling context.</p>
-            <p>This controls the rolling thought window size. Up to N of the most recent thoughts will be kept in the memory card value and fed back as context (default = 1, keeping only the newest thought).</p>
+            <p>Turns each NPC's memory card into a rolling "Inner Self" cache: the card entry keeps the last <strong>N</strong> complete thoughts (newest on top), and those same prior thoughts are fed back as context when generating the next thought \u2014 so the character's internal monologue stays continuous instead of resetting every turn.</p>
+            <p><strong>How it works:</strong><br/>Each turn the newest thought enters at the top and the rest roll down; the oldest beyond N leaves the visible entry but stays archived in the card's Notes log. Minimum <strong>1</strong> (the current thought). Recent story actions are NOT added here: AI Dungeon already generates with full story context.</p>
           </div>
         </div>
 
@@ -2700,38 +3093,31 @@ HARD RULES (weaker models break these \u2014 do not):
           <div class="overlay-content" style="gap:10px;">
             <div style="display:flex;flex-direction:column;gap:2px;">
               <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;">Card Type</label>
-              <select id="ac-type" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:6px;font-size:11px;font-family:inherit;margin:2px 0 4px 0;">
-                <option value="character">Character</option>
-                <option value="location">Location</option>
-                <option value="faction">Faction</option>
-                <option value="class">Class</option>
-                <option value="race">Race</option>
-                <option value="custom">Custom</option>
-                <option value="memory">Memory</option>
-              </select>
+              <select id="ac-type" class="input-compact" style="margin:2px 0 4px 0;"></select>
+              <input type="text" id="ac-custom-type" list="existing-custom-types" placeholder="Enter custom type\u2026" class="input-compact" style="display:none;margin:2px 0 4px 0;" />
             </div>
 
             <div style="display:flex;flex-direction:column;gap:2px;">
               <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;">Name / Title</label>
-              <input id="ac-title" type="text" placeholder="e.g. Rena" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:6px;font-size:11px;font-family:inherit;margin:2px 0 4px 0;"/>
+              <input id="ac-title" type="text" placeholder="e.g. Rena" class="input-compact" style="margin:2px 0 4px 0;"/>
             </div>
 
             <div style="display:flex;flex-direction:column;gap:2px;">
               <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;">Trigger Keys (comma-separated)</label>
-              <input id="ac-keys" type="text" placeholder="e.g. rena, merchant" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:6px;font-size:11px;font-family:inherit;margin:2px 0 4px 0;"/>
+              <input id="ac-keys" type="text" placeholder="e.g. rena, merchant" class="input-compact" style="margin:2px 0 4px 0;"/>
             </div>
 
             <div style="display:flex;flex-direction:column;gap:2px;">
               <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;">Description / Notes</label>
-              <input id="ac-desc" type="text" placeholder="e.g. Optional notes" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:6px;font-size:11px;font-family:inherit;margin:2px 0 4px 0;"/>
+              <input id="ac-desc" type="text" placeholder="e.g. Optional notes" class="input-compact" style="margin:2px 0 4px 0;"/>
             </div>
 
             <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-height:0;">
               <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;">Entry Value (Body)</label>
-              <textarea id="ac-value" placeholder="The core story card content..." style="background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:6px;font-size:11px;font-family:inherit;resize:none;flex:1;min-height:80px;box-sizing:border-box;margin:2px 0 4px 0;"></textarea>
+              <textarea id="ac-value" placeholder="The core story card content..." class="input-compact" style="resize:none;flex:1;min-height:80px;box-sizing:border-box;margin:2px 0 4px 0;"></textarea>
             </div>
 
-            <button id="ac-submit" style="width:100%;margin-top:4px;background:linear-gradient(135deg, var(--accent-color), var(--accent-border));color:#fff;font-weight:600;padding:8px;border-radius:6px;border:none;cursor:pointer;font-size:11px;">Create & Push to AID</button>
+            <button id="ac-submit" class="btn-primary" style="width:100%;margin-top:4px;padding:8px;font-size:11px;">Create & Push to AID</button>
           </div>
         </div>
 
@@ -2742,7 +3128,7 @@ HARD RULES (weaker models break these \u2014 do not):
             <button class="overlay-close" type="button" data-close="overlay-help">\xD7</button>
           </div>
           <div class="overlay-content">
-            <p>This extension orchestrates context tracking and memory management for your AI Dungeon adventures, dynamically partitioning updates between your private AI APIs and AI Dungeon's native generators.</p>
+            <p>This extension orchestrates context tracking and memory management for your AI Dungeon adventures, generating all updates through your own configured AI provider.</p>
             
             <p><strong>1. Architectural Division: PE vs SC</strong></p>
             <ul style="margin:0;padding-left:16px;display:flex;flex-direction:column;gap:8px;">
@@ -2752,13 +3138,13 @@ HARD RULES (weaker models break these \u2014 do not):
                 <br/><span class="note" style="margin-top:2px;display:inline-block;">*Includes an option (enabled via <strong>Settings \u2192 General \u2192 Use Memories in Plot Essentials?</strong>) to automatically construct and prepend a dynamic Memories block in Plot Essentials via outside AI calls.</span>
               </li>
               <li>
-                <strong>Story Cards (SC):</strong> 
-                World Info elements stored in AI Dungeon's database. Updates are driven by <strong>your configured outside AI Provider API</strong> using the command templates defined in settings, and committed back via GQL mutations.
+                <strong>Story Cards (SC):</strong>
+                World Info elements stored in AI Dungeon's database. Updates are driven by <strong>your configured AI provider</strong>, using the command instruction templates defined in settings, then saved back to the card.
               </li>
             </ul>
 
             <p><strong>2. Gameplay Context Window Integration</strong></p>
-            <p>When generating Story Card updates, the extension dynamically captures the last <code>N</code> actions of chronological gameplay history (up to the provider's context limits) and feeds it to your outside AI provider. For Location cards, the current card description is automatically prepended, reserving all remaining character budget for recent gameplay actions.</p>
+            <p>When generating Story Card updates, the extension dynamically captures the last <code>N</code> actions of chronological gameplay history (up to a <strong>strict 2,000-character ceiling</strong>, including newlines) and includes it in the generation prompt sent to your configured AI provider. For Location cards, the current card description is automatically prepended, reserving all remaining character budget for recent gameplay actions.</p>
 
             <p><strong>3. Automated Action Lookback Active Tracker</strong></p>
             <p>The tracker continuously monitors action progression in the background. If a character's name or trigger words were present in the previous lookback window but disappear from the current window (indicating <strong>they have just fell out of active gameplay actions / exited the active scene</strong>), the extension automatically and silently triggers a card update in the background.</p>
@@ -2782,7 +3168,666 @@ HARD RULES (weaker models break these \u2014 do not):
           </div>
         </div>
       </div>
-    </div>`);
+    </div>`;
+  }
+
+  // src/content/setup-phase.ts
+  function isSetupPhase(input) {
+    return !input.isManagerOnly && (input.hasActiveSetupQuestion || input.actionCount < 2);
+  }
+  function visibleMainTabPane(inSetupPhase, activeTabId) {
+    return inSetupPhase ? "main-tab-tracker" : activeTabId;
+  }
+
+  // src/inference/plot.ts
+  var LORE_HINTS = /inner circle|plot secret|^secret\b|^-?\s*plot\b/i;
+  function blockName(inner) {
+    const text = inner.trim();
+    const firstLine = (text.split("\n").find((l) => l.trim()) ?? "").trim();
+    const pm = text.match(/(?:Your|Player)\s+name:\s*([^\n]+)/i);
+    if (pm) return { name: pm[1].trim(), isPlayer: true };
+    if (LORE_HINTS.test(firstLine)) return null;
+    if (/^(?:Current|Active)\s+Location/i.test(firstLine)) return null;
+    const nm = firstLine.match(/^([A-Z][^\n:]*?)\s+(?:is|are)\b/);
+    if (nm) return { name: nm[1].trim(), isPlayer: false };
+    const hm = firstLine.match(/^([A-Z][\w '´.-]{1,40}):/);
+    if (hm && !LORE_HINTS.test(hm[1])) return { name: hm[1].trim(), isPlayer: false };
+    return null;
+  }
+  function parsePlotEssentials(memory) {
+    if (!memory) return [];
+    const blocks = [];
+    const re = /\[([^\]]+)\]|\{([^\}]+)\}/g;
+    let m;
+    while ((m = re.exec(memory)) !== null) {
+      const content = m[1] !== void 0 ? m[1] : m[2];
+      const info = blockName(content);
+      if (info) blocks.push({ name: info.name, text: content.trim(), isPlayer: info.isPlayer });
+    }
+    return blocks;
+  }
+  function getRestOfPlotEssentials(memory) {
+    if (!memory) return "";
+    const re = /\[([^\]]+)\]|\{([^\}]+)\}/g;
+    let lastIndex = 0;
+    let result = "";
+    let m;
+    while ((m = re.exec(memory)) !== null) {
+      const content = m[1] !== void 0 ? m[1] : m[2];
+      const info = blockName(content);
+      if (info) {
+        result += memory.slice(lastIndex, m.index);
+        lastIndex = re.lastIndex;
+      }
+    }
+    result += memory.slice(lastIndex);
+    return result.trim();
+  }
+  var DETAIL_KEYWORDS = /\b(name|age|gender|sex|race|species|height|weight|build|hair|eye|eyes|skin|scent|smell|voice|appearance|apparel|clothing|outfit|attire|looks?|personality|occupation|job|role|class|alignment|likes|dislikes|hobbies|fears?|goals?|motivations?|motives?|background|backstory|origin|description|bio|relationship|status|title|rank|weapons?|equipment|abilities|skills|powers|strengths?|weakness(?:es)?|quirks|mannerisms|demeanor|attitude|disposition|temperament|nationality|orientation|hand|iq)\b/i;
+  var DETAIL_CANDIDATE_RE = /([-*[])?\s*([A-Za-z][A-Za-z0-9_&/'"-]*(?:\s+[A-Za-z0-9_&/'"][A-Za-z0-9_&/'"-]*)*?)\s*[:=]/g;
+  function isDetailKey(key, bulleted) {
+    const k = key.trim();
+    if (!k || k.length > 40) return false;
+    if (bulleted) return true;
+    const spaces = (k.match(/\s/g) || []).length;
+    if (DETAIL_KEYWORDS.test(k) && spaces <= 2) return true;
+    if (spaces <= 1 && k.length < 15) return true;
+    return false;
+  }
+  function extractDetailsFromText(text) {
+    if (!text) return [];
+    const candidates = [];
+    DETAIL_CANDIDATE_RE.lastIndex = 0;
+    let m;
+    while ((m = DETAIL_CANDIDATE_RE.exec(text)) !== null) {
+      candidates.push({
+        key: m[2],
+        bulleted: m[1] !== void 0,
+        matchStart: m.index,
+        valStart: DETAIL_CANDIDATE_RE.lastIndex
+      });
+    }
+    const clean = (s) => s.replace(/[\s\]]+$/, "").replace(/\s+/g, " ").trim();
+    const results = [];
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i];
+      const end = i + 1 < candidates.length ? candidates[i + 1].matchStart : text.length;
+      const value = clean(text.slice(c.valStart, end));
+      const key = c.key.trim();
+      if (isDetailKey(key, c.bulleted)) {
+        if (/^(?:https?|www|ftp)$/i.test(key)) continue;
+        if (value) results.push({ key, value });
+      } else if (results.length) {
+        const prev = results[results.length - 1];
+        prev.value = clean(`${prev.value} ${key}: ${value}`);
+      }
+    }
+    return results;
+  }
+
+  // src/inference/engine.ts
+  var DEFAULT_PROMPT_SECTION_1 = [
+    "You maintain character descriptions for an interactive, second-person, present-tense story.",
+    '"You"/"your" always refers to the player character named {protagonist}.',
+    "Each `characters` entry has a name, currentEntry, and source: 'plot' = part of the always-in-context Plot Essentials (central/player characters); 'card' = a Story Card (only present when triggered).",
+    "Propose action:\"update\" ONLY for characters in `characters` whose state the narrative has concretely changed. Preserve the Entry's existing labeled sections (e.g. 'Appearance:','Personality:') and revise only what the evidence supports.",
+    "Do NOT invent new characters and do NOT create Story Cards. Only update entries already provided in `characters`."
+  ].join("\n");
+  var DEFAULT_PROMPT_SECTION_2 = [
+    "CORE PERSONALITY ESSENCE & COMPRESSION RULES:",
+    "  - Focus strictly on 'Core Personality Trait' changes and behavioral shifts, keeping only the barest high-level context to explain why their personality has changed that way. We want to capture the character's essence, psychological filters, and worldview rather than log their story actions or situational scenes.",
+    "  - For Appearance, focus on what the character 'usually' looks like (e.g., physical features, default public wardrobe, characteristic style) and typical habits (e.g. public wardrobe choices vs. private/at-home preferences). Absolutely ban transient physical states or highly situational details (e.g., do NOT log smudged mascara, exhausted/red eyes, or specific outfits from a single scene; instead record: 'Usually dresses strategically in public to project a desired image, but now prefers oversized, comfortable clothing in private or safe settings').",
+    "  - Absolutely forbid narrative 'fluff', specific dialogue summaries, situational scene recaps, transient settings, item logs, or passing interactions (e.g. do NOT write about coffee orders, penthouse scenes, or specific conversations; instead, record the permanent psychological shift and its driver, e.g. 'Motivated by Smoke's public authenticity, she has discarded her manipulative schemes and is resolved to take ownership of her past rumor campaign against Mia').",
+    "  - DO NOT repeat or include descriptions of other characters' actions, status, or behaviors (e.g. do NOT write about how Smoke treats A-list women or what he does; focus *strictly* on the target character's own internal traits).",
+    "  - Reference established groups or roles where applicable (e.g. refer to a character's associates collectively as their 'inner circle' if defined in context, rather than listing individual names like Chloe, Jasmine, Marcus, etc. redundantly).",
+    "  - Treat entries as active, lightweight, high-density LLM instruction guides for roleplaying the character, not as a story timeline.",
+    "  - [CRITICAL RELATIONSHIP PACING DIRECTIVE]: When updating the 'Dynamic ({protagonist}):' relationship field, you must enforce realistic psychological inertia and continuity based strictly on the character's pre-existing profile. Relationships cannot leap from strangers or casual acquaintances to deep intimacy, unearned trust, or intense codependency\u2014nor to absolute hatred, permanent enmity, or extreme paranoia\u2014within a handful of turns. Transition updates must capture the messy, realistic friction of changes (e.g. emotional whiplash, caution, or cognitive dissonance) and show progressive organic softening or hardening, rather than sudden extreme swings or total psychological submission. Focus strictly on the immediate realistic increment of their interaction."
+  ].join("\n");
+  var DEFAULT_PROMPT_SECTION_3 = [
+    "PLOT ESSENTIALS vs. STORY CARDS LIMITS (CEILINGS, NOT TARGETS):",
+    "    * Limits are absolute emergency ceilings: 3,500 characters for the protagonist ({protagonist}), and 2,000 characters for all other central Plot Essentials or Story Cards.",
+    "    * Limits are NOT targets. Shorter, high-density entries are highly preferred. If a character description can be kept at 600 characters, do NOT write 1,900 characters. Padding or inflating an entry with decorative adjectives or unnecessary narrative history is a failure.",
+    "    * Do not use the available character budget just because it exists. Conserve as much space as possible so the total story context window remains large.",
+    "    * When proposing an update, prioritize pruning, condensing, or deleting outdated/redundant information so that new updates do not continuously grow the character's size."
+  ].join("\n");
+  var DEFAULT_PROMPT_SECTION_4 = [
+    "Never fabricate details absent from both the entry and the narrative. changeSummary is a short plain-English line describing what changed.",
+    'Respond with STRICT JSON only: {"proposals":[{"name","action":"update","newEntry","changeSummary","suggestedTriggers"?}]}. Return {"proposals":[]} if nothing changed.'
+  ].join("\n");
+  var DEFAULT_SYSTEM_PROMPT = [
+    DEFAULT_PROMPT_SECTION_1,
+    DEFAULT_PROMPT_SECTION_2,
+    DEFAULT_PROMPT_SECTION_3,
+    DEFAULT_PROMPT_SECTION_4
+  ].join("\n\n");
+  var STD_TYPES = /* @__PURE__ */ new Set(["character", "class", "race", "location", "faction", "memoraid"]);
+  function normalizeType(t) {
+    const x = (t ?? "character").toLowerCase();
+    return STD_TYPES.has(x) ? x : "custom";
+  }
+
+  // src/inference/card-command.ts
+  var DEFAULT_CARD_COMMANDS = {
+    character: `Generate an information card entry for {{title}} in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. The entry is injected into the story WITHOUT its card title, so it MUST self-identify: begin with the field Name: {{title}} on its own first line, then a Type: line stating what {{title}} is (role, species, or station). Then continue with these labeled fields, each on its own line:
+Appearance: 1-2 sentences on enduring physical features and style.
+Complexity (Paradox & Filters): 1-2 sentences on their central internal contradiction/repressed vulnerability and how they screen reality.
+Goals: 1-2 sentences on their primary desires, motivations, and what they seek or fear in the current situation.
+Update based strictly on concrete narrative changes, preserving existing labeled fields on their own lines. Keep it high-density and under 600 characters total to prevent server truncation. Forbid narrative fluff, scene recaps, and empty lines. Treat this as a high-density roleplay guide, not a story timeline.`,
+    class: `Generate an information card entry for {{title}}, a character class or archetype in the D&D/MMO sense, in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. The entry is injected into the story WITHOUT its card title, so it MUST self-identify: begin with the field Name: {{title}} on its own first line, then a Type: line (e.g. Type: Class / Archetype). Then continue with labeled fields (e.g., Role:, Abilities:, Progression:) on their own lines, revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Focus on the class's defining role, signature abilities and skills, mechanics, and how it has progressed or changed \u2014 not story events or scenes. Forbid narrative fluff, dialogue summaries, scene recaps, transient details, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
+    race: `Generate an information card entry for {{title}}, a species or race, in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. The entry is injected into the story WITHOUT its card title, so it MUST self-identify: begin with the field Name: {{title}} on its own first line, then a Type: line (e.g. Type: Species / Race). Then continue with labeled fields (e.g., Traits:, Culture:, Lore:) on their own lines, revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Focus on innate traits, culture, and lore \u2014 what the story reveals about the group as a whole \u2014 not individual scenes or transient events. Forbid narrative fluff, dialogue summaries, scene recaps, transient details, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
+    location: `Generate an information card entry for {{title}}, a place or location, in an interactive, second-person, present-tense story. Write the entry strictly in the third person about {{title}}: never use "you" or "your". The entry MUST begin with the field Name: {{title}} on its own first line \u2014 the entry text is injected into the story without its card title, so it must self-identify which place it describes. Then continue with the fields Type:, Located In:, and Ownership:. The Located In: field is MANDATORY and must trace the spatial containment hierarchy from the immediate parent outward to the largest relevant container (room > building/structure > settlement/town > region/realm or border), separated by " > ", in the exact form: Located In: [immediate parent structure] > [settlement or town] > [region, realm, or border]. Always reuse the exact names of places already established in the story or on other location cards so hierarchies stay consistent and their triggers fire; if a parent place is not yet named, state the most specific container the narrative supports rather than omitting the field. Then continue with these labeled fields, each on its own line, without markdown or empty lines:
+Description: what the place IS and its enduring strategic or narrative purpose \u2014 what it is suited for and why it matters.
+Inhabitants: who lives in, works in, or frequents the place (peoples, professions, factions) and any enduring social dynamic among them (e.g., an uneasy truce).
+Atmosphere: 1-2 sentences on the place's lasting character and how it is experienced, including defining contrasts (e.g., intimidating from outside but warm and livable within).
+Features: permanent structural features and layout.
+Notable Items: specific permanent contents. You must preserve the literal names of specific books, exact instrument models, and unique trophies from the source text; never generalize or substitute them with generic placeholders. Keep the entry high-density and well under the absolute emergency ceiling of 2,000 characters; do not pad. Prune transient scene recaps, story events, and redundant decorative wording, but PRESERVE the enduring flavor that defines the place \u2014 its atmosphere, social fabric, and narrative role are required content, not fluff. The entry must serve as both a spatial and a narrative guide for the AI engine.`,
+    faction: `Generate an information card entry for {{title}}, a group, organization, or faction, in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant. The entry is injected into the story WITHOUT its card title, so it MUST self-identify: begin with the field Name: {{title}} on its own first line, then a Type: line stating what kind of group it is (e.g. Type: Mercenary company). Then continue with labeled fields (e.g., Goals:, Membership:, Leadership:, Status:) on their own lines, revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Focus on the faction's goals, membership, leadership, alliances and rivalries, and shifts in power or status \u2014 not individual scenes. Forbid narrative fluff, dialogue summaries, scene recaps, transient details, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
+    custom: `Generate an information card entry for {{title}} in an interactive, second-person, present-tense story where the narrative's "you"/"your" refers to the player character named {protagonist}. Write the entry strictly in the third person about {{title}}: never use "you" or "your", and mention {protagonist} by name only when directly relevant to {{title}}. The entry is injected into the story WITHOUT its card title, so it MUST self-identify: begin with the field Name: {{title}} on its own first line, then a Type: line stating what kind of thing {{title}} is. Then continue with labeled fields capturing whatever is most salient and enduring for this kind of entry, each on its own line, revising only what the evidence supports. Do not use markdown or leave empty lines. Keep it high-density and well under the 2,000-character ceiling; do not pad. Capture lasting state, not transient scenes. Forbid narrative fluff, dialogue summaries, scene recaps, transient settings, item logs, or passing interactions. Treat this as an active, high-density roleplay instruction guide, not a story timeline. Prioritize pruning and condensing outdated information to conserve space.`,
+    memoraid: `Generate {{title}}'s immediate, first-person interiority for the current moment, written as {{title}} living their own story (the player character {protagonist} is just one more person in {{title}}'s world). First decide whether {{title}} is actually present in the current scene: if {{title}} has been absent for a while, or is only mentioned by others without being there, output exactly OFFSTAGE and nothing else. Otherwise, produce EXACTLY two labeled bullets in {{title}}'s distinct voice:
+- Intake: [1 plain sentence naming what {{title}} actually notices right now \u2014 concrete and specific, in ordinary words. State the observation flatly; do NOT reach for imagery, simile, or literary phrasing, and this is not a mood piece. It is filtered by what THIS person would clock or ignore, but it is still just an observation.]
+- Thought: [EXACTLY 1 sentence of unresolved internal reaction \u2014 a reflex, a gripe, an itch of doubt, a mundane aside, a half-thought, or something slightly off-topic. It must NOT resolve, conclude, or tie itself up: forbid the "\u2026, but\u2026" insight-turn that lands on a tidy realization, forbid summarizing {{title}}'s worldview or their feelings about a person, and forbid a metaphor standing in for an emotion. Leave it partial and specific \u2014 the kind of thing a person half-thinks and then moves on from.]
+For romantic, high-tension, or attraction-based dynamics, let interest surface through what {{title}} notices and how they react rather than physical proximity; keep realistic personal space and boundaries unless a physical escalation is earned by the immediate narrative. Do not use markdown, headers besides the two labels, or empty lines. Wrap the entire response in square brackets: [
+- Intake: ...
+- Thought: ...
+].`,
+    backgroundCharacter: `Generate a COMPACT background-character shell card for {{title}} in an interactive, second-person, present-tense story where "you" is the player character {protagonist}. Write in third person about {{title}}; never use "you"/"your", and mention {protagonist} only if directly involved. The entry is injected without its title, so it MUST self-identify. Output EXACTLY these five labeled lines, each on its own line, NO markdown, NO empty lines, and NO other fields:
+Name: the character's first and last name only \u2014 strip any scenario, event, or venue suffix from the title (e.g. "Jane Doe - Winter Formal" becomes "Jane Doe").
+Appearance: 1-2 sentences of distinct, memorable physical anchors \u2014 build, features, signature style.
+Personality: a single comma-separated list of 4-6 vivid descriptors mixing GOOD and BAD traits; never use the word "analytical".
+Quirks: one sentence of concrete, action-usable habits, tells, or nervous mannerisms.
+Voice: one sentence on how they speak \u2014 tone, pace, and speech style.
+This is a lean behavioral shell for the AI to roleplay from: capture only the outward mask. Do NOT include a Type, Psychology, Worldview, Goals, backstory, relationships, or scene recaps. Keep the whole entry well under 600 characters; do not pad.`,
+    crystallized: `You are distilling long-term memories for {{title}} in a story where the player character is named {protagonist}. Given the recent story actions and thoughts (the buffer), the current permanent SCHEMA (Section I), and a list of dying/fading memories (dying nodes), output a revised card in the following format:
+
+### I. SCHEMA
+Write a compact, evolving bulleted list of permanent semantic knowledge, one block per subject (facts do not fade). When the buffer or a fading memory reveals an enduring fact you have no subject for yet, ADD a new subject line. When it sharpens something you already know, rewrite that subject's line in place. Do not delete active subjects.
+
+### II. NEW NODES
+Provide 1-2 new vivid, first-person episodic snapshot memories (text only, prefix each with "- Snapshot: ") representing the most vivid/important moments from the recent buffer.
+
+Never output vibrancy scores or node IDs. Output only the SCHEMA and the NEW NODES sections.`,
+    crystallizedSchema: `Update {{title}}'s knowledge of the OTHER people, places, and things in their world (including the player character {protagonist}, who is simply one more person in the story). Subjects are not only significant people: also track the topics, foods, media, activities, and objects {{title}} has formed a genuine opinion, preference, or attachment to \u2014 the everyday things they would actually remember and care about (a film they love, a food they hate, a pet theory), never an exhaustive catalog of whatever happens to be present. This card IS {{title}}'s own memory, so NEVER add a "- [{{title}}]" line about {{title}} themselves. For each subject, write ONE concise line combining the key facts AND how {{title}} currently FEELS about them \u2014 factual + emotional, in {{title}}'s first-person voice, one sentence (e.g. "- [Smoke] The stranger who stopped an attack and asked nothing; I feel unexpectedly safe with him."). As the story develops a subject, REWRITE that subject's single line in place to reflect what they have become \u2014 never add a second line for the same subject. Every line MUST follow the EXACT form "- [Subject] one concise factual+emotional sentence". Format exactly as:
+### I. SCHEMA
+- [Subject] ...
+- [Subject] ...
+Output only the SCHEMA section.`,
+    crystallizedNodes: 'You are {{title}}. This is your story, and you live it as its main character. The player character is {protagonist}. The context lists "Your current Vivid Memories" (it may be empty) followed by the recent story actions and thoughts. Reply with your COMPLETE updated list of Vivid Memories: ONE concise first-person line per distinct scene \u2014 the emotional heart of the moment, feeling over factual detail, each under 140 characters. MERGE lines that describe the same scene into a single refined line; if recent events continue a scene you already remember, refine its line instead of adding another. Keep lines still vivid to you, drop what has faded, add a line for each genuinely new scene. Maximum 7 lines. Format each on its own line prefixed with "- Snapshot: ". Output nothing else.',
+    crystallizedOutlook: `You are {{title}}. This is your story, and you live it as its main character. The player character is {protagonist}. The context lists "Your current Beliefs" (it may be empty) followed by the recent story actions and thoughts. Reply with your COMPLETE updated list of beliefs: first-person, GENERALIZED views of yourself or the world \u2014 never about a specific named person (those belong in your knowledge of them, not here). Re-state (refined if needed) every belief that still holds, drop what no longer holds, and add at most 2 new ones only if recent events genuinely shifted something. Maximum 5. Format a first line reading exactly "Beliefs:" followed by each belief on its own line prefixed with "- " (e.g. "- I don't have to perform to be safe.").`,
+    crystallizedPreferences: `You are {{title}}. This is your story, and you live it as its main character. The player character is {protagonist}. The context lists "Your current Preferences" (it may be empty) followed by the recent story actions and thoughts. Reply with your COMPLETE updated list of concrete personal preferences and quirks \u2014 the ordinary TEXTURE of a person: tastes (foods, drinks, films, music, styles), habits, pet peeves, little rituals, and small opinions about particular things. Each line is first-person and CONCRETE (e.g. "- I always order dessert even when I am full.", "- The first fifteen minutes of a surrealist film are the only part I love.", "- I can't stand it when someone tries to fix a problem I only wanted to vent about."). Re-state (refined if needed) every preference that still fits, drop any that no longer do, and add at most 2 new ones only if recent events revealed them. FORBIDDEN: emotional themes, generalized life-philosophy, feelings ABOUT a specific named person, and anything about your relationships, trauma, or personal growth \u2014 those belong in other layers, NOT here. Keep them small, specific, and mundane. Maximum 6. Format a first line reading exactly "Preferences:" followed by each preference on its own line prefixed with "- ".`
+  };
+  var DEFAULT_FORMATTING_MODE = "squareBrackets";
+
+  // src/inference/living-characters.ts
+  /*! @license MIT
+   * The Living Characters engine (relationship "Life Cards", pressures, momentum, and the social
+   * lifecycle modeled across this module and ./bg-life.ts) is adapted WITH EXPLICIT PERMISSION from the
+   * LivingCharacters project by LivingNarratives (aka nerdgrl450 in the AI Dungeon Discord) —
+   * https://github.com/LivingNarratives/LivingCharacters — and used under the terms of its MIT license:
+   *
+   *   Copyright (c) 2026 LivingNarratives
+   *
+   *   Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+   *   associated documentation files (the "Software"), to deal in the Software without restriction,
+   *   including without limitation the rights to use, copy, modify, merge, publish, distribute,
+   *   sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+   *   furnished to do so, subject to the following conditions:
+   *
+   *   The above copyright notice and this permission notice shall be included in all copies or
+   *   substantial portions of the Software.
+   *
+   *   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+   *   NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+   *   NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+   *   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
+   *   OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+   */
+  var DEFAULT_LC_PRESSURES = "attraction\nfondness\nfriendship\nprotectiveness\ncuriosity\nenvy\njealousy\nrivalry\nbetrayal\nresentment\ntrust\nsuspicion";
+  function cleanName(value) {
+    let s = String(value || "").replace(/[^A-Za-z0-9 _'-]/g, " ").trim();
+    s = s.replace(/\s+/g, " ");
+    return s.slice(0, 50);
+  }
+  function keyName(name) {
+    return cleanName(name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  }
+  function buildLifeCardValue(args) {
+    const owner = cleanName(args.owner) || args.owner.trim();
+    const target = cleanName(args.target) || args.target.trim();
+    const pressure = String(args.pressure || "friendship").trim();
+    const occurrence = String(args.occurrence || "none").trim();
+    const momentum = String(args.momentum || "low").trim();
+    const status = String(args.status || "seedling").trim();
+    return [
+      `[`,
+      `${owner} Immediate Life Event:`,
+      `- Target: ${target}`,
+      `- Pressure: ${pressure}`,
+      `- Relationship: ${owner} feels ${pressure} toward ${target}`,
+      `- Urgency: ${momentum}`,
+      `- Latest Occurrence driving pressure: ${occurrence}`,
+      `- Status: ${status}`,
+      `]`
+    ].join("\n");
+  }
+  function parseLifeCardEntry(entry) {
+    if (!entry) return {};
+    const lines = entry.replace(/\r/g, "").split("\n");
+    const data = {};
+    for (const line of lines) {
+      const idx = line.indexOf(":");
+      if (idx !== -1) {
+        const key = line.slice(0, idx).replace(/^\s*-\s*/, "").trim().toLowerCase();
+        const value = line.slice(idx + 1).trim();
+        if (key === "target") data.target = value;
+        else if (key === "pressure") data.pressure = value;
+        else if (key === "occurrence" || key === "latest occurrence" || key === "latest occurrence driving pressure") data.occurrence = value;
+        else if (key === "momentum" || key === "urgency") data.momentum = value;
+        else if (key === "status") {
+          data.status = value.replace(/^🌱\s*/, "").trim();
+        }
+      }
+    }
+    return data;
+  }
+
+  // src/inference/crystallized.ts
+  function parseSubjectLabel(raw) {
+    const s = String(raw || "");
+    const bar = s.indexOf("|");
+    if (bar === -1) return { subject: s.trim(), aliases: [] };
+    const subject = s.slice(0, bar).trim();
+    const aliases = s.slice(bar + 1).split(",").map((a) => a.trim()).filter(Boolean);
+    return { subject, aliases };
+  }
+  var SYNONYM_CLUSTERS = [
+    ["relationship", "connection", "bond"],
+    ["home", "house", "apartment", "flat"],
+    ["job", "work", "career"],
+    ["past", "history", "backstory"]
+  ];
+  var SYNONYM_CANON = /* @__PURE__ */ new Map();
+  for (const cluster of SYNONYM_CLUSTERS) for (const w of cluster) SYNONYM_CANON.set(w, cluster[0]);
+  function parseCrystallized(notes) {
+    const state = {
+      schema: [],
+      nodes: [],
+      unreferencedPasses: {},
+      outlook: [],
+      preferences: []
+    };
+    if (!notes) return state;
+    const header = "[CRYSTALLIZED MEMORY]";
+    const idx = notes.indexOf(header);
+    const block = idx !== -1 ? notes.slice(idx + header.length) : notes;
+    const sections = block.split(/\n###\s+/);
+    for (const sec of sections) {
+      const lines = sec.split("\n");
+      const firstLine = lines[0];
+      const titleLine = firstLine ? firstLine.trim().toLowerCase() : "";
+      if (titleLine.includes("i. schema")) {
+        for (let i = 1; i < lines.length; i++) {
+          const rawLine = lines[i];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (!line.startsWith("- ")) continue;
+          const match = line.match(/^-\s*\[([^\]]+)\]\s*(.*)$/);
+          if (match && match[1] !== void 0 && match[2] !== void 0) {
+            const { subject, aliases } = parseSubjectLabel(match[1]);
+            let text = match[2].trim();
+            const retired = text.endsWith("(retired)");
+            if (retired) {
+              text = text.slice(0, -9).trim();
+              if (text.endsWith(";")) text = text.slice(0, -1).trim();
+              if (text.endsWith("-")) text = text.slice(0, -1).trim();
+              text = text.trim();
+            }
+            state.schema.push({ subject, text, retired, aliases });
+          }
+        }
+      } else if (titleLine.includes("ii. nodes")) {
+        let currentNode = null;
+        for (let i = 1; i < lines.length; i++) {
+          const rawLine = lines[i];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (line.startsWith("- Node_ID:")) {
+            if (currentNode && currentNode.id) {
+              state.nodes.push(currentNode);
+            }
+            currentNode = {
+              id: line.slice(10).trim(),
+              vibrancy: 3,
+              snapshot: "",
+              links: []
+            };
+          } else if (currentNode) {
+            if (line.startsWith("Vibrancy:")) {
+              const vMatch = line.match(/Vibrancy:\s*(\d+)\/3/);
+              if (vMatch && vMatch[1] !== void 0) {
+                currentNode.vibrancy = parseInt(vMatch[1]);
+              }
+            } else if (line.startsWith("Snapshot:")) {
+              let snap = line.slice(9).trim();
+              if (snap.endsWith("]")) snap = snap.slice(0, -1).trim();
+              currentNode.snapshot = snap;
+            } else if (line.startsWith("Links:")) {
+              const linksStr = line.slice(6).trim();
+              currentNode.links = linksStr ? linksStr.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean) : [];
+            } else if (line.startsWith("  ") || line.startsWith("	")) {
+              if (currentNode.snapshot) {
+                currentNode.snapshot += " " + line.trim();
+              }
+            }
+          }
+        }
+        if (currentNode && currentNode.id) {
+          state.nodes.push(currentNode);
+        }
+      } else if (titleLine.includes("iii. bookkeeping") || titleLine.includes("bookkeeping")) {
+        for (let i = 1; i < lines.length; i++) {
+          const rawLine = lines[i];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (line.startsWith("- SubjectUnreferencedPasses:")) {
+            const val = line.slice(28).trim();
+            const pairs = val.split(/[,;]+/);
+            for (const p of pairs) {
+              const parts = p.split("=");
+              if (parts.length === 2) {
+                const p0 = parts[0];
+                const p1 = parts[1];
+                if (p0 && p1) {
+                  state.unreferencedPasses[p0.trim()] = parseInt(p1.trim()) || 0;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return state;
+  }
+
+  // src/inference/panel-search.ts
+  var CRYSTALLIZED_SUFFIX = /\s*-\s*crystallized$/i;
+  function searchPanelItems(query, cards, max = 12) {
+    const q = String(query || "").trim().toLowerCase();
+    if (q.length < 2 || !cards?.length) return [];
+    const scored = [];
+    for (const c of cards) {
+      if (c.deletedAt) continue;
+      const title = String(c.title || "");
+      const titleL = title.toLowerCase();
+      const keysL = String(c.keys || "").toLowerCase();
+      const typeL = String(c.type || "").toLowerCase();
+      let score = -1;
+      if (titleL.startsWith(q)) score = 0;
+      else if (titleL.includes(q)) score = 1;
+      else if (keysL.includes(q)) score = 2;
+      else if (typeL.includes(q)) score = 3;
+      if (score < 0) continue;
+      const isNpc = CRYSTALLIZED_SUFFIX.test(title);
+      scored.push({
+        score,
+        item: isNpc ? { kind: "npc", id: c.id, title: title.replace(CRYSTALLIZED_SUFFIX, ""), sub: "NPC" } : { kind: "card", id: c.id, title, sub: typeL || "card" }
+      });
+    }
+    return scored.sort((a, b) => a.score - b.score).slice(0, Math.max(0, max)).map((s) => s.item);
+  }
+  function pendingDecisionsCount(suggestions, versions) {
+    const s = (suggestions || []).filter((x) => x.status === "pending").length;
+    const v = (versions || []).filter((x) => x.status === "pending").length;
+    return s + v;
+  }
+  function recentDecidedVersions(versions, n = 3) {
+    return (versions || []).filter((v) => v.status !== "pending").sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, Math.max(0, n));
+  }
+
+  // src/content/panel-home.ts
+  function renderHome(root, state, cbs, h) {
+    const pendingEl = root.getElementById("home-pending");
+    const recentEl = root.getElementById("home-recent");
+    if (!pendingEl || !recentEl) return;
+    const pendingSuggestions = (state.locationSuggestions ?? []).filter((s) => s.status === "pending");
+    const pendingVersions = (state.versions ?? []).filter((v) => v.status === "pending");
+    let html = `<div class="home-section-title">Needs your decision</div>`;
+    if (!pendingSuggestions.length && !pendingVersions.length) {
+      html += `<div class="note" style="padding:6px 2px;">Nothing needs your attention.</div>`;
+    }
+    if (pendingSuggestions.length > 0) {
+      const sug = pendingSuggestions[0];
+      const properNoun = sug.properNoun;
+      const defaultTypes = /* @__PURE__ */ new Set(["character", "location", "faction", "class", "race", "memory"]);
+      const existingCustomTypes = Array.from(new Set(
+        (state.cards ?? []).filter((c) => c.type && !defaultTypes.has(c.type.toLowerCase())).map((c) => c.type)
+      ));
+      html += `
+      <div class="location-suggestion-banner" style="background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.20);border-radius:8px;padding:10px;margin-bottom:8px;display:flex;flex-direction:column;gap:8px;box-sizing:border-box;">
+        <div style="font-weight:700;color:var(--theme-text-color);font-size:11px;text-transform:uppercase;letter-spacing:0.03em;">New Noun Detected: "${h.esc(properNoun)}"</div>
+        <div class="note" style="margin:0;font-size:11.5px;line-height:1.4;max-height:80px;overflow-y:auto;background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;border:1px solid rgba(255,255,255,0.04);">Detected in action: <em>"${h.esc(sug.actionText)}"</em></div>
+
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <div style="display:flex;gap:6px;align-items:center;">
+            <label style="font-size:11px;color:var(--text-secondary);white-space:nowrap;">This is a:</label>
+            <select id="suggestion-type-select" style="padding:4px 6px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);flex-grow:1;">
+              <option value="character">Character</option>
+              <option value="location">Location</option>
+              <option value="faction">Faction</option>
+              <option value="class">Class</option>
+              <option value="race">Race</option>
+              <option value="custom">Custom...</option>
+            </select>
+
+            <input type="text" id="suggestion-custom-type-input" list="existing-custom-types" placeholder="Enter type..." style="display:none;padding:4px 6px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);width:100px;box-sizing:border-box;" />
+
+            <datalist id="existing-custom-types">
+              ${existingCustomTypes.map((t) => `<option value="${h.esc(t)}"></option>`).join("")}
+            </datalist>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:6px;margin-top:2px;">
+          <button id="sug-accept-btn" style="background:rgba(16,185,129,0.15);color:#34d399;border-color:rgba(16,185,129,0.3);padding:4px 10px;font-size:10.5px;border-radius:4px;border:1px solid;cursor:pointer;">Add Card</button>
+          <button id="sug-ignore-btn" style="background:rgba(239,68,68,0.15);color:#fca5a5;border-color:rgba(239,68,68,0.3);padding:4px 10px;font-size:10.5px;border-radius:4px;border:1px solid;cursor:pointer;">Ignore</button>
+        </div>
+
+        <div style="display:flex;gap:6px;align-items:center;margin-top:2px;border-top:1px solid rgba(255,255,255,0.06);padding-top:6px;">
+          <label style="font-size:11px;color:var(--text-secondary);white-space:nowrap;">Already tracked?</label>
+          <select id="sug-link-select" style="padding:4px 6px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);flex-grow:1;min-width:0;">${h.buildCardPickerOptions(state.cards)}</select>
+          <button id="sug-link-btn" style="background:rgba(59,130,246,0.15);color:#93c5fd;border-color:rgba(59,130,246,0.3);padding:4px 10px;font-size:10.5px;border-radius:4px;border:1px solid;cursor:pointer;white-space:nowrap;">Link</button>
+        </div>
+      </div>
+    `;
+    }
+    for (const v of pendingVersions) {
+      html += `<div class="home-result-row" style="cursor:default;">
+        <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Proposal: ${h.esc(v.characterName || "Plot Essentials")}</span>
+        <span style="display:flex;gap:6px;flex-shrink:0;">
+          <button class="btn-micro btn-micro--green" data-home-act="applied" data-home-vid="${h.esc(v.id)}">\u2713</button>
+          <button class="btn-micro btn-micro--red" data-home-act="rejected" data-home-vid="${h.esc(v.id)}">\u2717</button>
+        </span>
+      </div>`;
+    }
+    h.setSafeHTML(pendingEl, html);
+    const recent = recentDecidedVersions(state.versions, 3);
+    let rhtml = `<div class="home-section-title">Recent proposals</div>`;
+    rhtml += recent.length ? recent.map((v) => `<div class="home-result-row" style="cursor:default;">
+        <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${h.esc(v.characterName || "Plot Essentials")}</span>
+        <span class="home-result-sub">${h.esc(v.status)}</span>
+      </div>`).join("") : `<div class="note" style="padding:6px 2px;">No proposals yet.</div>`;
+    h.setSafeHTML(recentEl, rhtml);
+    pendingEl.querySelectorAll("[data-home-act]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const vid = btn.getAttribute("data-home-vid");
+        const act = btn.getAttribute("data-home-act");
+        if (vid && cbs.proposalDecision) cbs.proposalDecision(vid, act);
+      });
+    });
+    if (pendingSuggestions.length > 0) {
+      const sugTypeSelect = pendingEl.querySelector("#suggestion-type-select");
+      const sugCustomInput = pendingEl.querySelector("#suggestion-custom-type-input");
+      sugTypeSelect?.addEventListener("change", () => {
+        if (sugCustomInput) {
+          sugCustomInput.style.display = sugTypeSelect.value === "custom" ? "inline-block" : "none";
+          if (sugTypeSelect.value === "custom") sugCustomInput.focus();
+        }
+      });
+      pendingEl.querySelector("#sug-accept-btn")?.addEventListener("click", () => {
+        const sug = pendingSuggestions[0];
+        let selectedType = sugTypeSelect?.value || "character";
+        if (selectedType === "custom") selectedType = sugCustomInput?.value.trim() || "custom";
+        cbs.respondToProperNounSuggestion?.(sug.properNoun, true, selectedType);
+      });
+      pendingEl.querySelector("#sug-ignore-btn")?.addEventListener("click", () => {
+        const sug = pendingSuggestions[0];
+        cbs.respondToProperNounSuggestion?.(sug.properNoun, false, "character");
+      });
+      const linkSelect = pendingEl.querySelector("#sug-link-select");
+      pendingEl.querySelector("#sug-link-btn")?.addEventListener("click", () => {
+        const cardId = linkSelect?.value || "";
+        if (!cardId) {
+          h.showToast("Pick a card to link to", true);
+          return;
+        }
+        const sug = pendingSuggestions[0];
+        cbs.linkProperNounToCard?.(sug.properNoun, cardId);
+      });
+    }
+  }
+
+  // src/shared/roster.ts
+  var ROSTER_TYPE_LABELS = {
+    character: "Characters",
+    class: "Classes",
+    race: "Races",
+    location: "Locations",
+    faction: "Factions"
+  };
+  function explicitTypeLabel(name, type, lifeTitlePrefix = "life - ") {
+    if (!type) return null;
+    const nameLc = name.trim().toLowerCase();
+    if (nameLc.startsWith(lifeTitlePrefix.toLowerCase()) || nameLc.endsWith(" - crystallized") || nameLc.endsWith(" (memory)") || nameLc.endsWith(" - thoughts")) return null;
+    const lt = type.toLowerCase();
+    if (["character", "location", "faction", "class", "race", "custom"].includes(lt)) {
+      return ROSTER_TYPE_LABELS[lt] || type.charAt(0).toUpperCase() + type.slice(1);
+    }
+    return null;
+  }
+  function computeDeletedNames(cards) {
+    const variants = (c) => {
+      const type = (c.type || "character").toLowerCase();
+      const out = [];
+      const push = (n) => {
+        const k = String(n || "").trim().toLowerCase();
+        if (k) {
+          out.push(k);
+          out.push(`${k}::${type}`);
+        }
+      };
+      for (const key of (c.keys || "").split(/[,;]+/)) push(key);
+      push(c.title || c.keys);
+      push(c.title);
+      return out;
+    };
+    const active = /* @__PURE__ */ new Set();
+    for (const c of cards) if (!c.deletedAt) for (const v of variants(c)) active.add(v);
+    const deleted = /* @__PURE__ */ new Set();
+    for (const c of cards) if (c.deletedAt) {
+      for (const v of variants(c)) if (!active.has(v)) deleted.add(v);
+    }
+    return deleted;
+  }
+  function activeCardsMissingFromRoster(cards, existingGroupKeys) {
+    const existing = /* @__PURE__ */ new Set();
+    for (const k of existingGroupKeys) {
+      const name = (String(k).split("::")[0] || "").trim().toLowerCase();
+      if (name) existing.add(name);
+    }
+    const out = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const c of cards) {
+      if (c.deletedAt) continue;
+      const title = (c.title || "").trim();
+      const tl = title.toLowerCase();
+      const type = (c.type || "character").toLowerCase();
+      if (type !== "character") continue;
+      if (tl.endsWith(" (memory)") || tl.endsWith(" - crystallized") || tl.startsWith("life - ")) continue;
+      const name = title || (c.keys || "").split(/[,;]+/)[0]?.trim() || "";
+      if (!name) continue;
+      const nameLower = name.toLowerCase();
+      if (existing.has(nameLower) || seen.has(nameLower)) continue;
+      seen.add(nameLower);
+      out.push(`${name}::${type}`);
+    }
+    return out;
+  }
+
+  // src/content/panel.ts
+  var TYPE_KEYS = ["character", "class", "race", "location", "faction", "custom", "memoraid"];
+  function isContextValid() {
+    try {
+      if (typeof browser === "undefined" || !browser.runtime) {
+        return false;
+      }
+      browser.runtime.getManifest();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  function safeCallback(cb) {
+    return (...args) => {
+      if (!isContextValid()) {
+        console.warn("[AID panel] Extension context is invalidated. Ignoring action.");
+        return;
+      }
+      return cb?.(...args);
+    };
+  }
+  function setSafeHTML(el, html) {
+    const doc = new DOMParser().parseFromString(`<template>${html}</template>`, "text/html");
+    const tpl = doc.querySelector("template");
+    el.textContent = "";
+    if (tpl) {
+      el.appendChild(document.adoptNode(tpl.content));
+    }
+  }
+  var refreshCb = null;
+  function triggerRefresh() {
+    if (refreshCb) {
+      refreshCb();
+    } else {
+      window.dispatchEvent(new CustomEvent("aid-refresh-panel"));
+    }
+  }
+  function mountPanel() {
+    const getManifestVersion = () => {
+      try {
+        if (typeof browser !== "undefined" && browser.runtime?.getManifest) {
+          const manifest = browser.runtime.getManifest();
+          if (manifest && manifest.version) return manifest.version;
+        }
+      } catch (e) {
+      }
+      try {
+        const g2 = globalThis;
+        if (typeof g2.chrome !== "undefined" && g2.chrome.runtime?.getManifest) {
+          const manifest = g2.chrome.runtime.getManifest();
+          if (manifest && manifest.version) return manifest.version;
+        }
+      } catch (e) {
+      }
+      return "0.2.5";
+    };
+    const version = getManifestVersion();
+    const cbs = {};
+    const registerPanelEvent = (event, cb) => {
+      cbs[event] = safeCallback(cb);
+    };
+    const host = document.createElement("div");
+    host.style.cssText = "position:fixed;z-index:2147483647;";
+    const root = host.attachShadow({ mode: "open" });
+    setSafeHTML(root, buildPanelTemplate(version));
     document.documentElement.appendChild(host);
     function checkUrlVisibility() {
       const isSettingsUrl = location.pathname === "/settings" || location.pathname.endsWith("/settings");
@@ -2791,131 +3836,37 @@ HARD RULES (weaker models break these \u2014 do not):
     setInterval(checkUrlVisibility, 1e3);
     checkUrlVisibility();
     let lastState = null;
+    const crystallizedSchemaCache = /* @__PURE__ */ new Map();
+    const crystallizedPreferencesCache = /* @__PURE__ */ new Map();
+    const crystallizedSchemaFetching = /* @__PURE__ */ new Set();
+    const npcMemoryCache = /* @__PURE__ */ new Map();
+    const npcMemoryFetching = /* @__PURE__ */ new Set();
+    let npcBackfillWatchdog = null;
     const $ = (id) => root.getElementById(id);
     const st = $("st"), results = $("results");
     const keyEl = $("key"), protEl = $("prot"), modelEl = $("model"), winEl = $("win");
-    const memoraidWinEl = $("memoraid-win"), memoraidThoughtWinEl = $("memoraid-thought-win"), memoraidPresenceWinEl = $("memoraid-presence-win");
+    const memoraidThoughtWinEl = $("memoraid-thought-win"), memoraidPresenceWinEl = $("memoraid-presence-win");
     const interceptTimeoutEl = $("intercept-timeout");
     const charCardLimitEl = $("char-card-limit");
+    const memoraidWinEl = $("memoraid-win");
     const thoughtCardLimitEl = $("thought-card-limit");
     const provEl = $("prov"), keyLblEl = $("key-lbl");
     const themeEl = $("theme");
-    function applyMemoraidTiming(stats) {
-      const fmt = (ms) => ms == null ? "\u2013" : `${(ms / 1e3).toFixed(1)}s`;
-      const lastEl = root.getElementById("intercept-timing-last");
-      const avgEl = root.getElementById("intercept-timing-avg");
-      if (lastEl) lastEl.textContent = fmt(stats?.lastMs);
-      if (avgEl) {
-        avgEl.textContent = stats?.avgMs != null ? `${fmt(stats.avgMs)} (${stats.count} run${stats.count === 1 ? "" : "s"})` : "\u2013";
-      }
-    }
-    const modelSearchEl = root.getElementById("model-search");
-    const modelListEl = root.getElementById("model-list");
-    let modelHighlightIdx = -1;
-    function modelFamilyOf(id) {
-      const p = id.split("-");
-      return p.length >= 2 ? `${p[0]} ${p[1]}` : id;
-    }
-    function renderModelList(query) {
-      if (!modelListEl) return;
-      const q = query.trim().toLowerCase();
-      const opts = Array.from(modelEl.options).filter((o) => o.value && o.value.toLowerCase().includes(q));
-      modelHighlightIdx = -1;
-      if (opts.length === 0) {
-        setSafeHTML(modelListEl, `<div style="padding:8px 10px;color:var(--text-secondary);font-size:11px;">No models match \u201C${esc(query)}\u201D</div>`);
-        return;
-      }
-      const selected = modelEl.value;
-      const grouped = q.length === 0;
-      let html = "";
-      let lastFamily = "";
-      for (const o of opts) {
-        if (grouped) {
-          const fam = modelFamilyOf(o.value);
-          if (fam !== lastFamily) {
-            html += `<div style="padding:6px 10px 2px;font-size:9px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-secondary);position:sticky;top:0;background:var(--bg-glass);">${esc(fam)}</div>`;
-            lastFamily = fam;
-          }
-        }
-        const isSel = o.value === selected;
-        html += `<div class="model-opt" data-value="${esc(o.value)}" role="option" style="padding:6px 10px;font-size:12px;cursor:pointer;color:var(--text-primary);${isSel ? "background:var(--accent-glow);font-weight:600;" : ""}">${esc(o.value)}</div>`;
-      }
-      setSafeHTML(modelListEl, html);
-    }
-    function modelOptItems() {
-      return modelListEl ? Array.from(modelListEl.querySelectorAll(".model-opt")) : [];
-    }
-    function applyModelHighlight() {
-      const items = modelOptItems();
-      items.forEach((el, i) => {
-        el.style.background = i === modelHighlightIdx ? "var(--btn-hover)" : el.dataset.value === modelEl.value ? "var(--accent-glow)" : "";
-      });
-      const hl = modelHighlightIdx >= 0 ? items[modelHighlightIdx] : void 0;
-      if (hl) hl.scrollIntoView({ block: "nearest" });
-    }
-    function openModelList() {
-      if (!modelListEl) return;
-      renderModelList(modelSearchEl?.value && modelSearchEl.value !== modelEl.value ? modelSearchEl.value : "");
-      modelListEl.style.display = "block";
-      const sel = modelOptItems().find((el) => el.dataset.value === modelEl.value);
-      if (sel) sel.scrollIntoView({ block: "nearest" });
-    }
-    function closeModelList() {
-      if (modelListEl) modelListEl.style.display = "none";
-      if (modelSearchEl) modelSearchEl.value = modelEl.value;
-    }
-    function selectModel(value) {
-      modelEl.value = value;
-      if (modelSearchEl) modelSearchEl.value = value;
-      if (modelListEl) modelListEl.style.display = "none";
-      modelEl.dispatchEvent(new Event("change"));
-    }
-    if (modelSearchEl && modelListEl) {
-      modelSearchEl.addEventListener("focus", () => {
-        openModelList();
-        modelSearchEl.select();
-      });
-      modelSearchEl.addEventListener("input", () => {
-        renderModelList(modelSearchEl.value);
-        modelListEl.style.display = "block";
-      });
-      modelSearchEl.addEventListener("keydown", (e) => {
-        const items = modelOptItems();
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          modelHighlightIdx = Math.min(items.length - 1, modelHighlightIdx + 1);
-          applyModelHighlight();
-        } else if (e.key === "ArrowUp") {
-          e.preventDefault();
-          modelHighlightIdx = Math.max(0, modelHighlightIdx - 1);
-          applyModelHighlight();
-        } else if (e.key === "Enter") {
-          e.preventDefault();
-          const pick = items[modelHighlightIdx] || items.find((el) => el.dataset.value === modelEl.value) || items[0];
-          if (pick?.dataset.value) selectModel(pick.dataset.value);
-        } else if (e.key === "Escape") {
-          closeModelList();
-          modelSearchEl.blur();
-        }
-      });
-      modelListEl.addEventListener("mousedown", (e) => {
-        const opt = e.target?.closest(".model-opt");
-        if (opt?.dataset.value) {
-          e.preventDefault();
-          selectModel(opt.dataset.value);
-        }
-      });
-      root.addEventListener("mousedown", (e) => {
-        const t = e.target;
-        if (modelListEl.style.display === "block" && !t.closest?.("#model-combo")) closeModelList();
-      });
-    }
+    const enableLcEl = $("enable-living-characters");
+    const lcTitlePrefixEl = $("lc-title-prefix");
+    const lcKeyPrefixEl = $("lc-key-prefix");
+    const groupThoughtsEl = $("group-thoughts-in-roster");
+    const crystallizedIntervalEl = $("crystallized-interval");
+    const crystallizedEntryMaxCharsEl = $("crystallized-max-chars");
+    const crystallizedNodeCapEl = $("crystallized-node-cap");
+    const crystallizedKnowsCapEl = $("crystallized-knows-cap");
+    const crystallizedRecallsCapEl = $("crystallized-recalls-cap");
+    const crystallizedVividCapEl = $("crystallized-vivid-cap");
+    const crystallizedOutlookCapEl = $("crystallized-outlook-cap");
+    const crystallizedPreferencesCapEl = $("crystallized-preferences-cap");
+    const crystallizedNpcMemoryCapEl = $("crystallized-npc-memory-cap");
     function updateProviderLabels() {
       const prov = provEl.value;
-      const gemmaDisclaimerEl = $("gemma-disclaimer");
-      if (gemmaDisclaimerEl) {
-        gemmaDisclaimerEl.style.display = prov === "gemini" ? "block" : "none";
-      }
       if (prov === "openai") {
         keyLblEl.textContent = "OpenAI API key";
         keyEl.placeholder = "sk-...";
@@ -2940,17 +3891,7 @@ HARD RULES (weaker models break these \u2014 do not):
         }
       }
     }
-    provEl.addEventListener("change", () => {
-      updateProviderLabels();
-      if (providerChangeCb) {
-        providerChangeCb(provEl.value, keyEl.value.trim());
-      }
-    });
-    keyEl.addEventListener("change", () => {
-      if (providerChangeCb) {
-        providerChangeCb(provEl.value, keyEl.value.trim());
-      }
-    });
+    provEl.addEventListener("change", updateProviderLabels);
     const box = root.querySelector(".box");
     function updateThemeClass() {
       const val = themeEl.value;
@@ -2960,22 +3901,22 @@ HARD RULES (weaker models break these \u2014 do not):
     }
     themeEl.addEventListener("change", () => {
       updateThemeClass();
-      if (themeChangeCb) {
-        themeChangeCb(themeEl.value);
+      if (cbs.themeChange) {
+        cbs.themeChange(themeEl.value);
       }
     });
+    let dragOccurred = false;
     const toggle = root.getElementById("min-toggle");
     const contentBody = root.getElementById("content-body");
-    let dragOccurred = false;
     let isMinimized = localStorage.getItem("aid-tracker-minimized") === "true";
     function applyPosition() {
       if (isMinimized) {
         host.style.bottom = "auto";
         host.style.right = "auto";
-        const savedLeft2 = localStorage.getItem("aid-tracker-pos-left");
-        const savedTop2 = localStorage.getItem("aid-tracker-pos-top");
-        let leftVal = savedLeft2 ? parseFloat(savedLeft2) : 12;
-        let topVal = savedTop2 ? parseFloat(savedTop2) : window.innerHeight - 60;
+        const savedLeft = localStorage.getItem("aid-tracker-pos-left");
+        const savedTop = localStorage.getItem("aid-tracker-pos-top");
+        let leftVal = savedLeft ? parseFloat(savedLeft) : 12;
+        let topVal = savedTop ? parseFloat(savedTop) : window.innerHeight - 60;
         const maxLeft = Math.max(0, window.innerWidth - 45);
         const maxTop = Math.max(0, window.innerHeight - 45);
         leftVal = Math.max(0, Math.min(leftVal, maxLeft));
@@ -2989,9 +3930,9 @@ HARD RULES (weaker models break these \u2014 do not):
           host.style.left = "10px";
           host.style.right = "10px";
           host.style.top = "60px";
-          host.style.bottom = "80px";
+          host.style.bottom = "auto";
           host.style.width = "calc(100% - 20px)";
-          host.style.height = "calc(100% - 140px)";
+          host.style.height = "min(70dvh, 70vh)";
           box.style.width = "100%";
           box.style.height = "100%";
           box.style.maxWidth = "none";
@@ -2999,10 +3940,10 @@ HARD RULES (weaker models break these \u2014 do not):
         } else {
           host.style.bottom = "auto";
           host.style.right = "auto";
-          const savedLeft2 = localStorage.getItem("aid-tracker-pos-left");
-          const savedTop2 = localStorage.getItem("aid-tracker-pos-top");
-          let leftVal = savedLeft2 ? parseFloat(savedLeft2) : 12;
-          let topVal = savedTop2 ? parseFloat(savedTop2) : window.innerHeight - 500;
+          const savedLeft = localStorage.getItem("aid-tracker-pos-left");
+          const savedTop = localStorage.getItem("aid-tracker-pos-top");
+          let leftVal = savedLeft ? parseFloat(savedLeft) : 12;
+          let topVal = savedTop ? parseFloat(savedTop) : window.innerHeight - 500;
           const maxLeft = Math.max(0, window.innerWidth - 320);
           const maxTop = Math.max(0, window.innerHeight - 300);
           leftVal = Math.max(0, Math.min(leftVal, maxLeft));
@@ -3058,6 +3999,10 @@ HARD RULES (weaker models break these \u2014 do not):
       if (dragOccurred) {
         return;
       }
+      if (target.closest(".main-tab-btn") || target.closest(".subtab-btn")) {
+        const btt = root.getElementById("back-to-top");
+        if (btt) btt.style.display = "none";
+      }
       if (isMinimized) {
         isMinimized = false;
         localStorage.setItem("aid-tracker-minimized", String(isMinimized));
@@ -3066,9 +4011,141 @@ HARD RULES (weaker models break these \u2014 do not):
         isMinimized = true;
         localStorage.setItem("aid-tracker-minimized", String(isMinimized));
         updateMinState();
+      } else if (window.innerWidth <= 600 && target.closest("#drag-handle")) {
+        isMinimized = true;
+        localStorage.setItem("aid-tracker-minimized", String(isMinimized));
+        updateMinState();
       }
     });
+    {
+      let lastScrolledEl = null;
+      const backToTop = root.getElementById("back-to-top");
+      contentBody.addEventListener("scroll", (e) => {
+        const el = e.target;
+        if (!el?.classList) return;
+        if (!(el.classList.contains("scrollable-panel") || el.classList.contains("tab-pane") || el.classList.contains("mb-pane"))) return;
+        lastScrolledEl = el;
+        if (backToTop) backToTop.style.display = el.scrollTop > 300 ? "flex" : "none";
+      }, true);
+      backToTop?.addEventListener("click", () => {
+        lastScrolledEl?.scrollTo({ top: 0, behavior: "smooth" });
+        backToTop.style.display = "none";
+      });
+    }
+    let editableFocused = false;
+    let keyboardMode = false;
+    let exitTimer;
+    const vv = window.visualViewport;
+    let vvBaseline = vv ? vv.height : window.innerHeight;
+    const KEYBOARD_MIN_DELTA = 100;
+    function isEditableTarget(el) {
+      if (!el || !el.tagName) return false;
+      const node = el;
+      const tag = node.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || node.isContentEditable === true;
+    }
+    const KEYBOARD_HIDE_IDS = ["drag-handle", "location-banners-container", "main-tab-nav", "main-footer"];
+    function setChromeHidden(hidden) {
+      for (const id of KEYBOARD_HIDE_IDS) {
+        const el = root.getElementById(id);
+        if (!el) continue;
+        if (hidden) {
+          if (el.dataset.kbPrevDisplay === void 0) el.dataset.kbPrevDisplay = el.style.display;
+          el.style.display = "none";
+        } else if (el.dataset.kbPrevDisplay !== void 0) {
+          el.style.display = el.dataset.kbPrevDisplay;
+          delete el.dataset.kbPrevDisplay;
+        }
+      }
+    }
+    function growFocusedTextarea(el) {
+      if (!vv || window.innerWidth > 600) return;
+      if (!el || el.tagName !== "TEXTAREA") return;
+      const t = el;
+      if (t.dataset.kbPrevMinHeight === void 0) t.dataset.kbPrevMinHeight = t.style.minHeight;
+      t.style.setProperty("min-height", Math.max(120, Math.min(Math.round(vv.height * 0.35), 240)) + "px", "important");
+    }
+    function ungrowTextarea(el) {
+      if (!el || el.tagName !== "TEXTAREA") return;
+      const t = el;
+      if (t.dataset.kbPrevMinHeight !== void 0) {
+        t.style.minHeight = t.dataset.kbPrevMinHeight;
+        delete t.dataset.kbPrevMinHeight;
+      }
+    }
+    function applyKeyboardLayout() {
+      if (!vv) return;
+      keyboardMode = true;
+      setChromeHidden(true);
+      host.style.left = "10px";
+      host.style.right = "10px";
+      host.style.width = "calc(100% - 20px)";
+      host.style.top = Math.max(0, vv.offsetTop + 6) + "px";
+      host.style.height = Math.max(140, vv.height - 12) + "px";
+      box.style.setProperty("max-height", "none", "important");
+      box.style.height = "100%";
+      box.style.width = "100%";
+    }
+    function exitKeyboardLayout() {
+      if (!keyboardMode) return;
+      keyboardMode = false;
+      setChromeHidden(false);
+      box.style.removeProperty("max-height");
+      updateMinState();
+    }
+    function onViewportChange() {
+      if (!vv) return;
+      if (!editableFocused) {
+        vvBaseline = vv.height;
+        if (keyboardMode) exitKeyboardLayout();
+        return;
+      }
+      if (isMinimized || window.innerWidth > 600) return;
+      if (vv.height < vvBaseline - KEYBOARD_MIN_DELTA) {
+        const entering = !keyboardMode;
+        applyKeyboardLayout();
+        if (entering) {
+          const active = root.activeElement;
+          growFocusedTextarea(active);
+          if (isEditableTarget(active)) active.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+      } else {
+        exitKeyboardLayout();
+      }
+    }
+    if (vv) {
+      vv.addEventListener("resize", onViewportChange);
+      vv.addEventListener("scroll", onViewportChange);
+    }
+    root.addEventListener("focusin", (e) => {
+      const target = e.target;
+      if (!isEditableTarget(target)) return;
+      if (exitTimer) {
+        clearTimeout(exitTimer);
+        exitTimer = void 0;
+      }
+      editableFocused = true;
+      if (keyboardMode) growFocusedTextarea(target);
+      setTimeout(() => {
+        if (root.activeElement !== target) return;
+        onViewportChange();
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
+      }, 300);
+    });
+    root.addEventListener("focusout", (e) => {
+      if (!isEditableTarget(e.target)) return;
+      ungrowTextarea(e.target);
+      if (exitTimer) clearTimeout(exitTimer);
+      exitTimer = setTimeout(() => {
+        exitTimer = void 0;
+        const active = root.activeElement;
+        if (isEditableTarget(active)) return;
+        editableFocused = false;
+        exitKeyboardLayout();
+      }, 250);
+    });
     window.addEventListener("resize", () => {
+      if (editableFocused || keyboardMode) return;
       updateMinState();
     });
     updateMinState();
@@ -3166,7 +4243,55 @@ HARD RULES (weaker models break these \u2014 do not):
     const viewTracker = root.getElementById("view-tracker");
     const viewSettings = root.getElementById("view-settings");
     const viewAnalyze = root.getElementById("view-analyze");
+    const viewEditor = root.getElementById("view-editor");
     const analyzeBody = root.getElementById("analyze-body");
+    const setupHelperContainer = root.getElementById("setup-helper-container");
+    function getFormattedChipValue(key, val) {
+      const k = key.trim().toLowerCase();
+      const excluded = ["name", "age", "gender", "sex", "backstory", "personality", "biography", "bio", "history", "class", "race", "faction"];
+      if (excluded.includes(k)) {
+        return val;
+      }
+      return `- ${key}: ${val}`;
+    }
+    setupHelperContainer.addEventListener("click", (e) => {
+      const target = e.target;
+      const chip = target.closest(".setup-detail-chip");
+      if (chip) {
+        e.preventDefault();
+        const key = chip.getAttribute("data-key");
+        const val = chip.getAttribute("data-value");
+        if (cbs.fillSetupValue) {
+          const formatted = getFormattedChipValue(key, val);
+          cbs.fillSetupValue(formatted);
+        }
+        return;
+      }
+      const fillBtn = target.closest(".setup-fill-btn");
+      if (fillBtn && lastState?.globalAssets) {
+        e.preventDefault();
+        const assetId = fillBtn.getAttribute("data-id");
+        const asset = lastState.globalAssets.find((a) => a.id === assetId);
+        if (asset) {
+          const field = fillBtn.classList.contains("fill-name") ? "title" : "value";
+          const val = field === "title" ? asset.title || "" : asset.value || asset.description || "";
+          if (val && cbs.fillSetupValue) {
+            cbs.fillSetupValue(val);
+          }
+        }
+      }
+    });
+    setupHelperContainer.addEventListener("input", (e) => {
+      const target = e.target;
+      if (target && target.id === "setup-favorites-search") {
+        const val = target.value;
+        const listEl = root.getElementById("setup-favorites-list");
+        if (listEl && lastState?.globalAssets) {
+          const activeQ = lastState.activeSetupQuestion?.question || "";
+          setSafeHTML(listEl, renderSetupFavorites(lastState.globalAssets, val, activeQ, listEl));
+        }
+      }
+    });
     const toastEl = root.getElementById("toast");
     let toastTimeout = null;
     function showToast(text, isError = false) {
@@ -3195,23 +4320,59 @@ HARD RULES (weaker models break these \u2014 do not):
       viewTracker.style.display = "flex";
       viewSettings.style.display = "none";
       viewAnalyze.style.display = "none";
+      viewEditor.style.display = "none";
     };
     const showSettingsView = () => {
       viewTracker.style.display = "none";
       viewSettings.style.display = "flex";
       viewAnalyze.style.display = "none";
+      viewEditor.style.display = "none";
       switchTab("tab-gen");
     };
     const showAnalyzeView = () => {
       viewTracker.style.display = "none";
       viewSettings.style.display = "none";
       viewAnalyze.style.display = "flex";
+      viewEditor.style.display = "none";
     };
+    let editorReturnTab = "main-tab-home";
+    let editorOnBack = null;
+    const openEditorView = (title, bodyHtml, bind, onBack) => {
+      if (viewEditor.style.display !== "flex") editorReturnTab = activeTabId;
+      editorOnBack = onBack || null;
+      viewTracker.style.display = "none";
+      viewSettings.style.display = "none";
+      viewAnalyze.style.display = "none";
+      viewEditor.style.display = "flex";
+      const titleEl = root.getElementById("editor-title");
+      if (titleEl) titleEl.textContent = title;
+      const body = root.getElementById("editor-body");
+      if (body) {
+        setSafeHTML(body, bodyHtml);
+        bind?.(body);
+      }
+    };
+    const closeEditorView = () => {
+      editorOnBack = null;
+      showTrackerView();
+      switchMainTab(editorReturnTab);
+    };
+    const goEditorBack = () => {
+      if (editorOnBack) {
+        const back = editorOnBack;
+        editorOnBack = null;
+        back();
+        return;
+      }
+      closeEditorView();
+    };
+    root.getElementById("editor-back")?.addEventListener("click", () => goEditorBack());
     const setAnalyzeLoading = () => {
       setSafeHTML(analyzeBody, `<div style="text-align:center;padding:28px 12px;color:var(--text-secondary);"><div class="spinner"></div><div style="margin-top:12px;font-size:12px;font-weight:600;color:var(--text-primary);">Analyzing the story for Plot Essentials updates\u2026</div><div class="note" style="margin-top:6px;">This calls your AI provider, so it can take a bit.</div></div>`);
     };
     root.getElementById("analyze-back").addEventListener("click", showTrackerView);
     let offMetaSections = null;
+    const OFFMETA_PERMISSION_REQUIRED_PREFIX = "PERMISSION_REQUIRED:";
     async function loadOffMetaRepository() {
       const container = root.getElementById("offmeta-repo-container");
       if (!container) return;
@@ -3234,15 +4395,57 @@ HARD RULES (weaker models break these \u2014 do not):
           throw new Error(res?.error || "Invalid response");
         }
       } catch (err) {
+        const rawMessage = err?.message || String(err);
+        const isPermissionError = rawMessage.startsWith(OFFMETA_PERMISSION_REQUIRED_PREFIX);
+        if (isPermissionError) {
+          setSafeHTML(container, `
+          <div style="text-align:center; padding:20px; color:#fca5a5;">
+            <div style="font-weight:bold; margin-bottom:4px; font-size:11px;">Permission needed</div>
+            <div style="font-size:9.5px; margin-bottom:8px;">Firefox needs permission to reach the OffMeta repository (docs.google.com) before it can load these instructions.</div>
+            <button id="offmeta-grant-access" style="margin:0; font-size:9.5px; padding:3px 8px; border-radius:4px; background:rgba(16,185,129,0.12); color:var(--accent-color); border:1px solid rgba(16,185,129,0.3); cursor:pointer;">Grant access</button>
+          </div>
+        `);
+          root.getElementById("offmeta-grant-access")?.addEventListener("click", async () => {
+            try {
+              const res = await browser.runtime.sendMessage({ kind: "openPermissionsPage" });
+              if (!res || !res.ok) {
+                throw new Error(res?.error || "unknown error");
+              }
+            } catch (openErr) {
+              setSafeHTML(container, `
+              <div style="text-align:center; padding:20px; color:#fca5a5;">
+                <div style="font-weight:bold; margin-bottom:4px; font-size:11px;">Failed to open permissions tab</div>
+                <div style="font-size:9.5px; margin-bottom:8px;">${esc(openErr?.message || String(openErr))}</div>
+                <button id="offmeta-retry" style="margin:0; font-size:9.5px; padding:3px 8px; border-radius:4px; background:rgba(239,68,68,0.1); color:#fca5a5; border:1px solid rgba(239,68,68,0.2); cursor:pointer;">Retry</button>
+              </div>
+            `);
+              root.getElementById("offmeta-retry")?.addEventListener("click", () => {
+                loadOffMetaRepository();
+              });
+            }
+          });
+          return;
+        }
         setSafeHTML(container, `
         <div style="text-align:center; padding:20px; color:#fca5a5;">
           <div style="font-weight:bold; margin-bottom:4px; font-size:11px;">Failed to load repository</div>
-          <div style="font-size:9.5px; margin-bottom:8px;">${esc(err?.message || String(err))}</div>
-          <button id="offmeta-retry" style="margin:0; font-size:9.5px; padding:3px 8px; border-radius:4px; background:rgba(239,68,68,0.1); color:#fca5a5; border:1px solid rgba(239,68,68,0.2); cursor:pointer;">Retry</button>
+          <div style="font-size:9.5px; margin-bottom:8px;">${esc(rawMessage)}</div>
+          <div style="display:flex; gap:6px; justify-content:center;">
+            <button id="offmeta-retry" style="margin:0; font-size:9.5px; padding:3px 8px; border-radius:4px; background:rgba(239,68,68,0.1); color:#fca5a5; border:1px solid rgba(239,68,68,0.2); cursor:pointer;">Retry</button>
+            <button id="offmeta-grant-access" style="margin:0; font-size:9.5px; padding:3px 8px; border-radius:4px; background:rgba(16,185,129,0.12); color:var(--accent-color); border:1px solid rgba(16,185,129,0.3); cursor:pointer;">Grant access</button>
+          </div>
         </div>
       `);
         root.getElementById("offmeta-retry")?.addEventListener("click", () => {
           loadOffMetaRepository();
+        });
+        root.getElementById("offmeta-grant-access")?.addEventListener("click", async () => {
+          try {
+            const res = await browser.runtime.sendMessage({ kind: "openPermissionsPage" });
+            if (!res || !res.ok) throw new Error(res?.error || "unknown error");
+          } catch (openErr) {
+            showToast("Failed to open permissions tab: " + (openErr?.message || String(openErr)), true);
+          }
         });
       }
     }
@@ -3252,17 +4455,7 @@ HARD RULES (weaker models break these \u2014 do not):
       const btns = root.querySelectorAll(".offmeta-subtab-btn");
       btns.forEach((b) => {
         const active = b.getAttribute("data-subtab") === subTabId;
-        if (active) {
-          b.style.color = "var(--theme-text-color)";
-          b.style.borderBottomColor = "var(--theme-text-color)";
-          b.style.fontWeight = "700";
-          b.classList.add("active");
-        } else {
-          b.style.color = "var(--text-secondary)";
-          b.style.borderBottomColor = "transparent";
-          b.style.fontWeight = "normal";
-          b.classList.remove("active");
-        }
+        b.classList.toggle("active", active);
       });
       const statusEl = root.getElementById("offmeta-status");
       if (statusEl) statusEl.style.display = "none";
@@ -3337,26 +4530,26 @@ HARD RULES (weaker models break these \u2014 do not):
             for (const item of groupItemsFiltered) {
               const isBlock = item.type === "block";
               const displayTitle = item.title || (isBlock ? "Preset Block" : "Instruction");
+              let itemContent = item.content;
+              const protName = lastState?.protagonist || "";
+              if (protName) {
+                itemContent = itemContent.replace(/\{protagonist\}/gi, protName);
+              }
               groupHtml += `
               <div class="offmeta-item-card" data-id="${item.id}" style="background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:6px;padding:6px 8px;display:flex;flex-direction:column;gap:6px;box-sizing:border-box;transition:all 0.2s ease;">
                 <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;">
                   <span style="font-weight:600;font-size:11.5px;color:var(--theme-text-color);">${esc(displayTitle)}</span>
                   <div style="display:flex;gap:4px;align-items:center;">
-                    <button class="offmeta-copy-btn" data-content="${esc(item.content)}" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(255,255,255,0.04);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:4px;cursor:pointer;" title="Copy to clipboard">Copy</button>
+                    <button class="offmeta-copy-btn" data-content="${esc(itemContent)}" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(255,255,255,0.04);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:4px;cursor:pointer;" title="Copy to clipboard">Copy</button>
             `;
               if (sec.title === "\u{1F916} AN/PE") {
                 groupHtml += `
                     <button class="offmeta-apply-btn" data-id="${item.id}" data-type="an" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Apply to AN</button>
                     <button class="offmeta-apply-btn" data-id="${item.id}" data-type="pe" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Apply to PE</button>
               `;
-              } else if (sec.title === "\u{1F916} Premade AIN") {
-                groupHtml += `
-                    <button class="offmeta-apply-btn" data-id="${item.id}" data-type="ain" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Apply AIN</button>
-              `;
               } else {
                 groupHtml += `
                     <button class="offmeta-apply-btn" data-id="${item.id}" data-type="ain" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Apply AIN</button>
-                    <button class="offmeta-apply-btn" data-id="${item.id}" data-type="an" style="margin:0;padding:3px 6px;font-size:10px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Apply to AN</button>
               `;
               }
               groupHtml += `
@@ -3369,12 +4562,12 @@ HARD RULES (weaker models break these \u2014 do not):
                   <summary style="cursor:pointer;font-size:10.5px;color:var(--text-secondary);padding:2px 0;outline:none;list-style:none;">
                     <span style="border-bottom:1px dashed var(--text-secondary);">Click to preview (${item.content.split("\n").length} lines)</span>
                   </summary>
-                  <pre style="margin:4px 0 0 0;font-family:SFMono-Regular,Consolas,monospace;font-size:10px;background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;color:var(--text-primary);max-height:120px;overflow-y:auto;border:1px solid rgba(255,255,255,0.02);">${esc(item.content)}</pre>
+                  <pre style="margin:4px 0 0 0;font-family:SFMono-Regular,Consolas,monospace;font-size:10px;background:rgba(0,0,0,0.15);padding:6px;border-radius:4px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;color:var(--text-primary);max-height:120px;overflow-y:auto;border:1px solid rgba(255,255,255,0.02);">${esc(itemContent)}</pre>
                 </details>
               `;
               } else {
                 groupHtml += `
-                <div style="font-size:11px;color:var(--text-primary);line-height:1.35;word-break:break-word;">${esc(item.content)}</div>
+                <div style="font-size:11px;color:var(--text-primary);line-height:1.35;word-break:break-word;">${esc(itemContent)}</div>
               `;
               }
               groupHtml += `</div>`;
@@ -3455,7 +4648,7 @@ HARD RULES (weaker models break these \u2014 do not):
                 statusEl.style.color = "#34d399";
                 statusEl.style.display = "block";
               }
-              if (applyInstructionCb) applyInstructionCb();
+              if (cbs.applyInstruction) cbs.applyInstruction();
             } else {
               throw new Error(res?.error || "Save rejected by background service worker.");
             }
@@ -3477,13 +4670,6 @@ HARD RULES (weaker models break these \u2014 do not):
       });
     }
     function switchTab(tabId) {
-      if (tabId === "tab-manager" && lastState?.isManagerOnly) {
-        managerShowSettings = false;
-        const tabNav = viewSettings.querySelector(".tab-nav");
-        if (tabNav) tabNav.style.display = "none";
-        const footer = root.getElementById("settings-footer");
-        if (footer) footer.style.display = "none";
-      }
       const panes = root.querySelectorAll(".tab-pane");
       const btns = root.querySelectorAll(".tab-btn");
       panes.forEach((p) => {
@@ -3513,9 +4699,7 @@ HARD RULES (weaker models break these \u2014 do not):
         if (tabId) switchTab(tabId);
       });
     });
-    let activeManagerSubtab = "global";
     function switchManagerSubtab(subtab) {
-      activeManagerSubtab = subtab;
       const globalPane = root.getElementById("subpane-global");
       const explorerPane = root.getElementById("subpane-explorer");
       const btnGlobal = root.getElementById("btn-subtab-global");
@@ -3524,21 +4708,13 @@ HARD RULES (weaker models break these \u2014 do not):
         if (subtab === "global") {
           globalPane.style.display = "flex";
           explorerPane.style.display = "none";
-          btnGlobal.style.color = "var(--theme-text-color)";
-          btnGlobal.style.borderBottom = "2px solid var(--theme-text-color)";
-          btnGlobal.style.fontWeight = "700";
-          btnExplorer.style.color = "var(--text-secondary)";
-          btnExplorer.style.borderBottom = "2px solid transparent";
-          btnExplorer.style.fontWeight = "normal";
+          btnGlobal.classList.add("active");
+          btnExplorer.classList.remove("active");
         } else {
           globalPane.style.display = "none";
           explorerPane.style.display = "flex";
-          btnExplorer.style.color = "var(--theme-text-color)";
-          btnExplorer.style.borderBottom = "2px solid var(--theme-text-color)";
-          btnExplorer.style.fontWeight = "700";
-          btnGlobal.style.color = "var(--text-secondary)";
-          btnGlobal.style.borderBottom = "2px solid transparent";
-          btnGlobal.style.fontWeight = "normal";
+          btnExplorer.classList.add("active");
+          btnGlobal.classList.remove("active");
         }
       }
       if (lastState) {
@@ -3606,13 +4782,13 @@ HARD RULES (weaker models break these \u2014 do not):
         asset.description = description || void 0;
         asset.cardType = scType;
       }
-      if (saveGlobalAssetCb) {
+      if (cbs.saveGlobalAsset) {
         const btn = root.getElementById("btn-save-global");
         const oldText = btn.textContent;
         btn.textContent = "Creating...";
         btn.disabled = true;
         try {
-          const res = await saveGlobalAssetCb(asset);
+          const res = await cbs.saveGlobalAsset(asset);
           if (res?.error) {
             showToast(`Failed to create: ${res.error}`, true);
           } else {
@@ -3735,8 +4911,8 @@ HARD RULES (weaker models break these \u2014 do not):
               <span style="font-size:9.5px;color:var(--text-secondary);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">(${esc(adv.shortId)})</span>
             </div>
             <div style="display:flex;gap:4px;flex-shrink:0;">
-              <button class="btn-restore-adv" data-shortid="${adv.shortId}" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Restore</button>
-              <button class="btn-purge-adv" data-shortid="${adv.shortId}" data-title="${esc(adv.title || "Untitled Adventure")}" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Delete</button>
+              <button class="btn-restore-adv btn-micro btn-micro--green" data-shortid="${adv.shortId}">Restore</button>
+              <button class="btn-purge-adv btn-micro btn-micro--red" data-shortid="${adv.shortId}" data-title="${esc(adv.title || "Untitled Adventure")}">Delete</button>
             </div>
           </div>
         `).join("");
@@ -3862,9 +5038,9 @@ HARD RULES (weaker models break these \u2014 do not):
                   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:4px;">
                     <div style="font-weight:600;font-size:11.5px;color:var(--text-primary);word-break:break-all;">${esc(item.title)}</div>
                     <div style="display:flex;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;">
-                      ${!state.isManagerOnly ? `<button class="btn-import-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Import</button>` : ""}
-                      <button class="btn-edit-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(59,130,246,0.1);color:#60a5fa;border:1px solid rgba(59,130,246,0.2);border-radius:4px;cursor:pointer;">Edit</button>
-                      <button class="btn-delete-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Remove From Favorites</button>
+                      ${!state.isManagerOnly ? `<button class="btn-import-asset btn-micro btn-micro--green">Import</button>` : ""}
+                      <button class="btn-edit-asset btn-micro btn-micro--blue">Edit</button>
+                      <button class="btn-delete-asset btn-micro btn-micro--red">Remove From Favorites</button>
                     </div>
                   </div>
                   ${scMeta}
@@ -3886,9 +5062,9 @@ HARD RULES (weaker models break these \u2014 do not):
                 <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:4px;">
                   <div style="font-weight:600;font-size:11.5px;color:var(--text-primary);word-break:break-all;">${esc(item.title)}</div>
                   <div style="display:flex;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;">
-                    ${!state.isManagerOnly ? `<button class="btn-import-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(16,185,129,0.1);color:#34d399;border:1px solid rgba(16,185,129,0.2);border-radius:4px;cursor:pointer;">Import</button>` : ""}
-                    <button class="btn-edit-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(59,130,246,0.1);color:#60a5fa;border:1px solid rgba(59,130,246,0.2);border-radius:4px;cursor:pointer;">Edit</button>
-                    <button class="btn-delete-asset" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Remove From Favorites</button>
+                    ${!state.isManagerOnly ? `<button class="btn-import-asset btn-micro btn-micro--green">Import</button>` : ""}
+                    <button class="btn-edit-asset btn-micro btn-micro--blue">Edit</button>
+                    <button class="btn-delete-asset btn-micro btn-micro--red">Remove From Favorites</button>
                   </div>
                 </div>
                 <details style="cursor:pointer;" data-open-id="global-val-${item.id}"${isGlobalOpen(`global-val-${item.id}`)}>
@@ -3906,9 +5082,9 @@ HARD RULES (weaker models break these \u2014 do not):
           btn.addEventListener("click", async () => {
             const card = btn.closest(".global-asset-card");
             const assetId = card?.getAttribute("data-id") || "";
-            if (assetId && state.shortId && importGlobalAssetCb) {
+            if (assetId && state.shortId && cbs.importGlobalAsset) {
               btn.textContent = "Importing...";
-              const res = await importGlobalAssetCb(assetId);
+              const res = await cbs.importGlobalAsset(assetId);
               if (res?.error) {
                 showToast(`Import failed: ${res.error}`, true);
                 btn.textContent = "Import";
@@ -3923,19 +5099,30 @@ HARD RULES (weaker models break these \u2014 do not):
           });
         });
         listGlobal.querySelectorAll(".btn-delete-asset").forEach((btn) => {
-          btn.addEventListener("click", async () => {
+          let armTimeout = null;
+          btn.addEventListener("click", async (e) => {
+            e.stopPropagation();
             const card = btn.closest(".global-asset-card");
             const assetId = card?.getAttribute("data-id") || "";
-            if (assetId && deleteGlobalAssetCb) {
-              if (confirm("Are you sure you want to remove this from your favorites?")) {
-                const res = await deleteGlobalAssetCb(assetId);
-                if (res?.error) {
-                  showToast(`Remove failed: ${res.error}`, true);
-                } else {
-                  showToast("Removed from favorites.");
-                  triggerRefresh();
-                }
+            if (!assetId || !cbs.deleteGlobalAsset) return;
+            if (btn.classList.contains("armed")) {
+              clearTimeout(armTimeout);
+              btn.classList.remove("armed");
+              btn.textContent = "Remove From Favorites";
+              const res = await cbs.deleteGlobalAsset(assetId);
+              if (res?.error) {
+                showToast(`Remove failed: ${res.error}`, true);
+              } else {
+                showToast("Removed from favorites.");
+                triggerRefresh();
               }
+            } else {
+              btn.classList.add("armed");
+              btn.textContent = "Confirm Remove?";
+              armTimeout = setTimeout(() => {
+                btn.classList.remove("armed");
+                btn.textContent = "Remove From Favorites";
+              }, 3e3);
             }
           });
         });
@@ -3954,7 +5141,6 @@ HARD RULES (weaker models break these \u2014 do not):
               const valueTextarea = card.querySelector(".edit-asset-value");
               const keysInput = card.querySelector(".edit-asset-keys");
               const descInput = card.querySelector(".edit-asset-desc");
-              const standardTypes = ["character", "location", "faction", "class", "race"];
               let cardType = void 0;
               if (scTypeSelect) {
                 if (scTypeSelect.value === "custom") {
@@ -3981,7 +5167,7 @@ HARD RULES (weaker models break these \u2014 do not):
                 const customTypeValue = !isStandard && currentCardType.toLowerCase() !== "custom" ? currentCardType : "";
                 return `
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Story Card Type</label>
-                <select class="edit-sc-type" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;">
+                <select class="edit-sc-type input-compact input-dark" style="margin:0;">
                   <option value="character" ${scType === "character" ? "selected" : ""}>Character</option>
                   <option value="location" ${scType === "location" ? "selected" : ""}>Location</option>
                   <option value="faction" ${scType === "faction" ? "selected" : ""}>Faction</option>
@@ -3992,28 +5178,28 @@ HARD RULES (weaker models break these \u2014 do not):
 
                 <div class="edit-sc-custom-type-container" style="display:${scType === "custom" ? "flex" : "none"};flex-direction:column;gap:6px;">
                   <label style="font-size:9.5px;font-weight:600;margin:0;">Custom Type</label>
-                  <input class="edit-sc-custom-type" type="text" value="${esc(customTypeValue)}" placeholder="Enter custom type..." style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+                  <input class="edit-sc-custom-type input-compact input-dark" type="text" value="${esc(customTypeValue)}" placeholder="Enter custom type..." style="margin:0;" />
                 </div>
 
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Name</label>
-                <input class="edit-asset-title" type="text" value="${esc(vals.title)}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+                <input class="edit-asset-title input-compact input-dark" type="text" value="${esc(vals.title)}" style="margin:0;" />
 
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Entry</label>
-                <textarea class="edit-asset-value" rows="6" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(vals.value)}</textarea>
+                <textarea class="edit-asset-value input-compact input-dark" rows="6" style="margin:0;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(vals.value)}</textarea>
 
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Triggers</label>
-                <input class="edit-asset-keys" type="text" value="${esc(vals.keys || "")}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+                <input class="edit-asset-keys input-compact input-dark" type="text" value="${esc(vals.keys || "")}" style="margin:0;" />
 
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Notes</label>
-                <input class="edit-asset-desc" type="text" value="${esc(vals.description || "")}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+                <input class="edit-asset-desc input-compact input-dark" type="text" value="${esc(vals.description || "")}" style="margin:0;" />
               `;
               } else {
                 return `
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Title</label>
-                <input class="edit-asset-title" type="text" value="${esc(vals.title)}" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;" />
+                <input class="edit-asset-title input-compact input-dark" type="text" value="${esc(vals.title)}" style="margin:0;" />
 
                 <label style="font-size:9.5px;font-weight:600;margin:0;">Value</label>
-                <textarea class="edit-asset-value" rows="6" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(vals.value)}</textarea>
+                <textarea class="edit-asset-value input-compact input-dark" rows="6" style="margin:0;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(vals.value)}</textarea>
               `;
               }
             };
@@ -4022,7 +5208,7 @@ HARD RULES (weaker models break these \u2014 do not):
               <div style="font-weight:700;font-size:10px;text-transform:uppercase;color:var(--text-secondary);">Edit Favorite</div>
               
               <label style="font-size:9.5px;font-weight:600;margin:0;">Asset Type</label>
-              <select class="edit-asset-type" style="margin:0;padding:4px;font-size:11px;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;">
+              <select class="edit-asset-type input-compact input-dark" style="margin:0;">
                 <option value="ain" ${currentType === "ain" ? "selected" : ""}>AI Instructions (AIN)</option>
                 <option value="an" ${currentType === "an" ? "selected" : ""}>Author's Note (AN)</option>
                 <option value="pe" ${currentType === "pe" ? "selected" : ""}>Character Description (PE)</option>
@@ -4034,7 +5220,7 @@ HARD RULES (weaker models break these \u2014 do not):
               
               <div style="display:flex;gap:4px;justify-content:flex-end;margin-top:4px;">
                 <button class="btn-save-edit" style="margin:0;padding:2px 8px;font-size:10px;background:rgba(16,185,129,0.2);color:#34d399;border:1px solid rgba(16,185,129,0.3);border-radius:4px;cursor:pointer;">Save</button>
-                <button class="btn-cancel-edit" style="margin:0;padding:2px 8px;font-size:10px;background:rgba(255,255,255,0.05);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:4px;cursor:pointer;">Cancel</button>
+                <button class="btn-cancel-edit btn-cancel" style="margin:0;">Cancel</button>
               </div>
             </div>
           `);
@@ -4075,7 +5261,7 @@ HARD RULES (weaker models break these \u2014 do not):
             card.querySelector(".btn-save-edit")?.addEventListener("click", async () => {
               const typeSelect = card.querySelector(".edit-asset-type");
               const vals = getFormValues();
-              if (saveGlobalAssetCb) {
+              if (cbs.saveGlobalAsset) {
                 const newType = typeSelect.value;
                 const updatedAsset = {
                   ...asset,
@@ -4086,7 +5272,7 @@ HARD RULES (weaker models break these \u2014 do not):
                   description: newType === "sc" ? vals.description : void 0,
                   cardType: newType === "sc" ? vals.cardType : void 0
                 };
-                const res = await saveGlobalAssetCb(updatedAsset);
+                const res = await cbs.saveGlobalAsset(updatedAsset);
                 if (res?.error) {
                   showToast(`Save failed: ${res.error}`, true);
                 } else {
@@ -4098,7 +5284,7 @@ HARD RULES (weaker models break these \u2014 do not):
           });
         });
       }
-      const adventures = state.adventures || [];
+      const adventures = [...state.adventures || []].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
       const allCards = state.isManagerOnly ? state.cards || [] : state.allCards || [];
       if (adventures.length === 0) {
         setSafeHTML(listExplorer, `<div style="text-align:center;color:var(--text-secondary);padding:20px 0;font-size:11.5px;">No saved adventures found in the database.</div>`);
@@ -4120,7 +5306,7 @@ HARD RULES (weaker models break these \u2014 do not):
               <span style="flex:1;word-break:break-all;font-size:11.5px;text-align:left;">\u{1F4C1} ${esc(adv.title || "Untitled Adventure")} <span style="font-weight:normal;font-size:9.5px;color:var(--text-secondary);">(${esc(adv.shortId)})</span></span>
               <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
                 <span style="font-size:9.5px;background:var(--btn-bg);padding:2px 6px;border-radius:4px;color:var(--text-secondary);">${assetsCount} assets</span>
-                <button class="btn-delete-adv" data-shortid="${adv.shortId}" data-title="${esc(adv.title || "Untitled Adventure")}" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Remove from...</button>
+                <button class="btn-delete-adv btn-micro btn-micro--red" data-shortid="${adv.shortId}" data-title="${esc(adv.title || "Untitled Adventure")}">Remove from...</button>
               </div>
             </summary>
             <div style="padding:0 8px 8px 8px;border-top:1px solid var(--border-color);margin-top:4px;display:flex;flex-direction:column;gap:8px;">
@@ -4271,10 +5457,10 @@ HARD RULES (weaker models break these \u2014 do not):
               (a) => a.type === type && a.title === title && a.value === value && (a.keys || "") === (keys || "")
             );
             if (existing) {
-              if (deleteGlobalAssetCb) {
+              if (cbs.deleteGlobalAsset) {
                 btn.textContent = "\u2606";
                 btn.style.color = "var(--text-secondary)";
-                const res = await deleteGlobalAssetCb(existing.id);
+                const res = await cbs.deleteGlobalAsset(existing.id);
                 if (res?.error) {
                   showToast(`Failed to remove favorite: ${res.error}`, true);
                   btn.textContent = "\u2605";
@@ -4285,7 +5471,7 @@ HARD RULES (weaker models break these \u2014 do not):
                 }
               }
             } else {
-              if (saveGlobalAssetCb) {
+              if (cbs.saveGlobalAsset) {
                 btn.textContent = "\u2605";
                 btn.style.color = "var(--theme-text-color)";
                 const asset = {
@@ -4298,13 +5484,13 @@ HARD RULES (weaker models break these \u2014 do not):
                   createdAt: (/* @__PURE__ */ new Date()).toISOString(),
                   cardType: cardType || void 0
                 };
-                const res = await saveGlobalAssetCb(asset);
+                const res = await cbs.saveGlobalAsset(asset);
                 if (res?.error) {
                   showToast(`Failed to favorite: ${res.error}`, true);
                   btn.textContent = "\u2606";
                   btn.style.color = "var(--text-secondary)";
                 } else {
-                  showToast(`Added '${title}' to favorites.`);
+                  showToast(`Added '${title}' to Favorites!`);
                   triggerRefresh();
                 }
               }
@@ -4350,7 +5536,7 @@ HARD RULES (weaker models break these \u2014 do not):
       if (statusEl) statusEl.style.display = "none";
       renderOffMetaRepository();
     });
-    const openSettingsHandler = () => {
+    $("open-settings").addEventListener("click", () => {
       root.getElementById("prompt-s1").value = lastState?.settings?.customPromptSection1 || DEFAULT_PROMPT_SECTION_1;
       root.getElementById("prompt-s2").value = lastState?.settings?.customPromptSection2 || DEFAULT_PROMPT_SECTION_2;
       root.getElementById("prompt-s3").value = lastState?.settings?.customPromptSection3 || DEFAULT_PROMPT_SECTION_3;
@@ -4361,34 +5547,11 @@ HARD RULES (weaker models break these \u2014 do not):
       }
       const fmtEl = root.getElementById("fmt-mode");
       if (fmtEl) fmtEl.value = lastState?.settings?.formattingMode || DEFAULT_FORMATTING_MODE;
-    };
-    $("open-settings").addEventListener("click", () => {
-      openSettingsHandler();
       showSettingsView();
     });
-    $("open-settings-manager")?.addEventListener("click", () => {
-      managerShowSettings = true;
-      openSettingsHandler();
-      if (lastState) {
-        api.render(lastState);
-      }
-    });
-    $("cancel-settings").addEventListener("click", () => {
-      if (lastState?.isManagerOnly) {
-        managerShowSettings = false;
-        switchTab("tab-manager");
-      } else {
-        showTrackerView();
-      }
-    });
+    $("cancel-settings").addEventListener("click", showTrackerView);
     $("view-settings").addEventListener("click", (e) => {
       const target = e.target;
-      const createConfigTab = target.closest("#create-memoraid-config-btn-tab");
-      if (createConfigTab && createConfigCb) {
-        createConfigTab.disabled = true;
-        createConfigTab.textContent = "\u23F3 Creating Config Card...";
-        createConfigCb();
-      }
       const genQrBtn = target.closest("#gen-qr-btn");
       if (genQrBtn && lastState?.settings) {
         genQrBtn.disabled = true;
@@ -4408,13 +5571,13 @@ HARD RULES (weaker models break these \u2014 do not):
       e.stopPropagation();
       $("overlay-action-lookback").style.display = "flex";
     });
-    $("info-memories").addEventListener("click", (e) => {
-      e.stopPropagation();
-      $("overlay-memories").style.display = "flex";
-    });
     $("info-memoraid-lookback").addEventListener("click", (e) => {
       e.stopPropagation();
       $("overlay-memoraid-lookback").style.display = "flex";
+    });
+    $("info-memories").addEventListener("click", (e) => {
+      e.stopPropagation();
+      $("overlay-memories").style.display = "flex";
     });
     $("info-memoraid-thought").addEventListener("click", (e) => {
       e.stopPropagation();
@@ -4432,66 +5595,6 @@ HARD RULES (weaker models break these \u2014 do not):
       e.stopPropagation();
       $("overlay-help").style.display = "flex";
     });
-    root.addEventListener("click", async (e) => {
-      const target = e.target;
-      if (target.classList.contains("db-backup-trigger")) {
-        e.stopPropagation();
-        if (!backupAllCb) return;
-        try {
-          const res = await backupAllCb();
-          if (res && res.ok && res.data) {
-            const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: "application/json" });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = `aid-story-helper-backup-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`;
-            a.click();
-            URL.revokeObjectURL(url);
-            showToast("Database backup downloaded successfully!");
-          } else {
-            showToast(res?.error || "Failed to generate backup", true);
-          }
-        } catch (err) {
-          showToast(err?.message || String(err), true);
-        }
-      }
-      if (target.closest(".db-restore-trigger")) {
-        e.stopPropagation();
-        if (!restoreAllCb) return;
-        const input = document.createElement("input");
-        input.type = "file";
-        input.accept = ".json";
-        input.addEventListener("change", async () => {
-          const file = input.files?.[0];
-          if (!file) return;
-          const reader = new FileReader();
-          reader.onload = async () => {
-            try {
-              const data = JSON.parse(reader.result);
-              const res = await restoreAllCb?.(data);
-              if (res && res.ok) {
-                showToast("Database restored successfully!");
-                const selfHeal = root.getElementById("self-heal-banner");
-                if (selfHeal) selfHeal.style.display = "none";
-                triggerRefresh();
-              } else {
-                showToast(res?.error || "Failed to restore backup", true);
-              }
-            } catch (err) {
-              showToast("Invalid backup file: " + (err?.message || String(err)), true);
-            }
-          };
-          reader.readAsText(file);
-        });
-        input.click();
-      }
-      if (target.closest("#dismiss-self-heal-btn")) {
-        e.stopPropagation();
-        selfHealDismissed = true;
-        const banner = root.getElementById("self-heal-banner");
-        if (banner) banner.style.display = "none";
-      }
-    });
     let syncKeys = true;
     const acTitleInput = root.getElementById("ac-title");
     const acKeysInput = root.getElementById("ac-keys");
@@ -4503,6 +5606,14 @@ HARD RULES (weaker models break these \u2014 do not):
     acKeysInput.addEventListener("input", () => {
       syncKeys = false;
     });
+    {
+      const acTypeSel = root.getElementById("ac-type");
+      const acCustom = root.getElementById("ac-custom-type");
+      acTypeSel?.addEventListener("change", () => {
+        acCustom.style.display = acTypeSel.value === "custom" ? "block" : "none";
+        if (acTypeSel.value === "custom") acCustom.focus();
+      });
+    }
     $("create-card-trigger").addEventListener("click", (e) => {
       e.stopPropagation();
       syncKeys = true;
@@ -4510,11 +5621,21 @@ HARD RULES (weaker models break these \u2014 do not):
       acKeysInput.value = "";
       root.getElementById("ac-desc").value = "";
       root.getElementById("ac-value").value = "";
+      const acTypeSel = root.getElementById("ac-type");
+      setSafeHTML(acTypeSel, buildTypePickerOptions(lastState?.cards ?? [], "character").replace(/<option value="">None<\/option>/, "") + `<option value="memory">Memory</option>`);
+      acTypeSel.value = "character";
+      const acCustom = root.getElementById("ac-custom-type");
+      acCustom.value = "";
+      acCustom.style.display = "none";
       $("overlay-add-card").style.display = "flex";
     });
     $("ac-submit").addEventListener("click", async () => {
-      if (!createStoryCardCb) return;
-      const type = root.getElementById("ac-type").value;
+      if (!cbs.createStoryCard) return;
+      let type = root.getElementById("ac-type").value;
+      if (type === "custom") {
+        const ct = root.getElementById("ac-custom-type").value.trim();
+        if (ct) type = ct;
+      }
       const title = acTitleInput.value.trim();
       const keys = acKeysInput.value.trim();
       const description = root.getElementById("ac-desc").value.trim();
@@ -4527,7 +5648,7 @@ HARD RULES (weaker models break these \u2014 do not):
       btnSubmit.disabled = true;
       btnSubmit.textContent = "\u23F3 Creating card on AID...";
       try {
-        const res = await createStoryCardCb({ type, title, keys, value, description });
+        const res = await cbs.createStoryCard({ type, title, keys, value, description });
         if (res.error) {
           showToast(res.error, true);
         } else {
@@ -4548,7 +5669,7 @@ HARD RULES (weaker models break these \u2014 do not):
         if (id) $(id).style.display = "none";
       });
     });
-    let activeTabId = "main-tab-tracker";
+    let activeTabId = "main-tab-home";
     let lastViewedMemoriesCount = -1;
     const knownMemories = /* @__PURE__ */ new Set();
     function switchMainTab(tabId) {
@@ -4571,14 +5692,14 @@ HARD RULES (weaker models break these \u2014 do not):
           badge.style.display = "none";
           badge.className = "";
         }
-        if (lastState?.memoryBankEntries) {
-          lastViewedMemoriesCount = lastState.memoryBankEntries.length;
+        if (lastState?.aidMemories) {
+          lastViewedMemoriesCount = lastState.aidMemories.length;
         }
-      } else if (tabId === "main-tab-tracker") {
-        const proposalsBadge = root.getElementById("tracker-proposals-badge");
-        if (proposalsBadge) {
-          proposalsBadge.style.display = "none";
-          proposalsBadge.className = "";
+      } else if (tabId === "main-tab-home") {
+        const pendingBadge = root.getElementById("home-pending-badge");
+        if (pendingBadge) {
+          pendingBadge.style.display = "none";
+          pendingBadge.className = "";
         }
       }
     }
@@ -4588,6 +5709,136 @@ HARD RULES (weaker models break these \u2014 do not):
         if (tabId) switchMainTab(tabId);
       });
     });
+    function navigateToSearchResult(it) {
+      if (it.kind === "npc") {
+        switchMainTab("main-tab-memories");
+        root.querySelector('[data-mbtab="mb-npc"]')?.click();
+        setTimeout(() => {
+          const drawer = root.querySelector(`#mb-npc details[data-key="mbnpc:${CSS.escape(it.title)}"]`);
+          if (drawer) {
+            drawer.open = true;
+            drawer.scrollIntoView({ block: "start", behavior: "smooth" });
+          }
+        }, 50);
+        return;
+      }
+      switchMainTab("main-tab-tracker");
+      setTimeout(() => {
+        const drawer = root.querySelector(`#results details.char-card[data-card-title="${CSS.escape(it.title)}"]`);
+        if (drawer) {
+          drawer.open = true;
+          drawer.scrollIntoView({ block: "start", behavior: "smooth" });
+        }
+      }, 50);
+    }
+    {
+      const searchInput = root.getElementById("home-search");
+      const resultsEl = root.getElementById("home-search-results");
+      const renderResults = () => {
+        if (!searchInput || !resultsEl) return;
+        const items = searchPanelItems(searchInput.value, lastState?.cards);
+        if (!items.length) {
+          resultsEl.style.display = "none";
+          resultsEl.textContent = "";
+          return;
+        }
+        setSafeHTML(resultsEl, items.map((it, i) => `<div class="home-result-row" data-res-idx="${i}">
+           <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(it.title)}</span>
+           <span class="home-result-sub">${esc(it.sub)}</span>
+         </div>`).join(""));
+        resultsEl.style.display = "flex";
+        resultsEl.querySelectorAll("[data-res-idx]").forEach((row) => {
+          row.addEventListener("click", () => {
+            const it = items[Number(row.getAttribute("data-res-idx"))];
+            if (!it) return;
+            resultsEl.style.display = "none";
+            searchInput.value = "";
+            navigateToSearchResult(it);
+          });
+        });
+      };
+      let searchTimer;
+      searchInput?.addEventListener("input", () => {
+        if (searchTimer) clearTimeout(searchTimer);
+        searchTimer = setTimeout(renderResults, 120);
+      });
+    }
+    const lcBtnAddCard = root.getElementById("lc-btn-add-card");
+    const lcAddCardForm = root.getElementById("lc-add-card-form");
+    const lcAddCancelBtn = root.getElementById("lc-add-cancel-btn");
+    const lcAddSubmitBtn = root.getElementById("lc-add-submit-btn");
+    if (lcBtnAddCard && lcAddCardForm) {
+      lcBtnAddCard.addEventListener("click", () => {
+        if (lcAddCardForm.style.display === "none") {
+          lcAddCardForm.style.display = "flex";
+          const ownerSelect = root.getElementById("lc-add-owner");
+          if (ownerSelect) {
+            const rosterText = lastState?.settings?.livingCharactersRoster || "";
+            let roster = rosterText.split("\n").map((n) => n.trim()).filter(Boolean);
+            if (roster.length === 0 && lastState?.cards) {
+              roster = lastState.cards.filter((c) => !c.deletedAt && normalizeType(c.type) === "character" && !(c.title || "").toLowerCase().endsWith(" (memory)")).map((c) => c.title || "").filter(Boolean);
+            }
+            setSafeHTML(ownerSelect, roster.map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join(""));
+          }
+        } else {
+          lcAddCardForm.style.display = "none";
+        }
+      });
+    }
+    if (lcAddCancelBtn && lcAddCardForm) {
+      lcAddCancelBtn.addEventListener("click", () => {
+        lcAddCardForm.style.display = "none";
+      });
+    }
+    if (lcAddSubmitBtn && lcAddCardForm) {
+      lcAddSubmitBtn.addEventListener("click", async () => {
+        const ownerSelect = root.getElementById("lc-add-owner");
+        const targetInput = root.getElementById("lc-add-target");
+        const pressureInput = root.getElementById("lc-add-pressure");
+        const owner = ownerSelect?.value.trim();
+        const target = targetInput?.value.trim();
+        const pressure = pressureInput?.value.trim() || "friendship";
+        if (!owner || !target) {
+          showToast("Owner and Target are required!", true);
+          return;
+        }
+        lcAddSubmitBtn.disabled = true;
+        lcAddSubmitBtn.textContent = "\u23F3 Creating...";
+        try {
+          const titlePrefix = lastState?.settings?.livingCharactersTitlePrefix || "Life - ";
+          const keyPrefix = lastState?.settings?.livingCharactersKeyPrefix || "chaos-v2:";
+          const initialValue = buildLifeCardValue({ owner, target, pressure, occurrence: "none", momentum: "low", status: "seedling" });
+          const initialDesc = `Social Relationship History:
+- Seeded as seedling ${pressure} toward ${target}`;
+          if (cbs.createStoryCard) {
+            const res = await cbs.createStoryCard({
+              type: "Life",
+              title: `${titlePrefix}${owner}`,
+              keys: `${keyPrefix}${keyName(owner)},${owner},${target}`,
+              value: initialValue,
+              description: initialDesc
+            });
+            if (res.error) {
+              showToast(res.error, true);
+            } else {
+              if (cbs.enqueueLifeInjection) {
+                cbs.enqueueLifeInjection(owner, target, pressure, "low").catch(() => {
+                });
+              }
+              showToast(`Seeded Life Card for ${owner}!`);
+              lcAddCardForm.style.display = "none";
+              if (targetInput) targetInput.value = "";
+              if (pressureInput) pressureInput.value = "";
+            }
+          }
+        } catch (err) {
+          showToast(err?.message || String(err), true);
+        } finally {
+          lcAddSubmitBtn.disabled = false;
+          lcAddSubmitBtn.textContent = "Create Life Card";
+        }
+      });
+    }
     const memListEl = root.getElementById("aid-memories-list");
     if (memListEl) {
       memListEl.addEventListener("click", (e) => {
@@ -4595,68 +5846,47 @@ HARD RULES (weaker models break these \u2014 do not):
         const editBtn = target.closest(".mem-edit-btn");
         if (editBtn) {
           const card = editBtn.closest(".memory-card");
-          const textEl = card.querySelector(".memory-card-text");
-          const currentText = textEl.textContent || "";
-          textEl.style.display = "none";
-          editBtn.style.display = "none";
-          let editArea = card.querySelector(".edit-area");
-          if (!editArea) {
-            editArea = document.createElement("div");
-            editArea.className = "edit-area";
-            editArea.style.cssText = "display:flex; flex-direction:column; gap:6px; margin-top:4px;";
-            setSafeHTML(editArea, `
-            <textarea class="edit-textarea" style="width:100%; min-height:60px; background:rgba(0,0,0,0.3); border:1px solid var(--border-color); color:var(--text-primary); border-radius:6px; padding:6px; font-size:11.5px; line-height:1.4; resize:vertical; box-sizing:border-box; outline:none; font-family:inherit;"></textarea>
-            <div style="display:flex; gap:6px; justify-content:flex-end;">
-              <button class="edit-cancel-btn action-btn" style="padding:2px 8px;">Cancel</button>
-              <button class="edit-save-btn action-btn" style="padding:2px 8px; background:rgba(16,185,129,0.15); color:#10b981; border-color:rgba(16,185,129,0.3);">Save</button>
-            </div>
-          `);
-            card.appendChild(editArea);
-          }
-          const textarea = editArea.querySelector(".edit-textarea");
-          textarea.value = currentText;
-          textarea.focus();
-          return;
-        }
-        const cancelBtn = target.closest(".edit-cancel-btn");
-        if (cancelBtn) {
-          const card = cancelBtn.closest(".memory-card");
-          const textEl = card.querySelector(".memory-card-text");
-          const editBtn2 = card.querySelector(".mem-edit-btn");
-          const editArea = card.querySelector(".edit-area");
-          if (textEl) textEl.style.display = "block";
-          if (editBtn2) editBtn2.style.display = "inline-flex";
-          if (editArea) editArea.remove();
-          return;
-        }
-        const saveBtn = target.closest(".edit-save-btn");
-        if (saveBtn) {
-          const card = saveBtn.closest(".memory-card");
           const idx = parseInt(card.getAttribute("data-idx"), 10);
-          const textarea = card.querySelector(".edit-textarea");
-          const newText = textarea.value.trim();
-          if (newText && lastState?.memoryBankEntries) {
-            const updatedMemories = [...lastState.memoryBankEntries];
-            const item = updatedMemories[idx];
-            if (item) {
-              updatedMemories[idx] = {
-                actionIds: item.actionIds || [],
-                text: newText,
-                lastRelevantActionId: item.lastRelevantActionId
-              };
-              updateMemoryBankCb?.(updatedMemories);
+          const textEl = card.querySelector(".memory-card-text");
+          const currentText = textEl?.textContent || "";
+          openEditorView(`Memory Block #${idx + 1}`, `
+          <textarea class="editor-mem-text input-dark" rows="10" style="width:100%;box-sizing:border-box;background:rgba(0,0,0,0.3);border:1px solid var(--border-color);color:var(--text-primary);border-radius:6px;padding:6px;font-size:11.5px;line-height:1.4;resize:vertical;font-family:inherit;"></textarea>
+          <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+            <button class="editor-save-aid-mem action-btn" style="background:rgba(16,185,129,0.15);color:#10b981;border-color:rgba(16,185,129,0.3);">Save</button>
+          </div>
+        `, (body) => {
+            const ta = body.querySelector(".editor-mem-text");
+            if (ta) {
+              ta.value = currentText;
+              ta.focus();
             }
-          }
+            body.querySelector(".editor-save-aid-mem")?.addEventListener("click", () => {
+              const newText = (ta?.value || "").trim();
+              if (newText && lastState?.aidMemories) {
+                const updatedMemories = [...lastState.aidMemories];
+                const item = updatedMemories[idx];
+                if (item) {
+                  updatedMemories[idx] = {
+                    actionIds: item.actionIds || [],
+                    text: newText,
+                    lastRelevantActionId: item.lastRelevantActionId
+                  };
+                  cbs.updateAidMemories?.(updatedMemories);
+                }
+              }
+              closeEditorView();
+            });
+          });
           return;
         }
         const deleteBtn = target.closest(".mem-delete-btn");
         if (deleteBtn) {
           const card = deleteBtn.closest(".memory-card");
           const idx = parseInt(card.getAttribute("data-idx"), 10);
-          if (lastState?.memoryBankEntries) {
-            const updatedMemories = [...lastState.memoryBankEntries];
+          if (lastState?.aidMemories) {
+            const updatedMemories = [...lastState.aidMemories];
             updatedMemories.splice(idx, 1);
-            updateMemoryBankCb?.(updatedMemories);
+            cbs.updateAidMemories?.(updatedMemories);
           }
           return;
         }
@@ -4685,101 +5915,434 @@ HARD RULES (weaker models break these \u2014 do not):
       const fmtEl = root.getElementById("fmt-mode");
       if (fmtEl) fmtEl.value = DEFAULT_FORMATTING_MODE;
     });
-    let decisionCb = null;
-    let pushCb = null;
-    let genCardCb = null;
-    let updateMemoryBankCb = null;
     let refineMemoryBlockCb = null;
-    let analyzeCb = null;
-    let themeChangeCb = null;
-    let applyInstructionCb = null;
-    let createConfigCb = null;
-    let dismissMemoraidBannerCb = null;
-    let createStoryCardCb = null;
-    let saveCardKeysCb = null;
-    results.addEventListener("click", (e) => {
+    let lastDebug = null;
+    const onResultsClick = (e) => {
       const target = e.target;
-      const createConfig = target.closest("#create-memoraid-config-btn");
-      if (createConfig && createConfigCb) {
-        createConfig.disabled = true;
-        createConfig.textContent = "\u23F3 Creating Config Card...";
-        createConfigCb();
-        return;
-      }
-      const dismissBanner = target.closest("#dismiss-memoraid-banner-btn");
-      if (dismissBanner && dismissMemoraidBannerCb) {
-        dismissBanner.disabled = true;
-        dismissMemoraidBannerCb();
-        return;
-      }
       const an = target.closest("#an");
-      if (an && analyzeCb) {
+      if (an && cbs.analyze) {
         showAnalyzeView();
         setAnalyzeLoading();
-        analyzeCb();
+        cbs.analyze();
         return;
       }
       const gen = target.closest("[data-gen-card]");
-      if (gen && genCardCb) {
+      if (gen && cbs.generateCard) {
         const cardId = gen.getAttribute("data-gen-card");
         if (cardId) {
           gen.disabled = true;
-          const providerKey = lastState?.settings?.provider || "claude";
-          let providerLabel = "Claude";
-          if (providerKey === "openai") providerLabel = "OpenAI";
-          else if (providerKey === "gemini") providerLabel = "Gemini";
-          else if (providerKey === "ollama") providerLabel = "Ollama";
-          gen.textContent = `\u23F3 Generating via ${providerLabel}\u2026`;
-          genCardCb(cardId);
+          gen.textContent = "\u23F3 Generating via AID\u2026";
+          cbs.generateCard(cardId);
         }
         return;
       }
-      const triggersSubmit = target.closest(".triggers-submit-btn");
-      if (triggersSubmit && saveCardKeysCb) {
-        const cardId = triggersSubmit.getAttribute("data-card-id");
+      const genc = target.closest("[data-gen-compact]");
+      if (genc && cbs.generateCompactCard) {
+        const cardId = genc.getAttribute("data-gen-compact");
         if (cardId) {
-          const inputEl = results.querySelector(`.triggers-input[data-card-id="${cardId}"]`);
-          const newKeys = inputEl?.value.trim() || "";
-          const btn = triggersSubmit;
+          genc.disabled = true;
+          genc.textContent = "\u23F3 Compacting\u2026";
+          cbs.generateCompactCard(cardId);
+        }
+        return;
+      }
+      const reroll = target.closest("[data-reroll-card]");
+      if (reroll && cbs.rerollAppearance) {
+        const cardId = reroll.getAttribute("data-reroll-card");
+        if (cardId) {
+          reroll.disabled = true;
+          reroll.textContent = "\u23F3 Re-rolling\u2026";
+          cbs.rerollAppearance(cardId);
+        }
+        return;
+      }
+      const distill = target.closest(".distill-now-btn");
+      if (distill && cbs.distillCrystallized) {
+        const cardId = distill.getAttribute("data-card-id");
+        const charName = distill.getAttribute("data-char-name");
+        if (cardId && charName) {
+          distill.disabled = true;
+          distill.textContent = "\u23F3 Distilling...";
+          cbs.distillCrystallized(cardId, charName);
+        }
+        return;
+      }
+      const backfillNpc = target.closest(".backfill-npc-memories-btn");
+      if (backfillNpc && cbs.backfillNpcMemories) {
+        const charName = backfillNpc.getAttribute("data-char-name");
+        if (charName) {
+          backfillNpc.disabled = true;
+          backfillNpc.textContent = "\u23F3 Backfilling...";
+          cbs.backfillNpcMemories(charName);
+          if (npcBackfillWatchdog) clearTimeout(npcBackfillWatchdog);
+          npcBackfillWatchdog = setTimeout(() => {
+            npcBackfillWatchdog = null;
+            refreshOpenNpcBankList(charName);
+            panelHandle.showToast(`Backfill for ${charName} stopped responding \u2014 refresh to see what landed.`, true);
+          }, 6e4);
+        }
+        return;
+      }
+      const npcMemRegen = target.closest(".npc-mem-regen-btn");
+      if (npcMemRegen && cbs.regenerateNpcMemoryBlock) {
+        const charName = npcMemRegen.getAttribute("data-char");
+        const blockId = npcMemRegen.getAttribute("data-block-id");
+        if (charName && blockId) {
+          const btn = npcMemRegen;
           btn.disabled = true;
-          btn.textContent = "\u23F3";
-          saveCardKeysCb(cardId, newKeys).then((res) => {
-            if (res?.error) {
-              showToast(res.error, true);
-            } else {
-              showToast("Triggers updated successfully!");
+          btn.style.opacity = "0.5";
+          btn.title = "Regenerating\u2026";
+          cbs.regenerateNpcMemoryBlock(charName, blockId).then((res) => {
+            const b = res?.block;
+            const cardEl = npcMemRegen.closest(".npc-mem-block");
+            if (b && cardEl) {
+              const textEl = cardEl.querySelector(".memory-card-text");
+              if (textEl) textEl.textContent = b.povText;
+              const key = charName.toLowerCase();
+              const cached = npcMemoryCache.get(key);
+              if (cached) {
+                const i = cached.findIndex((x) => x.blockId === blockId);
+                if (i >= 0) cached[i] = b;
+              }
             }
-          }).catch((err) => {
-            showToast(err?.message || String(err), true);
-          }).finally(() => {
             btn.disabled = false;
-            btn.textContent = "\u2713";
+            btn.style.opacity = "";
+            btn.title = "Regenerate this memory";
+          }).catch(() => {
+            btn.disabled = false;
+            btn.style.opacity = "";
           });
         }
         return;
       }
-      const entrySubmit = target.closest(".entry-submit-btn");
-      if (entrySubmit && saveCardValueCb) {
-        const cardId = entrySubmit.getAttribute("data-card-id");
-        if (cardId) {
-          const inputEl = results.querySelector(`.entry-input[data-card-id="${cardId}"]`);
-          const newValue = inputEl?.value.trim() || "";
-          const btn = entrySubmit;
-          btn.disabled = true;
-          btn.textContent = "\u23F3";
-          saveCardValueCb(cardId, newValue).then((res) => {
+      const npcMemEdit = target.closest(".npc-mem-edit-btn");
+      if (npcMemEdit) {
+        const cardEl = npcMemEdit.closest(".npc-mem-block");
+        const textEl = cardEl?.querySelector(".memory-card-text");
+        const charName = cardEl?.getAttribute("data-char");
+        const blockId = cardEl?.getAttribute("data-block-id");
+        if (cardEl && textEl && charName && blockId) {
+          const cur = textEl.textContent || "";
+          openEditorView(`${charName} \u2014 Memory`, `
+          <textarea class="editor-mem-text input-dark" rows="10" style="width:100%;box-sizing:border-box;background:rgba(0,0,0,0.3);border:1px solid var(--border-color);color:var(--text-primary);border-radius:6px;padding:6px;font-size:11.5px;line-height:1.4;resize:vertical;font-family:inherit;"></textarea>
+          <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+            <button class="editor-save-npc-mem action-btn" style="background:rgba(16,185,129,0.15);color:#10b981;border-color:rgba(16,185,129,0.3);">Save</button>
+          </div>
+        `, (body) => {
+            const ta = body.querySelector(".editor-mem-text");
+            if (ta) {
+              ta.value = cur;
+              ta.focus();
+            }
+            body.querySelector(".editor-save-npc-mem")?.addEventListener("click", async (ev) => {
+              const btn = ev.currentTarget;
+              const newText = (ta?.value || "").trim();
+              if (!newText || !cbs.saveNpcMemoryBlock) return;
+              btn.disabled = true;
+              btn.textContent = "\u23F3 Saving...";
+              try {
+                const r = await cbs.saveNpcMemoryBlock(charName, blockId, newText);
+                if (r?.error) throw new Error(r.error);
+                const key = charName.toLowerCase();
+                const cached = npcMemoryCache.get(key);
+                if (cached) {
+                  const i = cached.findIndex((x) => x.blockId === blockId);
+                  if (i >= 0) cached[i] = { ...cached[i], povText: newText };
+                }
+                showToast("Memory updated.");
+                goEditorBack();
+              } catch (err) {
+                showToast(err?.message || String(err), true);
+                btn.disabled = false;
+                btn.textContent = "Save";
+              }
+            });
+          }, () => openNpcBankView(charName));
+        }
+        return;
+      }
+      const npcMemDel = target.closest(".npc-mem-delete-btn");
+      if (npcMemDel && cbs.deleteNpcMemoryBlock) {
+        const charName = npcMemDel.getAttribute("data-char");
+        const blockId = npcMemDel.getAttribute("data-block-id");
+        if (charName && blockId) {
+          cbs.deleteNpcMemoryBlock(charName, blockId).then(() => {
+            npcMemDel.closest(".npc-mem-block")?.remove();
+            const key = charName.toLowerCase();
+            const cached = npcMemoryCache.get(key);
+            if (cached) npcMemoryCache.set(key, cached.filter((x) => x.blockId !== blockId));
+          });
+        }
+        return;
+      }
+      const mbSubtab = target.closest(".subtab-btn[data-mbtab]");
+      if (mbSubtab) {
+        const which = mbSubtab.getAttribute("data-mbtab");
+        root.querySelectorAll(".subtab-btn[data-mbtab]").forEach((b) => b.classList.toggle("active", b === mbSubtab));
+        root.querySelectorAll(".mb-pane").forEach((p) => {
+          p.style.display = p.id === which ? "flex" : "none";
+        });
+        return;
+      }
+      const consolidateOutlook = target.closest(".consolidate-outlook-btn");
+      if (consolidateOutlook && cbs.consolidateOutlook) {
+        const charName = consolidateOutlook.getAttribute("data-char-name");
+        if (charName) {
+          consolidateOutlook.disabled = true;
+          consolidateOutlook.textContent = "\u23F3 Consolidating...";
+          cbs.consolidateOutlook(charName);
+        }
+        return;
+      }
+      const del = target.closest(".card-delete-btn");
+      if (del && cbs.deleteStoryCard) {
+        const cardId = del.getAttribute("data-card-id");
+        if (!cardId) return;
+        if (del.classList.contains("armed")) {
+          del.classList.remove("armed");
+          del.disabled = true;
+          del.textContent = "\u23F3 Deleting\u2026";
+          cbs.deleteStoryCard(cardId).then((res) => {
             if (res?.error) {
               showToast(res.error, true);
+              del.disabled = false;
+              del.textContent = "Delete";
             } else {
-              showToast("Entry updated successfully!");
+              showToast("Card deleted.");
             }
+          }).catch((err) => {
+            showToast(err?.message || String(err), true);
+            del.disabled = false;
+            del.textContent = "Delete";
+          });
+        } else {
+          del.classList.add("armed");
+          del.textContent = "Confirm delete?";
+          setTimeout(() => {
+            if (del.classList.contains("armed")) {
+              del.classList.remove("armed");
+              del.textContent = "Delete";
+            }
+          }, 3e3);
+        }
+        return;
+      }
+      const openCardEditor = target.closest(".open-card-editor");
+      if (openCardEditor) {
+        const cardId = openCardEditor.getAttribute("data-card-id");
+        const card = cardId ? lastState?.cards?.find((c) => c.id === cardId) : void 0;
+        if (cardId && card) {
+          const origKeys = card.keys || "";
+          const origValue = card.value || "";
+          openEditorView(card.title || "Card", `
+          <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;">Triggers</label>
+          <input class="editor-keys input-dark" type="text" value="${esc(origKeys)}" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:6px 8px;border-radius:6px;font-size:11.5px;" />
+          <label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;margin-top:6px;">Entry</label>
+          <textarea class="editor-entry input-dark" rows="14" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:6px 8px;border-radius:6px;font-size:11.5px;font-family:SFMono-Regular,Consolas,monospace;resize:vertical;">${esc(origValue)}</textarea>
+          <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+            <button class="editor-save-card action-btn" style="background:rgba(16,185,129,0.15);color:#10b981;border-color:rgba(16,185,129,0.3);">Save</button>
+          </div>
+        `, (body) => {
+            body.querySelector(".editor-save-card")?.addEventListener("click", async (ev) => {
+              const btn = ev.currentTarget;
+              const newKeys = body.querySelector(".editor-keys")?.value.trim() ?? origKeys;
+              const newValue = body.querySelector(".editor-entry")?.value.trim() ?? origValue;
+              btn.disabled = true;
+              btn.textContent = "\u23F3 Saving...";
+              try {
+                if (newKeys !== origKeys && cbs.saveCardKeys) {
+                  const r = await cbs.saveCardKeys(cardId, newKeys);
+                  if (r?.error) throw new Error(r.error);
+                }
+                if (newValue !== origValue && cbs.saveCardValue) {
+                  const r = await cbs.saveCardValue(cardId, newValue);
+                  if (r?.error) throw new Error(r.error);
+                }
+                showToast("Card updated.");
+                closeEditorView();
+              } catch (err) {
+                showToast(err?.message || String(err), true);
+                btn.disabled = false;
+                btn.textContent = "Save";
+              }
+            });
+          });
+        }
+        return;
+      }
+      const consolidate = target.closest(".consolidate-crystallized-btn");
+      if (consolidate && cbs.consolidateCrystallized) {
+        const cardId = consolidate.getAttribute("data-card-id");
+        if (cardId) {
+          const btn = consolidate;
+          btn.disabled = true;
+          btn.textContent = "\u23F3 Consolidating...";
+          cbs.consolidateCrystallized(cardId).then((res) => {
+            if (!res?.error) crystallizedSchemaCache.delete(cardId);
           }).catch((err) => {
             showToast(err?.message || String(err), true);
           }).finally(() => {
             btn.disabled = false;
-            btn.textContent = "\u2713";
+            btn.textContent = "Consolidate";
           });
         }
+        return;
+      }
+      const openKnows = target.closest(".open-knows-editor");
+      if (openKnows) {
+        const cardId = openKnows.getAttribute("data-card-id");
+        const charName = openKnows.getAttribute("data-char") || "NPC";
+        if (cardId) {
+          const card = lastState?.cards?.find((c) => c.id === cardId);
+          const schemaItems = crystallizedSchemaCache.get(cardId) || parseCrystallized(card?.description).schema;
+          openEditorView(`${charName} \u2014 Knows`, buildKnowsEditorHtml(cardId, schemaItems));
+        }
+        return;
+      }
+      const openPrefs = target.closest(".open-prefs-editor");
+      if (openPrefs) {
+        const cardId = openPrefs.getAttribute("data-card-id");
+        const charName = openPrefs.getAttribute("data-char") || "NPC";
+        if (cardId) {
+          const prefTexts = crystallizedPreferencesCache.get(cardId) || [];
+          openEditorView(`${charName} \u2014 Preferences`, buildPreferencesEditorHtml(cardId, prefTexts));
+        }
+        return;
+      }
+      const openBank = target.closest(".open-npc-bank");
+      if (openBank) {
+        const charName = openBank.getAttribute("data-char");
+        if (charName) openNpcBankView(charName);
+        return;
+      }
+      const knowsAdd = target.closest(".knows-add");
+      if (knowsAdd) {
+        const cardId = knowsAdd.getAttribute("data-card-id");
+        if (cardId) {
+          const editor = knowsAdd.closest(".knows-editor");
+          const container = editor?.querySelector(".knows-rows-container");
+          if (container) {
+            const idx = container.querySelectorAll(".knows-row").length;
+            const div = document.createElement("div");
+            div.className = "knows-row";
+            div.setAttribute("data-idx", String(idx));
+            div.style.cssText = "display:flex;flex-direction:column;gap:4px;margin-bottom:8px;padding:6px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.04);border-radius:6px;";
+            setSafeHTML(div, `
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input class="knows-canon input-compact input-dark" value="" placeholder="Subject" style="flex:1;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;" />
+              <input class="knows-aliases input-compact input-dark" value="" placeholder="aka (comma-separated)" style="flex:1;background:rgba(255,255,255,0.03);color:var(--text-secondary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;" />
+              <button class="knows-del" data-idx="${idx}" style="background:rgba(239, 68, 68, 0.15);color:#f87171;border:1px solid rgba(239, 68, 68, 0.3);border-radius:4px;cursor:pointer;padding:2px 6px;font-size:11px;">\u2715</button>
+            </div>
+            <textarea class="knows-text input-dark" rows="2" style="background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;font-family:inherit;resize:vertical;"></textarea>
+          `);
+            container.appendChild(div);
+          }
+        }
+        return;
+      }
+      const knowsDel = target.closest(".knows-del");
+      if (knowsDel) {
+        const row = knowsDel.closest(".knows-row");
+        row?.remove();
+        return;
+      }
+      const knowsSave = target.closest(".knows-save");
+      if (knowsSave && cbs.saveCrystallizedSchema) {
+        const cardId = knowsSave.getAttribute("data-card-id");
+        if (cardId) {
+          const editor = knowsSave.closest(".knows-editor");
+          if (editor) {
+            const rows = Array.from(editor.querySelectorAll(".knows-row"));
+            const schema = rows.map((r) => ({
+              subject: r.querySelector(".knows-canon")?.value.trim() || "",
+              aliases: r.querySelector(".knows-aliases")?.value.split(",").map((s) => s.trim()).filter(Boolean) || [],
+              text: r.querySelector(".knows-text")?.value.trim() || ""
+            })).filter((s) => s.subject && s.text);
+            const btn = knowsSave;
+            btn.disabled = true;
+            btn.textContent = "\u23F3 Saving...";
+            cbs.saveCrystallizedSchema(cardId, schema).then((res) => {
+              if (res?.error) {
+                showToast(res.error, true);
+              } else {
+                crystallizedSchemaCache.set(cardId, schema);
+              }
+            }).catch((err) => {
+              showToast(err?.message || String(err), true);
+            }).finally(() => {
+              btn.disabled = false;
+              btn.textContent = "Save Knows";
+            });
+          }
+        }
+        return;
+      }
+      const prefsAdd = target.closest(".prefs-add");
+      if (prefsAdd) {
+        const cardId = prefsAdd.getAttribute("data-card-id");
+        if (cardId) {
+          const editor = prefsAdd.closest(".prefs-editor");
+          const container = editor?.querySelector(".prefs-rows-container");
+          if (container) {
+            const div = document.createElement("div");
+            setSafeHTML(div, prefRowHtml(""));
+            const row = div.firstElementChild;
+            if (row) {
+              container.appendChild(row);
+              row.querySelector(".pref-text")?.focus();
+            }
+          }
+        }
+        return;
+      }
+      const prefsDel = target.closest(".pref-del");
+      if (prefsDel) {
+        prefsDel.closest(".pref-row")?.remove();
+        return;
+      }
+      const prefsSave = target.closest(".prefs-save");
+      if (prefsSave && cbs.savePreferences) {
+        const cardId = prefsSave.getAttribute("data-card-id");
+        if (cardId) {
+          const editor = prefsSave.closest(".prefs-editor");
+          if (editor) {
+            const prefs = Array.from(editor.querySelectorAll(".pref-text")).map((t2) => t2.value.trim()).filter(Boolean);
+            const btn = prefsSave;
+            btn.disabled = true;
+            btn.textContent = "\u23F3 Saving...";
+            cbs.savePreferences(cardId, prefs).then((res) => {
+              if (res?.error) {
+                showToast(res.error, true);
+              } else {
+                crystallizedPreferencesCache.set(cardId, prefs);
+              }
+            }).catch((err) => {
+              showToast(err?.message || String(err), true);
+            }).finally(() => {
+              btn.disabled = false;
+              btn.textContent = "Save Preferences";
+            });
+          }
+        }
+        return;
+      }
+      const memoraidSave = target.closest(".memoraid-save-btn");
+      if (memoraidSave && cbs.setMemoraidCharacters) {
+        const inputEl = results.querySelector(".memoraid-chars-input");
+        const names = (inputEl?.value || "").split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean);
+        const btn = memoraidSave;
+        const orig = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "\u23F3 Saving...";
+        cbs.setMemoraidCharacters(names).then((res) => {
+          if (res?.error) showToast(res.error, true);
+          else showToast("MemorAID characters saved!");
+        }).catch((err) => {
+          showToast(err?.message || String(err), true);
+        }).finally(() => {
+          btn.disabled = false;
+          btn.textContent = orig || "\u{1F4BE} Save Characters";
+        });
         return;
       }
       const t = target.closest("[data-act]");
@@ -4787,28 +6350,124 @@ HARD RULES (weaker models break these \u2014 do not):
       const vid = t.getAttribute("data-vid");
       const act = t.getAttribute("data-act");
       console.log("[AID panel] Click detected. act:", act, "vid:", vid);
-      if (vid && (act === "applied" || act === "rejected") && decisionCb) {
-        console.log("[AID panel] Triggering decisionCb for vid:", vid, "act:", act);
-        decisionCb(vid, act);
+      if (vid && (act === "applied" || act === "rejected") && cbs.proposalDecision) {
+        console.log("[AID panel] Triggering cbs.proposalDecision for vid:", vid, "act:", act);
+        cbs.proposalDecision(vid, act);
       }
-      if (vid && act === "push" && pushCb) {
-        console.log("[AID panel] Triggering pushCb (onPushVersion) for vid:", vid);
-        pushCb(vid);
+      if (vid && act === "push" && cbs.pushVersion) {
+        console.log("[AID panel] Triggering cbs.pushVersion (onPushVersion) for vid:", vid);
+        cbs.pushVersion(vid);
       }
-    });
+    };
+    results.addEventListener("click", onResultsClick);
+    {
+      const mbPaneEl = root.getElementById("main-tab-memories");
+      if (mbPaneEl) mbPaneEl.addEventListener("click", onResultsClick);
+    }
+    {
+      const editorBodyEl = root.getElementById("editor-body");
+      if (editorBodyEl) editorBodyEl.addEventListener("click", onResultsClick);
+    }
     analyzeBody.addEventListener("click", (e) => {
       const t = e.target.closest("[data-act]");
       if (!t) return;
       const vid = t.getAttribute("data-vid");
       const act = t.getAttribute("data-act");
-      if (vid && (act === "applied" || act === "rejected") && decisionCb) {
-        decisionCb(vid, act);
+      if (vid && (act === "applied" || act === "rejected") && cbs.proposalDecision) {
+        cbs.proposalDecision(vid, act);
         const actions = t.closest("[data-prop]")?.querySelector(".prop-actions");
         if (actions) setSafeHTML(actions, act === "applied" ? `<span class="note" style="color:var(--accent-color);font-weight:600;">\u2713 Accepted</span>` : `<span class="note" style="color:#f87171;">Rejected</span>`);
       }
     });
     function esc(s) {
       return s.replace(/[\u0026\u003c\u003e\u0022]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+    }
+    function doesDetailMatchQuestion(key, question) {
+      const k = key.toLowerCase();
+      const q = question.toLowerCase();
+      if (q.includes(k)) return true;
+      if (k === "age" && (q.includes("old") || q.includes("years"))) return true;
+      if (k === "gender" && (q.includes("sex") || q.includes("male") || q.includes("female"))) return true;
+      if (k === "name" && (q.includes("who are you") || q.includes("called") || q.includes("identity"))) return true;
+      return false;
+    }
+    function renderSetupFavorites(globalAssets, filterText = "", activeQuestion = "", existingContainer) {
+      const filtered = (globalAssets ?? []).filter((a) => {
+        if (a.type !== "pe") return false;
+        if (filterText) {
+          const matchText = filterText.toLowerCase();
+          return (a.title || "").toLowerCase().includes(matchText) || (a.keys || "").toLowerCase().includes(matchText) || (a.value || "").toLowerCase().includes(matchText);
+        }
+        return true;
+      });
+      filtered.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+      if (filtered.length === 0) {
+        return `<div style="text-align:center; padding:12px; color:var(--text-secondary); font-size:11px;">No favorite characters found.</div>`;
+      }
+      const existingFavIds = /* @__PURE__ */ new Set();
+      const openFavIds = /* @__PURE__ */ new Set();
+      const container = existingContainer || root.getElementById("setup-favorites-list");
+      if (container) {
+        container.querySelectorAll(".setup-fav-drawer").forEach((el) => {
+          const id = el.getAttribute("data-id");
+          if (id) {
+            existingFavIds.add(id);
+            if (el.open) {
+              openFavIds.add(id);
+            }
+          }
+        });
+      }
+      return filtered.map((a) => {
+        const icon = "\u{1F464}";
+        const typeLabel = "Bio";
+        const details = extractDetailsFromText(a.value).concat(extractDetailsFromText(a.description || ""));
+        details.unshift({ key: "Name", value: a.title });
+        const seenKeys = /* @__PURE__ */ new Set();
+        const uniqueDetails = details.filter((d) => {
+          const k = d.key.toLowerCase();
+          if (seenKeys.has(k)) return false;
+          seenKeys.add(k);
+          return true;
+        });
+        const chipsHtml = uniqueDetails.map((d) => {
+          const isMatch = doesDetailMatchQuestion(d.key, activeQuestion);
+          const style = isMatch ? "background:rgba(168,85,247,0.25); color:#d8b4fe; border:1px solid rgba(168,85,247,0.5); font-weight:600; box-shadow:0 0 4px rgba(168,85,247,0.2);" : "background:rgba(255,255,255,0.04); color:var(--text-secondary); border:1px solid rgba(255,255,255,0.06);";
+          return `
+          <span class="setup-detail-chip" data-key="${esc(d.key)}" data-value="${esc(d.value)}" style="padding:2px 6px; border-radius:4px; font-size:9px; cursor:pointer; max-width:100%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; transition:all 0.15s ease; ${style}" title="Click to fill: ${esc(d.value)}">
+            ${esc(d.key)}: ${esc(d.value)}
+          </span>
+        `;
+        }).join("");
+        const wasPresent = existingFavIds.has(a.id);
+        const isOpen = wasPresent ? openFavIds.has(a.id) : !!(activeQuestion && uniqueDetails.some((d) => doesDetailMatchQuestion(d.key, activeQuestion)));
+        return `
+        <details class="char-card setup-fav-drawer" data-id="${esc(a.id)}" ${isOpen ? "open" : ""}>
+          <summary>
+            <span>
+              ${icon} ${esc(a.title)}
+              <span style="color:var(--text-secondary);font-size:10.5px;font-weight:normal;margin-left:4px;">
+                (${esc(typeLabel)}${a.description || a.keys ? ` - ${esc(a.description || a.keys || "")}` : ""})
+              </span>
+            </span>
+          </summary>
+          <div class="char-card-body" style="background:rgba(0,0,0,0.15); border-top:1px solid rgba(255,255,255,0.04);">
+            <div style="display:flex; justify-content:space-between; align-items:center; font-size:9.5px; color:var(--text-secondary);">
+              <span>Quick Fill:</span>
+              <div style="display:flex; gap:4px;">
+                <button class="setup-fill-btn fill-name" data-id="${esc(a.id)}" style="margin:0; padding:2px 6px; font-size:9px; background:rgba(168,85,247,0.15); color:#c084fc; border:1px solid rgba(168,85,247,0.3); border-radius:4px; cursor:pointer;" title="Fill character name">Name</button>
+                <button class="setup-fill-btn fill-bio" data-id="${esc(a.id)}" style="margin:0; padding:2px 6px; font-size:9px; background:rgba(16,185,129,0.15); color:#34d399; border:1px solid rgba(16,185,129,0.3); border-radius:4px; cursor:pointer;" title="Fill character entry/bio">Full Bio</button>
+              </div>
+            </div>
+            ${chipsHtml ? `
+              <div style="display:flex; flex-wrap:wrap; gap:4px; margin-top:2px;">
+                ${chipsHtml}
+              </div>
+            ` : ""}
+          </div>
+        </details>
+      `;
+      }).join("");
     }
     function buildCardPickerOptions(cards) {
       const TYPE_LABELS = { character: "Characters", class: "Classes", race: "Races", location: "Locations", faction: "Factions", custom: "Custom" };
@@ -4885,9 +6544,149 @@ HARD RULES (weaker models break these \u2014 do not):
       if (res.warnings?.length) {
         html += `<details style="margin-top:8px;"><summary style="cursor:pointer;color:var(--text-secondary);font-size:11px;">${res.warnings.length} warning(s)</summary><ul style="margin:4px 0;padding-left:18px;">` + res.warnings.map((w) => `<li class="note" style="margin:2px 0;">${esc(w)}</li>`).join("") + `</ul></details>`;
       }
-      html += `<button id="analyze-done" style="margin-top:12px;width:100%;background:linear-gradient(135deg, var(--accent-color), var(--accent-border));color:#fff;font-weight:600;padding:6px;border-radius:6px;border:none;">View Tracker</button>`;
+      html += `<button id="analyze-done" class="btn-primary" style="margin-top:12px;width:100%;padding:6px;">View Tracker</button>`;
       setSafeHTML(analyzeBody, html);
       root.getElementById("analyze-done")?.addEventListener("click", showTrackerView);
+    }
+    function buildKnowsEditorHtml(genCardId, schemaItems) {
+      return `<div class="knows-editor" data-card-id="${esc(genCardId)}" style="margin-top:6px;padding:8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:8px;"><div class="knows-rows-container">` + schemaItems.map((item, idx) => `
+        <div class="knows-row" data-idx="${idx}" style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;padding:6px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.04);border-radius:6px;">
+          <div style="display:flex;gap:6px;align-items:center;">
+            <input class="knows-canon input-compact input-dark" value="${esc(item.subject)}" placeholder="Subject" style="flex:1;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;" />
+            <input class="knows-aliases input-compact input-dark" value="${esc((item.aliases || []).join(", "))}" placeholder="aka (comma-separated)" style="flex:1;background:rgba(255,255,255,0.03);color:var(--text-secondary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;" />
+            <button class="knows-del" data-idx="${idx}" style="background:rgba(239, 68, 68, 0.15);color:#f87171;border:1px solid rgba(239, 68, 68, 0.3);border-radius:4px;cursor:pointer;padding:2px 6px;font-size:11px;">\u2715</button>
+          </div>
+          <textarea class="knows-text input-dark" rows="2" style="background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;font-family:inherit;resize:vertical;">${esc(item.text)}</textarea>
+        </div>
+      `).join("") + `</div><div style="display:flex;gap:8px;margin-top:8px;"><button class="knows-add action-btn" data-card-id="${esc(genCardId)}" style="background:rgba(255,255,255,0.04);color:var(--text-primary);border-color:var(--border-color);">+ Add subject</button><button class="knows-save action-btn" data-card-id="${esc(genCardId)}" style="background:rgba(16, 185, 129, 0.15);color:#10b981;border-color:rgba(16, 185, 129, 0.3);">Save Knows</button></div></div>`;
+    }
+    function prefRowHtml(text) {
+      return `<div class="pref-row" style="display:flex;gap:6px;align-items:flex-start;margin-bottom:6px;">
+        <textarea class="pref-text input-dark" rows="2" placeholder="e.g. I hate olives. / I love old Audis. / I don't really have an opinion on breadsticks." style="flex:1;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:4px 6px;border-radius:4px;font-size:11px;font-family:inherit;resize:vertical;">${esc(text)}</textarea>
+        <button class="pref-del" style="background:rgba(239, 68, 68, 0.15);color:#f87171;border:1px solid rgba(239, 68, 68, 0.3);border-radius:4px;cursor:pointer;padding:2px 6px;font-size:11px;">\u2715</button>
+      </div>`;
+    }
+    function buildPreferencesEditorHtml(genCardId, prefTexts) {
+      return `<div class="prefs-editor" data-card-id="${esc(genCardId)}" style="margin-top:6px;padding:8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:8px;"><div class="note" style="margin-bottom:6px;font-size:10px;color:var(--text-secondary);">Tastes, habits, quirks, pet peeves, opinions about things \u2014 positive, negative, or neutral. These never fade; they're pulled in when the scene is relevant. Seed as many as you like.</div><div class="prefs-rows-container">` + (prefTexts.length ? prefTexts.map((t) => prefRowHtml(t)).join("") : "") + `</div><div style="display:flex;gap:8px;margin-top:8px;"><button class="prefs-add action-btn" data-card-id="${esc(genCardId)}" style="background:rgba(255,255,255,0.04);color:var(--text-primary);border-color:var(--border-color);">+ Add preference</button><button class="prefs-save action-btn" data-card-id="${esc(genCardId)}" style="background:rgba(16, 185, 129, 0.15);color:#10b981;border-color:rgba(16, 185, 129, 0.3);">Save Preferences</button></div></div>`;
+    }
+    function renderNpcMemBlockHtml(charName, b) {
+      const c = esc(charName);
+      const id = esc(b.blockId);
+      return `<div class="npc-mem-block memory-card" data-char="${c}" data-block-id="${id}" data-turn-end="${b.turnEnd}">
+        <div class="memory-card-header">
+          <div style="display:flex;align-items:center;color:var(--text-secondary);font-size:10px;">turns ${b.turnStart}\u2013${b.turnEnd}</div>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <button class="npc-mem-regen-btn btn-icon" data-char="${c}" data-block-id="${id}" style="color:#eab308;" title="Regenerate this memory">
+              <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>
+            </button>
+            <button class="npc-mem-edit-btn btn-icon" title="Edit memory">
+              <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c0.39-0.39 0.39-1.02 0-1.41l-2.34-2.34c-0.39-0.39-1.02-0.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+            </button>
+            <button class="npc-mem-delete-btn btn-icon" data-char="${c}" data-block-id="${id}" style="color:#f87171;" title="Delete memory">
+              <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="memory-card-text">${esc(b.povText)}</div>
+      </div>`;
+    }
+    function renderNpcMemList(charName) {
+      const key = charName.toLowerCase();
+      const blocks = npcMemoryCache.get(key);
+      if (!blocks) {
+        if (!npcMemoryFetching.has(key) && cbs.getNpcMemoryBank) {
+          npcMemoryFetching.add(key);
+          cbs.getNpcMemoryBank(charName).then((res) => {
+            npcMemoryCache.set(key, res?.blocks || []);
+            refreshOpenNpcBankList(charName);
+          }).catch(() => {
+          }).finally(() => npcMemoryFetching.delete(key));
+        }
+        return `<div class="note" style="padding:6px;">Loading\u2026</div>`;
+      }
+      if (!blocks.length) return `<div class="note" style="padding:6px;">No memories yet \u2014 use \u201CBackfill memories\u201D.</div>`;
+      return blocks.map((b) => renderNpcMemBlockHtml(charName, b)).join("");
+    }
+    function refreshOpenNpcBankList(charName) {
+      const body = root.getElementById("editor-body");
+      if (!body) return;
+      const list = Array.from(body.querySelectorAll(".npc-mem-list")).find((el) => el.getAttribute("data-char") === charName);
+      if (list) setSafeHTML(list, renderNpcMemList(charName));
+    }
+    function openNpcBankView(charName) {
+      openEditorView(
+        `${charName} \u2014 Memory Bank`,
+        `<div style="display:flex;gap:6px;flex-shrink:0;"><button class="backfill-npc-memories-btn btn-micro btn-micro--green" data-char-name="${esc(charName)}" title="Generate this character's point-of-view memories from the adventure's native memory blocks">Backfill memories</button></div><div class="npc-mem-list" data-char="${esc(charName)}" style="display:flex;flex-direction:column;gap:8px;">${renderNpcMemList(charName)}</div>`
+      );
+    }
+    function insertNpcMemBlock(charName, block) {
+      const key = charName.toLowerCase();
+      const cached = npcMemoryCache.get(key);
+      if (cached && !cached.some((b) => b.blockId === block.blockId)) {
+        cached.push(block);
+        cached.sort((a, b) => b.turnEnd - a.turnEnd);
+      }
+      const pane = root.getElementById("editor-body");
+      if (!pane) return false;
+      let list = null;
+      pane.querySelectorAll(".npc-mem-list").forEach((el) => {
+        if (el.getAttribute("data-char") === charName) list = el;
+      });
+      if (!list) return false;
+      const listEl = list;
+      if (listEl.querySelector(`.npc-mem-block[data-block-id="${block.blockId.replace(/"/g, '\\"')}"]`)) return true;
+      const placeholder = listEl.querySelector(".note");
+      if (placeholder && listEl.children.length === 1) listEl.textContent = "";
+      const frag = document.createElement("div");
+      setSafeHTML(frag, renderNpcMemBlockHtml(charName, block));
+      const node = frag.firstElementChild;
+      if (!node) return true;
+      let inserted = false;
+      for (const existing of Array.from(listEl.querySelectorAll(":scope > .npc-mem-block"))) {
+        const te = Number(existing.getAttribute("data-turn-end") || "0");
+        if (block.turnEnd > te) {
+          listEl.insertBefore(node, existing);
+          inserted = true;
+          break;
+        }
+      }
+      if (!inserted) listEl.appendChild(node);
+      return true;
+    }
+    function renderNpcMemoryBank(state) {
+      const pane = root.getElementById("mb-npc");
+      if (!pane) return;
+      const crystCards = (state.cards || []).filter((c) => !c.deletedAt && (c.title || "").toLowerCase().endsWith(" - crystallized"));
+      if (!crystCards.length) {
+        setSafeHTML(pane, `<div class="note" style="padding:12px;">No Crystallized NPCs yet. Enable Crystallized and add characters in the Card Manager \u2192 MemorAID section.</div>`);
+        return;
+      }
+      const openKeys = /* @__PURE__ */ new Set();
+      pane.querySelectorAll("details[data-key]").forEach((d) => {
+        if (d.open) openKeys.add(d.getAttribute("data-key") || "");
+      });
+      let html = "";
+      for (const cc of crystCards) {
+        const charName = (cc.title || "").replace(/\s*-\s*crystallized$/i, "");
+        const genCardId = cc.id;
+        const cachedSchema = crystallizedSchemaCache.get(genCardId);
+        if (!cachedSchema && !crystallizedSchemaFetching.has(genCardId) && cbs.getCrystallizedSchema) {
+          crystallizedSchemaFetching.add(genCardId);
+          cbs.getCrystallizedSchema(genCardId).then((res) => {
+            if (res?.ok && res.state) {
+              crystallizedSchemaCache.set(genCardId, res.state.schema || []);
+              crystallizedPreferencesCache.set(genCardId, [...res.state.preferences || []].sort((a, b) => b.strength - a.strength).map((p) => p.text));
+              if (lastState) renderNpcMemoryBank(lastState);
+            }
+          }).catch(() => {
+          }).finally(() => crystallizedSchemaFetching.delete(genCardId));
+        }
+        html += `<details class="char-card" data-key="mbnpc:${esc(charName)}"><summary>${esc(charName)}</summary><div style="display:flex;flex-direction:column;gap:6px;margin:8px 0;"><button class="open-knows-editor npc-section-btn" data-card-id="${esc(genCardId)}" data-char="${esc(charName)}"><span>\u{1F9E0} Knows</span><span class="npc-section-chevron">\u203A</span></button><button class="open-prefs-editor npc-section-btn" data-card-id="${esc(genCardId)}" data-char="${esc(charName)}"><span>\u2728 Preferences</span><span class="npc-section-chevron">\u203A</span></button><button class="open-npc-bank npc-section-btn" data-char="${esc(charName)}"><span>\u{1F4DA} Memory Bank</span><span class="npc-section-chevron">\u203A</span></button></div></details>`;
+      }
+      setSafeHTML(pane, html);
+      pane.querySelectorAll("details[data-key]").forEach((d) => {
+        if (openKeys.has(d.getAttribute("data-key") || "")) d.open = true;
+      });
     }
     function renderMemoriesSection(state) {
       const refineBtn = root.getElementById("refine-mem");
@@ -4897,7 +6696,7 @@ HARD RULES (weaker models break these \u2014 do not):
       }
       const memListEl2 = root.getElementById("aid-memories-list");
       if (memListEl2) {
-        if (!state.memoryBankEntries || state.memoryBankEntries.length === 0) {
+        if (!state.aidMemories || state.aidMemories.length === 0) {
           setSafeHTML(memListEl2, `<div class="note" style="padding:12px;text-align:center;">No AID-generated memories captured yet.</div>`);
         } else {
           const actionMap = /* @__PURE__ */ new Map();
@@ -4907,7 +6706,7 @@ HARD RULES (weaker models break these \u2014 do not):
             }
           }
           const isInitialLoad = knownMemories.size === 0;
-          const itemsWithIndex = state.memoryBankEntries.map((m, index) => ({ m, index }));
+          const itemsWithIndex = state.aidMemories.map((m, index) => ({ m, index }));
           const reversedItems = [...itemsWithIndex].reverse();
           setSafeHTML(memListEl2, reversedItems.map(({ m, index }) => {
             const text = typeof m === "string" ? m : m?.text || "";
@@ -4937,17 +6736,17 @@ HARD RULES (weaker models break these \u2014 do not):
                   <span>${statusText}</span>
                 </div>
                 <div style="display:flex;gap:6px;align-items:center;">
-                  <button class="mem-refine-btn" style="background:none;border:none;padding:2px;cursor:pointer;color:#eab308;display:inline-flex;align-items:center;justify-content:center;" title="Regenerate memory block">
+                  <button class="mem-refine-btn btn-icon" style="color:#eab308;" title="Regenerate this memory with your provider">
                     <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                       <path d="M7 2v11h3v9l7-12h-4l4-8z"/>
                     </svg>
                   </button>
-                  <button class="mem-edit-btn" style="background:none;border:none;padding:2px;cursor:pointer;color:var(--text-secondary);display:inline-flex;align-items:center;justify-content:center;" title="Edit memory">
+                  <button class="mem-edit-btn btn-icon" title="Edit memory">
                     <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                       <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c0.39-0.39 0.39-1.02 0-1.41l-2.34-2.34c-0.39-0.39-1.02-0.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
                     </svg>
                   </button>
-                  <button class="mem-delete-btn" style="background:none;border:none;padding:2px;cursor:pointer;color:#f87171;display:inline-flex;align-items:center;justify-content:center;" title="Delete memory">
+                  <button class="mem-delete-btn btn-icon" style="color:#f87171;" title="Delete memory">
                     <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
                       <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
                     </svg>
@@ -4961,7 +6760,7 @@ HARD RULES (weaker models break these \u2014 do not):
           }).join(""));
         }
       }
-      const memoriesCount = state.memoryBankEntries?.length ?? 0;
+      const memoriesCount = state.aidMemories?.length ?? 0;
       if (lastViewedMemoriesCount === -1) {
         lastViewedMemoriesCount = memoriesCount;
       }
@@ -4978,6 +6777,459 @@ HARD RULES (weaker models break these \u2014 do not):
         } else {
           badge.style.display = "none";
           badge.className = "";
+        }
+      }
+    }
+    const PRESET_MODES = [
+      {
+        name: "Drama & Tension",
+        emoji: "\u{1F3AD}",
+        color: "#f97316",
+        rgb: "249,115,22",
+        tagline: "Heart-pounding conflicts. Shifting alliances. Emotional fireworks.",
+        blurb: "Soap-opera twists and love triangles that keep you hooked.",
+        pressures: ["jealousy", "betrayal", "suspicion", "envy", "rivalry", "confrontation", "gossip", "misunderstanding", "obsession"],
+        spark: "A whispered rumor at the dinner table turns into a thrown glass. By midnight, two best friends are not speaking."
+      },
+      {
+        name: "Romance & Connection",
+        emoji: "\u{1F495}",
+        color: "#ec4899",
+        rgb: "236,72,153",
+        tagline: "Slow burns, deep bonds, and feelings that hit hard.",
+        blurb: "The kind of tension that makes the story throb.",
+        pressures: ["attraction", "seduction", "protectiveness", "curiosity", "trust", "jealousy", "teasing", "longing"],
+        spark: "The power cuts out, her hand finds his in the dark, and neither of them lets go first."
+      },
+      {
+        name: "Chaos & High Drama",
+        emoji: "\u{1F480}",
+        color: "#a855f7",
+        rgb: "168,85,247",
+        tagline: "Everything spirals into unpredictable intensity.",
+        blurb: "Reality-TV levels of 'what the hell just happened?'",
+        pressures: ["confrontation", "argument", "suspicion", "narcissism", "overreaction", "paranoia", "betrayal"],
+        spark: "An accusation lands wrong, an old text resurfaces, and suddenly everyone is yelling."
+      },
+      {
+        name: "Comedy & Lighthearted",
+        emoji: "\u{1F923}",
+        color: "#eab308",
+        rgb: "234,179,8",
+        tagline: "Bursts of absurdity to balance the storm.",
+        blurb: "Laughs that make the wild ride even better.",
+        pressures: ["awkward", "misunderstanding", "overreaction", "confusion", "silly behavior"],
+        spark: "He misheard the question, answered with full confidence, and now the room thinks he is proposing."
+      },
+      {
+        name: "Psychological & Depth",
+        emoji: "\u{1F9E0}",
+        color: "#22c55e",
+        rgb: "34,197,94",
+        tagline: "Dive into the hidden mind and soul.",
+        blurb: "Stories that crawl under your skin and stay there.",
+        pressures: ["guilt", "envy", "obsession", "avoidance", "suspicion", "regret", "curiosity", "possession"],
+        spark: "She edits the apology, deletes it, and decides to act like nothing happened. He notices."
+      },
+      {
+        name: "Survival & Challenge",
+        emoji: "\u2622\uFE0F",
+        color: "#ef4444",
+        rgb: "239,68,68",
+        tagline: "High-stakes worlds where every choice bites back.",
+        blurb: "Gritty, morally gray survival that refuses to let go.",
+        pressures: ["scarcity", "resource competition", "paranoia", "betrayal", "self-preservation", "desperation", "territorial behavior", "fear", "mistrust"],
+        spark: "Three cans of food left. Four people. By morning, one bed is empty."
+      }
+    ];
+    const CORE_PRESSURES = ["friendship", "trust", "curiosity", "protectiveness", "jealousy", "rivalry", "attraction", "seduction", "teasing"];
+    const WILDCARDS = ["yelling", "food fight", "awkward silence", "broken glass", "stolen letter", "wrong name", "thunderstorm", "uninvited guest", "burnt dinner", "midnight knock"];
+    function renderLivingCharactersSection(state) {
+      if (!state.settings) return;
+      const statusBanner = root.getElementById("lc-status-banner");
+      if (statusBanner) {
+        statusBanner.innerHTML = `
+        <div style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.2); border-radius:8px; padding:10px; margin-bottom:4px; font-size:11px; line-height:1.4; color:var(--text-secondary);">
+          <div style="font-weight:700; color:#10b981; letter-spacing:0.03em; margin-bottom:2px;">\u{1F331} Living Characters by nerdgrl450</div>
+          <div>NPC relationship threads (Life Cards) are managed directly by the extension. No AI Dungeon scripting sandbox or config cards are required.</div>
+        </div>
+      `;
+      }
+      const rosterEl = root.getElementById("lc-config-roster");
+      const pressuresEl = root.getElementById("lc-config-pressures");
+      const protagonistEl = root.getElementById("lc-config-protagonist");
+      const involvementEl = root.getElementById("lc-config-involvement");
+      const intervalEl = root.getElementById("lc-config-interval");
+      const maxEl = root.getElementById("lc-config-max");
+      const relevanceEl = root.getElementById("lc-config-relevance");
+      const dormancyEl = root.getElementById("lc-config-dormancy");
+      const reseedEl = root.getElementById("lc-config-reseed-cooldown");
+      const staleEl = root.getElementById("lc-config-stale");
+      const maxLifetimeEl = root.getElementById("lc-config-max-lifetime");
+      const lc = state.livingConfig || {};
+      if (rosterEl && root.activeElement !== rosterEl) {
+        let rosterText = lc.roster || "";
+        if (!rosterText && state.cards) {
+          const names = state.cards.filter((c) => !c.deletedAt && normalizeType(c.type) === "character" && !(c.title || "").toLowerCase().endsWith(" (memory)")).map((c) => c.title || "").filter(Boolean);
+          rosterText = names.join("\n");
+        }
+        rosterEl.value = rosterText;
+      }
+      if (pressuresEl && root.activeElement !== pressuresEl) {
+        pressuresEl.value = lc.pressures || DEFAULT_LC_PRESSURES;
+      }
+      if (protagonistEl && root.activeElement !== protagonistEl) {
+        protagonistEl.value = state.protagonist || "";
+      }
+      if (involvementEl) {
+        involvementEl.value = lc.protagonistInvolvement || "normal";
+      }
+      if (intervalEl && root.activeElement !== intervalEl) {
+        intervalEl.value = String(lc.interval ?? 15);
+      }
+      if (maxEl) {
+        maxEl.value = String(lc.maxActive ?? 2);
+      }
+      if (relevanceEl) {
+        relevanceEl.value = lc.sceneRelevance || "strict";
+      }
+      if (dormancyEl && root.activeElement !== dormancyEl) {
+        dormancyEl.value = String(lc.dormancyTurns ?? 7);
+      }
+      if (reseedEl && root.activeElement !== reseedEl) {
+        reseedEl.value = String(lc.reseedCooldown ?? 15);
+      }
+      if (staleEl && root.activeElement !== staleEl) {
+        staleEl.value = String(lc.staleTurns ?? 14);
+      }
+      if (maxLifetimeEl && root.activeElement !== maxLifetimeEl) {
+        maxLifetimeEl.value = String(lc.maxActiveTurns ?? 4);
+      }
+      const continueModeEl = root.getElementById("lc-config-continue-mode");
+      if (continueModeEl) {
+        continueModeEl.value = lc.continueInjectionMode || "defer";
+      }
+      const pairingContainer = root.getElementById("lc-pairing-pools");
+      const pairingDatalist = root.getElementById("lc-character-names");
+      const addPairingBtn = root.getElementById("lc-add-pairing");
+      const pairingRowHtml = (a, b, pressures) => `<div class="lc-pairing-row" style="display:flex; gap:4px; align-items:center; flex-wrap:wrap;"><input class="lc-pair-a input-compact input-dark" list="lc-character-names" placeholder="Character A" value="${esc(a)}" style="flex:1; min-width:78px;" /><span style="opacity:0.55; font-size:11px;">\u2194</span><input class="lc-pair-b input-compact input-dark" list="lc-character-names" placeholder="Character B" value="${esc(b)}" style="flex:1; min-width:78px;" /><input class="lc-pair-pressures input-compact input-dark" placeholder="romance, devotion" value="${esc(pressures)}" style="flex:2; min-width:110px;" /><button class="lc-pairing-del" title="Remove pairing" style="background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.3); border-radius:4px; cursor:pointer; padding:2px 6px; font-size:11px; min-height:unset; width:auto;">\u2715</button></div>`;
+      if (pairingDatalist) {
+        const names = /* @__PURE__ */ new Set();
+        (lc.roster || "").split("\n").map((n) => n.trim()).filter(Boolean).forEach((n) => names.add(n));
+        (state.cards || []).filter((c) => !c.deletedAt && normalizeType(c.type) === "character" && !(c.title || "").toLowerCase().endsWith(" (memory)")).forEach((c) => {
+          if (c.title) names.add(c.title);
+        });
+        if (state.protagonist) names.add(state.protagonist);
+        setSafeHTML(pairingDatalist, Array.from(names).map((n) => `<option value="${esc(n)}"></option>`).join(""));
+      }
+      if (pairingContainer && !pairingContainer.contains(root.activeElement)) {
+        const pairs = lc.pressurePairs || [];
+        setSafeHTML(pairingContainer, pairs.map((p) => pairingRowHtml(p.a || "", p.b || "", (p.pressures || []).join(", "))).join(""));
+      }
+      if (addPairingBtn && !addPairingBtn.dataset.lcWired) {
+        addPairingBtn.dataset.lcWired = "1";
+        addPairingBtn.addEventListener("click", () => {
+          if (!pairingContainer) return;
+          const div = document.createElement("div");
+          setSafeHTML(div, pairingRowHtml("", "", ""));
+          const row = div.firstElementChild;
+          if (row) {
+            pairingContainer.appendChild(row);
+            row.querySelector(".lc-pair-a")?.focus();
+          }
+        });
+      }
+      if (pairingContainer && !pairingContainer.dataset.lcWired) {
+        pairingContainer.dataset.lcWired = "1";
+        pairingContainer.addEventListener("click", (e) => {
+          const del = e.target.closest(".lc-pairing-del");
+          if (del) del.closest(".lc-pairing-row")?.remove();
+        });
+      }
+      const coreContainer = root.getElementById("lc-core-pills-container");
+      if (coreContainer) {
+        setSafeHTML(coreContainer, CORE_PRESSURES.map((p) => `
+        <span class="lc-pill" data-pressure="${p}" style="display:inline-flex; align-items:center; background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.25); border-radius:12px; padding:3px 8px; font-size:10px; cursor:pointer; color:#34d399; user-select:none; font-weight:500; transition:background 0.2s;">${p}</span>
+      `).join(""));
+        coreContainer.querySelectorAll(".lc-pill").forEach((el) => {
+          el.addEventListener("click", () => {
+            const p = el.getAttribute("data-pressure");
+            if (p && pressuresEl) {
+              const lines = pressuresEl.value.split("\n").map((l) => l.trim()).filter(Boolean);
+              if (!lines.includes(p)) {
+                lines.push(p);
+                pressuresEl.value = lines.join("\n");
+                showToast(`Added pressure: ${p}`);
+              }
+            }
+          });
+        });
+      }
+      const wildContainer = root.getElementById("lc-wild-pills-container");
+      if (wildContainer) {
+        setSafeHTML(wildContainer, WILDCARDS.map((w) => `
+        <span class="lc-pill-wild" data-wildcard="${w}" style="display:inline-flex; align-items:center; background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.25); border-radius:12px; padding:3px 8px; font-size:10px; cursor:pointer; color:#f87171; user-select:none; font-weight:500; transition:background 0.2s;">${w}</span>
+      `).join(""));
+        wildContainer.querySelectorAll(".lc-pill-wild").forEach((el) => {
+          el.addEventListener("click", () => {
+            const w = el.getAttribute("data-wildcard");
+            if (w && pressuresEl) {
+              const lines = pressuresEl.value.split("\n").map((l) => l.trim()).filter(Boolean);
+              if (!lines.includes(w)) {
+                lines.push(w);
+                pressuresEl.value = lines.join("\n");
+                showToast(`Added wildcard: ${w}`);
+              }
+            }
+          });
+        });
+      }
+      const modesContainer = root.getElementById("lc-modes-container");
+      if (modesContainer) {
+        setSafeHTML(modesContainer, PRESET_MODES.map((m, idx) => `
+        <div class="preset-card" data-idx="${idx}" style="background:linear-gradient(135deg, rgba(${m.rgb},0.07), rgba(255,255,255,0.01)); border:1px solid rgba(${m.rgb},0.3); border-radius:12px; padding:10px; display:flex; flex-direction:column; gap:5px; box-sizing:border-box; width:100%;">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; width:100%;">
+            <div style="font-weight:800; color:${m.color}; font-size:12px; text-shadow:0 0 12px rgba(${m.rgb},0.35);">${m.emoji} ${m.name}</div>
+            <button class="lc-btn-apply-preset btn-micro" data-idx="${idx}" style="font-weight:600; background:rgba(${m.rgb},0.15); color:${m.color}; border:1px solid rgba(${m.rgb},0.4); white-space:nowrap;">Apply Mode</button>
+          </div>
+          <div style="font-size:10px; color:var(--text-secondary); line-height:1.3; font-style:italic;">${m.tagline}</div>
+          <div style="display:flex; flex-wrap:wrap; gap:4px; margin-top:2px;">
+            ${m.pressures.map((p) => `<span class="lc-preset-pill" data-pressure="${p}" title="Click to add this pressure" style="background:rgba(${m.rgb},0.1); border:1px solid rgba(${m.rgb},0.35); color:${m.color}; border-radius:8px; padding:2px 7px; font-size:9.5px; cursor:pointer; user-select:none; font-weight:500; transition:background 0.2s;">${p}</span>`).join("")}
+          </div>
+          <div style="border-left:2px solid ${m.color}; font-size:9.5px; color:var(--text-secondary); line-height:1.45; margin-top:4px; font-style:italic; background:rgba(${m.rgb},0.05); border-radius:0 4px 4px 0; padding:4px 6px;">
+            <strong style="color:${m.color};">Spark:</strong> ${m.spark}
+          </div>
+        </div>
+      `).join(""));
+        modesContainer.querySelectorAll(".lc-btn-apply-preset").forEach((el) => {
+          el.addEventListener("click", () => {
+            const idx = parseInt(el.getAttribute("data-idx"), 10);
+            const mode = PRESET_MODES[idx];
+            if (mode && pressuresEl) {
+              pressuresEl.value = mode.pressures.join("\n");
+              showToast(`Applied preset mode: ${mode.name}`);
+            }
+          });
+        });
+        modesContainer.querySelectorAll(".lc-preset-pill").forEach((el) => {
+          el.addEventListener("click", () => {
+            const p = el.getAttribute("data-pressure");
+            if (p && pressuresEl) {
+              const lines = pressuresEl.value.split("\n").map((l) => l.trim()).filter(Boolean);
+              if (!lines.includes(p)) {
+                lines.push(p);
+                pressuresEl.value = lines.join("\n");
+                showToast(`Added pressure: ${p}`);
+              } else {
+                showToast(`Already in pool: ${p}`);
+              }
+            }
+          });
+        });
+      }
+      const activeList = root.getElementById("lc-active-list");
+      if (activeList) {
+        const titlePrefix = state.settings.livingCharactersTitlePrefix || "Life - ";
+        const keyPrefix = state.settings.livingCharactersKeyPrefix || "chaos-v2:";
+        const lifeCards = (state.cards || []).filter((c) => {
+          if (c.deletedAt) return false;
+          const typeLower = (c.type || "").toLowerCase();
+          const titleLower = (c.title || "").toLowerCase();
+          const keysList = (c.keys || "").split(/[,;]+/).map((k) => k.trim().toLowerCase()).filter(Boolean);
+          return typeLower === "life" || titleLower.startsWith(titlePrefix.toLowerCase()) || keysList.some((k) => k.startsWith(keyPrefix.toLowerCase()));
+        });
+        if (lifeCards.length === 0) {
+          setSafeHTML(activeList, `<div class="note" style="padding:12px; text-align:center;">No active relationship threads (Life Cards) in play. Seed one below!</div>`);
+        } else {
+          setSafeHTML(activeList, lifeCards.map((c) => {
+            const owner = c.title ? c.title.replace(new RegExp(`^${titlePrefix}`, "i"), "").trim() : "Unknown";
+            const parsed = parseLifeCardEntry(c.value);
+            const targetName = parsed.target || "none";
+            const pressureName = parsed.pressure || "none";
+            const occurrence = parsed.occurrence || "none";
+            const momentum = parsed.momentum || "low";
+            const status = (parsed.status || "active").toLowerCase();
+            let statusColor = "#a855f7";
+            let statusIcon = "\u26A1";
+            if (status === "seedling") {
+              statusColor = "#10b981";
+              statusIcon = "\u{1F331}";
+            } else if (status === "dormant") {
+              statusColor = "#6b7280";
+              statusIcon = "\u{1F4A4}";
+            }
+            return `
+            <div class="life-card-row" data-cardid="${c.id}" style="background:rgba(255,255,255,0.02); border:1px solid var(--border-color); border-radius:12px; padding:10px; display:flex; flex-direction:column; gap:4px; box-sizing:border-box; width:100%;">
+              <div class="life-card-display">
+                <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
+                  <div style="font-weight:700; color:var(--text-primary); font-size:11.5px; display:flex; align-items:center; gap:6px;">
+                    <span style="color:${statusColor}; font-weight:bold; font-size:10px; text-transform:uppercase; border:1px solid ${statusColor}; border-radius:4px; padding:1px 5px; background:color-mix(in srgb, ${statusColor}, transparent 92%); display:inline-flex; align-items:center; gap:3px;">
+                      <span>${statusIcon}</span><span>${status}</span>
+                    </span>
+                    <span>${owner} \u2794 ${targetName}</span>
+                  </div>
+                  <div style="display:flex; gap:6px; align-items:center;">
+                    <button class="lc-status-toggle-btn btn-icon" title="${status === "dormant" ? "Reactivate (back in scene)" : "Mark dormant (paused)"}" style="font-size:12px;">${status === "dormant" ? "\u25B6" : "\u{1F4A4}"}</button>
+                    <button class="lc-resolve-btn btn-icon" style="color:#34d399; font-size:12px;" title="Resolve \u2014 archive this pressure, keeping its history">\u2705</button>
+                    <button class="lc-card-edit-btn btn-icon" title="Edit relationship details">
+                      <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
+                        <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c0.39-0.39 0.39-1.02 0-1.41l-2.34-2.34c-0.39-0.39-1.02-0.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+                      </svg>
+                    </button>
+                    <button class="lc-card-delete-btn btn-icon" style="color:#f87171;" title="Delete Relationship Card">
+                      <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24">
+                        <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <div style="font-size:11px; margin-top:2px;">
+                  <strong style="color:var(--text-primary);">Pressure:</strong> <span style="color:var(--accent-color); font-weight:600;">${pressureName}</span>
+                  <span style="margin:0 6px; color:var(--border-color);">|</span>
+                  <strong style="color:var(--text-primary);">Urgency:</strong> <span>${momentum}</span>
+                </div>
+                ${occurrence && occurrence.toLowerCase() !== "none" ? `<div style="font-size:10px; color:var(--text-secondary); line-height:1.4; margin-top:2px; background:rgba(0,0,0,0.1); border-radius:4px; padding:4px 6px; word-break:break-word;">
+                  <strong>Latest Occurrence driving pressure:</strong> ${esc(occurrence)}
+                </div>` : ""}
+              </div>
+
+              <!-- Inline Edit Form -->
+              <div class="life-card-edit-form" style="display:none; flex-direction:column; gap:6px; margin-top:4px; border-top:1px solid var(--border-color); padding-top:6px; font-size:10.5px; box-sizing:border-box; width:100%;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; box-sizing:border-box; width:100%;">
+                  <div style="display:flex; flex-direction:column; gap:2px;">
+                    <label style="font-weight:600;">Target Name</label>
+                    <input type="text" class="edit-lc-target input-compact input-dark" value="${esc(targetName)}" />
+                  </div>
+                  <div style="display:flex; flex-direction:column; gap:2px;">
+                    <label style="font-weight:600;">Pressure</label>
+                    <input type="text" class="edit-lc-pressure input-compact input-dark" value="${esc(pressureName)}" />
+                  </div>
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; box-sizing:border-box; width:100%;">
+                  <div style="display:flex; flex-direction:column; gap:2px;">
+                    <label style="font-weight:600;">Urgency</label>
+                    <input type="text" class="edit-lc-momentum input-compact input-dark" value="${esc(momentum)}" placeholder="low / medium / high" />
+                  </div>
+                  <div style="display:flex; flex-direction:column; gap:2px;">
+                    <label style="font-weight:600;">Status</label>
+                    <select class="edit-lc-status input-compact input-dark">
+                      <option value="seedling" ${status === "seedling" ? "selected" : ""}>seedling</option>
+                      <option value="active" ${status === "active" ? "selected" : ""}>active</option>
+                      <option value="dormant" ${status === "dormant" ? "selected" : ""}>dormant</option>
+                    </select>
+                  </div>
+                </div>
+                <div style="display:flex; flex-direction:column; gap:2px;">
+                  <label style="font-weight:600;">Latest Occurrence driving pressure</label>
+                  <input type="text" class="edit-lc-occurrence input-compact input-dark" value="${esc(occurrence)}" />
+                </div>
+                <div style="display:flex; gap:6px; justify-content:flex-end; margin-top:2px;">
+                  <button class="lc-edit-cancel-btn" style="background:rgba(255,255,255,0.05); border:1px solid var(--border-color); color:var(--text-primary); font-size:10px; padding:3px 8px; border-radius:4px; cursor:pointer; width:auto; min-height:unset;">Cancel</button>
+                  <button class="lc-edit-save-btn" style="background:rgba(16,185,129,0.15); border:1px solid rgba(16,185,129,0.3); color:#34d399; font-size:10px; padding:3px 8px; border-radius:4px; cursor:pointer; font-weight:600; width:auto; min-height:unset;">Save Changes</button>
+                </div>
+              </div>
+            </div>
+          `;
+          }).join(""));
+          activeList.querySelectorAll(".life-card-row").forEach((row) => {
+            const cardId = row.getAttribute("data-cardid");
+            const displayDiv = row.querySelector(".life-card-display");
+            const formDiv = row.querySelector(".life-card-edit-form");
+            row.querySelector(".lc-card-edit-btn")?.addEventListener("click", () => {
+              displayDiv.style.display = "none";
+              formDiv.style.display = "flex";
+            });
+            row.querySelector(".lc-status-toggle-btn")?.addEventListener("click", async (e) => {
+              e.stopPropagation();
+              if (!cbs.setLifeCardStatus) return;
+              const card = (state.cards || []).find((c) => c.id === cardId);
+              const cur = (parseLifeCardEntry(card?.value).status || "active").toLowerCase();
+              const next = cur === "dormant" ? "active" : "dormant";
+              const res = await cbs.setLifeCardStatus(cardId, next);
+              if (res.error) showToast(res.error, true);
+              else showToast(next === "dormant" ? "Relationship marked dormant." : "Relationship reactivated.");
+            });
+            row.querySelector(".lc-resolve-btn")?.addEventListener("click", async (e) => {
+              e.stopPropagation();
+              if (!cbs.setLifeCardStatus) return;
+              const res = await cbs.setLifeCardStatus(cardId, "resolved");
+              if (res.error) showToast(res.error, true);
+              else showToast("Pressure resolved and archived (history kept).");
+            });
+            row.querySelector(".lc-edit-cancel-btn")?.addEventListener("click", () => {
+              displayDiv.style.display = "block";
+              formDiv.style.display = "none";
+            });
+            row.querySelector(".lc-edit-save-btn")?.addEventListener("click", async () => {
+              const targetVal = formDiv.querySelector(".edit-lc-target").value.trim();
+              const pressureVal = formDiv.querySelector(".edit-lc-pressure").value.trim();
+              const momentumVal = formDiv.querySelector(".edit-lc-momentum").value.trim();
+              const statusVal = formDiv.querySelector(".edit-lc-status").value;
+              const occurrenceVal = formDiv.querySelector(".edit-lc-occurrence").value.trim();
+              if (!targetVal || !pressureVal) {
+                showToast("Target and Pressure are required!", true);
+                return;
+              }
+              const btn = row.querySelector(".lc-edit-save-btn");
+              btn.disabled = true;
+              btn.textContent = "\u23F3 Saving...";
+              try {
+                const card = (state.cards || []).find((c) => c.id === cardId);
+                const ownerName = card?.title ? card.title.replace(new RegExp(`^${titlePrefix}`, "i"), "").trim() : "Unknown";
+                const newValue = buildLifeCardValue({ owner: ownerName, target: targetVal, pressure: pressureVal, occurrence: occurrenceVal || "none", momentum: momentumVal || "low", status: statusVal });
+                if (cbs.saveCardValue) {
+                  const res = await cbs.saveCardValue(cardId, newValue);
+                  if (res.error) {
+                    showToast(res.error, true);
+                  } else {
+                    showToast("Relationship updated successfully!");
+                  }
+                }
+              } catch (err) {
+                showToast(err?.message || String(err), true);
+              } finally {
+                btn.disabled = false;
+                btn.textContent = "Save Changes";
+              }
+            });
+            const delBtn = row.querySelector(".lc-card-delete-btn");
+            if (delBtn) {
+              let armTimeout = null;
+              delBtn.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                if (delBtn.classList.contains("armed")) {
+                  clearTimeout(armTimeout);
+                  delBtn.classList.remove("armed");
+                  delBtn.innerHTML = `<svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
+                  delBtn.setAttribute("title", "Delete Relationship Card");
+                  delBtn.setAttribute("style", "color:#f87171;");
+                  try {
+                    if (cbs.deleteStoryCard) {
+                      const res = await cbs.deleteStoryCard(cardId);
+                      if (res.error) {
+                        showToast(res.error, true);
+                      } else {
+                        showToast("Relationship card deleted.");
+                      }
+                    }
+                  } catch (err) {
+                    showToast(err?.message || String(err), true);
+                  }
+                } else {
+                  delBtn.classList.add("armed");
+                  delBtn.innerHTML = `<span style="font-size:9px;font-weight:bold;background:#ef4444;color:#fff;padding:1px 4px;border-radius:3px;display:inline-flex;align-items:center;line-height:1;">Confirm?</span>`;
+                  delBtn.setAttribute("title", "Click again to confirm delete");
+                  delBtn.setAttribute("style", "color:#ffffff;");
+                  armTimeout = setTimeout(() => {
+                    delBtn.classList.remove("armed");
+                    delBtn.innerHTML = `<svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
+                    delBtn.setAttribute("title", "Delete Relationship Card");
+                    delBtn.setAttribute("style", "color:#f87171;");
+                  }, 3e3);
+                }
+              });
+            }
+          });
         }
       }
     }
@@ -5005,21 +7257,16 @@ HARD RULES (weaker models break these \u2014 do not):
       if (cleanSettings.theme === "emerald") delete cleanSettings.theme;
       if (cleanSettings.formattingMode === DEFAULT_FORMATTING_MODE) delete cleanSettings.formattingMode;
       if (cleanSettings.analyzeWindow === 20) delete cleanSettings.analyzeWindow;
-      if (cleanSettings.memoraidThoughtLookback === 0) delete cleanSettings.memoraidThoughtLookback;
+      if (cleanSettings.memoraidThoughtLookback === 1) delete cleanSettings.memoraidThoughtLookback;
       if (cleanSettings.memoraidPresenceLookback === 5) delete cleanSettings.memoraidPresenceLookback;
+      if (cleanSettings.thoughtCardLimit === 2e3) delete cleanSettings.thoughtCardLimit;
       if (cleanSettings.interceptTimeout === 4) delete cleanSettings.interceptTimeout;
       if (cleanSettings.locationMode === "optionA") delete cleanSettings.locationMode;
       if (cleanSettings.enableProperNounDetection !== false) delete cleanSettings.enableProperNounDetection;
-      if (cleanSettings.manualMode === false) delete cleanSettings.manualMode;
+      if (!cleanSettings.enableAutomaticUpdates) delete cleanSettings.enableAutomaticUpdates;
       if (cleanSettings.showDebug === false) delete cleanSettings.showDebug;
       if (cleanSettings.useMemories === false) delete cleanSettings.useMemories;
       if (cleanSettings.autoRegenerateMemoryBankEntry === false) delete cleanSettings.autoRegenerateMemoryBankEntry;
-      if (cleanSettings.useSinglePassGeneration === false) delete cleanSettings.useSinglePassGeneration;
-      if (cleanSettings.memoraidLookback === 8) delete cleanSettings.memoraidLookback;
-      if (cleanSettings.logPlotEssentials === false) delete cleanSettings.logPlotEssentials;
-      if (cleanSettings.characterCardLimit === 600) delete cleanSettings.characterCardLimit;
-      if (cleanSettings.thoughtCardLimit === 2e3) delete cleanSettings.thoughtCardLimit;
-      if (cleanSettings.memoraidBannerDismissed === false) delete cleanSettings.memoraidBannerDismissed;
       const jsonStr = JSON.stringify(cleanSettings);
       try {
         if (typeof CompressionStream !== "undefined") {
@@ -5039,6 +7286,7 @@ HARD RULES (weaker models break these \u2014 do not):
       }
       return "raw:" + btoa(unescape(encodeURIComponent(jsonStr)));
     }
+    const QR_PAYLOAD_CHAR_THRESHOLD = 1500;
     function showQrModal(payload) {
       root.getElementById("qr-modal")?.remove();
       const modal = document.createElement("div");
@@ -5047,25 +7295,87 @@ HARD RULES (weaker models break these \u2014 do not):
       modal.className = `theme-${activeTheme}`;
       modal.style.cssText = "display:flex;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.65);align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);box-sizing:border-box;";
       const container = document.createElement("div");
-      container.style.cssText = "background:#121215;border:1px solid var(--border-color);border-radius:12px;padding:20px;width:280px;display:flex;flex-direction:column;align-items:center;gap:12px;box-shadow:0 20px 40px rgba(0,0,0,0.65);text-align:center;color:var(--text-primary);box-sizing:border-box;";
+      container.style.cssText = "background:var(--bg-panel-solid);border:1px solid var(--border-color);border-radius:12px;padding:20px;width:280px;display:flex;flex-direction:column;align-items:center;gap:12px;box-shadow:0 20px 40px rgba(0,0,0,0.5);text-align:center;color:var(--text-primary);box-sizing:border-box;";
       const title = document.createElement("div");
       title.style.cssText = "font-weight:700;color:var(--theme-text-color);font-size:14px;letter-spacing:0.02em;";
       title.textContent = "Sync Settings to Mobile";
       const note = document.createElement("div");
       note.className = "note";
       note.style.cssText = "margin:0;font-size:11px;line-height:1.4;color:var(--text-secondary);";
-      note.textContent = "Scan this code with your mobile device's camera to import settings (excluding API keys).";
-      const canvasContainer = document.createElement("div");
-      canvasContainer.id = "qr-canvas-container";
-      canvasContainer.style.cssText = "background:#fff;padding:8px;border-radius:8px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:180px;height:180px;";
+      const qrUrl = window.location.origin + "/?importSettings=" + encodeURIComponent(payload);
+      const tooLarge = qrUrl.length > QR_PAYLOAD_CHAR_THRESHOLD;
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "btn";
+      copyBtn.style.cssText = "background:rgba(255,255,255,0.08);color:var(--text-primary);font-weight:600;font-size:11px;padding:6px 16px;border-radius:6px;border:1px solid var(--border-color);cursor:pointer;width:100%;text-align:center;";
+      copyBtn.textContent = "\u{1F4CB} Copy Sync String";
+      const copyFallback = document.createElement("textarea");
+      copyFallback.readOnly = true;
+      copyFallback.value = qrUrl;
+      copyFallback.style.cssText = "display:none;width:100%;height:64px;font-size:9px;font-family:SFMono-Regular,Consolas,monospace;background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);border-radius:6px;padding:6px;box-sizing:border-box;resize:none;";
+      copyBtn.addEventListener("click", () => {
+        const flashCopied = () => {
+          const oldText = copyBtn.textContent;
+          copyBtn.textContent = "Copied!";
+          setTimeout(() => {
+            copyBtn.textContent = oldText;
+          }, 1500);
+        };
+        const showFallback = () => {
+          copyFallback.style.display = "block";
+          copyFallback.focus();
+          copyFallback.select();
+        };
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(qrUrl).then(flashCopied).catch(showFallback);
+        } else {
+          showFallback();
+        }
+      });
       const closeBtn = document.createElement("button");
       closeBtn.type = "button";
       closeBtn.className = "btn";
       closeBtn.style.cssText = "background:var(--accent-color);color:#fff;font-weight:600;font-size:11px;padding:6px 16px;border-radius:6px;border:none;cursor:pointer;margin-top:4px;width:100%;text-align:center;";
       closeBtn.textContent = "Close";
       container.appendChild(title);
-      container.appendChild(note);
-      container.appendChild(canvasContainer);
+      if (tooLarge) {
+        note.textContent = "Settings too large for a reliable QR \u2014 copy the sync string instead. Paste the copied link into your mobile browser's address bar (with the extension installed) to import.";
+        container.appendChild(note);
+        container.appendChild(copyBtn);
+        container.appendChild(copyFallback);
+      } else {
+        note.textContent = "Scan this code with your mobile device's camera to import settings (excluding API keys).";
+        container.appendChild(note);
+        const canvasContainer = document.createElement("div");
+        canvasContainer.id = "qr-canvas-container";
+        canvasContainer.style.cssText = "background:#fff;padding:8px;border-radius:8px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:180px;height:180px;";
+        container.appendChild(canvasContainer);
+        try {
+          qr_creator_es6_min_default.render({
+            text: qrUrl,
+            radius: 0.2,
+            ecLevel: "M",
+            fill: "#111111",
+            background: "#ffffff",
+            size: 164,
+            quiet: 4
+          }, canvasContainer);
+        } catch (err) {
+          console.error("[AID panel] QrCreator failed to render:", err);
+          canvasContainer.style.background = "#fee2e2";
+          canvasContainer.style.color = "#991b1b";
+          canvasContainer.style.flexDirection = "column";
+          canvasContainer.style.fontSize = "10px";
+          canvasContainer.style.padding = "12px";
+          canvasContainer.textContent = "QR Code generation failed. The settings payload may be too large. Try resetting some templates to default.";
+        }
+        const copyCaption = document.createElement("div");
+        copyCaption.style.cssText = "font-size:10px;color:var(--text-secondary);";
+        copyCaption.textContent = "Can't scan? Copy the sync string instead \u2014 paste the link into your mobile browser's address bar.";
+        container.appendChild(copyCaption);
+        container.appendChild(copyBtn);
+        container.appendChild(copyFallback);
+      }
       container.appendChild(closeBtn);
       modal.appendChild(container);
       root.appendChild(modal);
@@ -5074,195 +7384,219 @@ HARD RULES (weaker models break these \u2014 do not):
       modal.addEventListener("click", (e) => {
         if (e.target === modal) closeModal();
       });
-      const qrUrl = window.location.origin + "/?importSettings=" + encodeURIComponent(payload);
-      const accentColor = getComputedStyle(modal).getPropertyValue("--accent-color").trim() || "#000000";
-      try {
-        qr_creator_es6_min_default.render({
-          text: qrUrl,
-          radius: 0.2,
-          ecLevel: "M",
-          fill: accentColor,
-          background: "#ffffff",
-          size: 164
-        }, canvasContainer);
-      } catch (err) {
-        console.error("[AID panel] QrCreator failed to render:", err);
-        canvasContainer.style.background = "#fee2e2";
-        canvasContainer.style.color = "#991b1b";
-        canvasContainer.style.flexDirection = "column";
-        canvasContainer.style.fontSize = "10px";
-        canvasContainer.style.padding = "12px";
-        canvasContainer.textContent = "QR Code generation failed. The settings payload may be too large. Try resetting some templates to default.";
-      }
     }
-    api = {
+    const panelHandle = {
       setStatus: (t) => {
         st.textContent = t;
       },
-      showToast: (text, isError) => showToast(text, isError),
-      onExport: (cb) => {
-        $("ex-story").addEventListener("click", () => cb("story"));
-        $("ex-cards").addEventListener("click", () => cb("cards"));
-        $("ex-pe").addEventListener("click", () => cb("pe"));
-        $("ex-aidmemories").addEventListener("click", () => cb("aidmemories"));
-        $("ex-propernouns")?.addEventListener("click", () => cb("propernouns"));
-        $("ex-all").addEventListener("click", () => cb("all"));
+      showToast: (text, isError) => {
+        if (!isContextValid()) return;
+        showToast(text, isError);
       },
-      onBackfill: (cb) => $("bf").addEventListener("click", cb),
+      onExport: (cb) => {
+        const safe = safeCallback(cb);
+        $("ex-story").addEventListener("click", () => safe("story"));
+        $("ex-cards").addEventListener("click", () => safe("cards"));
+        $("ex-pe").addEventListener("click", () => safe("pe"));
+        $("ex-aidmemories").addEventListener("click", () => safe("aidmemories"));
+        $("ex-propernouns")?.addEventListener("click", () => safe("propernouns"));
+        $("ex-all").addEventListener("click", () => safe("all"));
+      },
+      // Delegated by class so every entry point works, including dynamically re-rendered ones
+      // (Debug tab, Adventures Manager header, and the empty-DB self-heal banner).
+      onBackupAll: (cb) => {
+        const safe = safeCallback(cb);
+        root.addEventListener("click", (e) => {
+          if (e.target?.closest?.(".db-backup-trigger")) safe();
+        });
+      },
+      onRestoreAll: (cb) => {
+        const safe = safeCallback(cb);
+        root.addEventListener("click", (e) => {
+          if (e.target?.closest?.(".db-restore-trigger")) safe();
+        });
+      },
+      showSelfHealBanner: () => {
+        if (!isContextValid()) return;
+        const results2 = root.getElementById("results");
+        if (!results2 || root.getElementById("self-heal-banner")) return;
+        const banner = document.createElement("div");
+        banner.id = "self-heal-banner";
+        banner.setAttribute("style", "margin:8px;padding:10px 12px;background:rgba(59,130,246,0.12);border:1px solid rgba(59,130,246,0.35);border-radius:8px;color:var(--text-primary);font-size:11.5px;line-height:1.5;");
+        setSafeHTML(banner, `<strong>No local data found.</strong> If you just swapped the signed extension for a test build, Firefox cleared its IndexedDB.<br/><button class="db-restore-trigger" style="margin-top:8px;padding:5px 10px;background:rgba(245,158,11,0.22);color:#fbbf24;border:1px solid rgba(245,158,11,0.4);border-radius:6px;cursor:pointer;font-weight:bold;">\u2B06 Restore from Backup\u2026</button>`);
+        results2.parentElement?.insertBefore(banner, results2);
+      },
+      onBackfill: (cb) => $("bf").addEventListener("click", safeCallback(cb)),
       onRefineMemoryBlock: (cb) => {
-        refineMemoryBlockCb = cb;
+        refineMemoryBlockCb = safeCallback(cb);
         $("refine-mem")?.addEventListener("click", () => {
           const btn = $("refine-mem");
           if (btn) {
             btn.disabled = true;
             btn.textContent = "Regenerating memory...";
           }
-          if (refineMemoryBlockCb && lastState?.memoryBankEntries && lastState.memoryBankEntries.length > 0) {
-            refineMemoryBlockCb(lastState.memoryBankEntries.length - 1);
+          if (refineMemoryBlockCb && lastState?.aidMemories && lastState.aidMemories.length > 0) {
+            refineMemoryBlockCb(lastState.aidMemories.length - 1);
           }
         });
       },
-      onAnalyze: (cb) => {
-        analyzeCb = cb;
-      },
       showAnalyzeResult: showAnalyzeResultFn,
-      onSaveSettings: (cb) => $("save").addEventListener("click", () => {
-        const n = parseInt(winEl.value, 10);
-        const showDbg = root.getElementById("show-dbg").checked;
-        const logPE = root.getElementById("log-pe-console").checked;
-        const useMems = root.getElementById("use-memories").checked;
-        const autoRegenMems = root.getElementById("auto-regen-memories").checked;
-        const cardCommands = {};
-        for (const k of TYPE_KEYS) {
-          const el = root.getElementById("cc-" + k);
-          const v = el?.value.trim();
-          if (v) cardCommands[k] = v;
-        }
-        const fmtMode = root.getElementById("fmt-mode")?.value || DEFAULT_FORMATTING_MODE;
-        const ml = parseInt(memoraidWinEl.value, 10);
-        const mtl = parseInt(memoraidThoughtWinEl.value, 10);
-        const mpl = parseInt(memoraidPresenceWinEl.value, 10);
-        const to = parseInt(interceptTimeoutEl.value, 10);
-        const memoraidLookback = Number.isFinite(ml) && ml > 0 ? ml : 8;
-        const memoraidThoughtLookback = Number.isFinite(mtl) && mtl >= 1 ? mtl : 1;
-        const memoraidPresenceLookback = Number.isFinite(mpl) && mpl > 0 ? mpl : 5;
-        const interceptTimeout = Number.isFinite(to) && to > 0 ? to : 10;
-        const locMode = root.getElementById("location-mode").value;
-        const properNounDetect = root.getElementById("enable-proper-noun-detection").checked;
-        const manualMode = root.getElementById("enable-manual-mode").checked;
-        const ccl = parseInt(charCardLimitEl.value, 10);
-        const tcl = parseInt(thoughtCardLimitEl.value, 10);
-        const characterCardLimit = Number.isFinite(ccl) && ccl >= 100 ? ccl : 600;
-        const thoughtCardLimit = Number.isFinite(tcl) && tcl >= 100 ? tcl : 2e3;
-        cb(
-          provEl.value,
-          keyEl.value.trim(),
-          protEl.value.trim(),
-          modelEl.value.trim(),
-          Number.isFinite(n) && n > 0 ? n : 20,
-          showDbg,
-          themeEl.value,
-          root.getElementById("prompt-s1").value,
-          root.getElementById("prompt-s2").value,
-          root.getElementById("prompt-s3").value,
-          root.getElementById("prompt-s4").value,
-          cardCommands,
-          useMems,
-          fmtMode,
-          memoraidLookback,
-          memoraidThoughtLookback,
-          memoraidPresenceLookback,
-          autoRegenMems,
-          interceptTimeout,
-          lastState?.settings?.useSinglePassGeneration ?? false,
-          locMode,
-          properNounDetect,
-          manualMode,
-          logPE,
-          characterCardLimit,
-          thoughtCardLimit
-        );
-        if (lastState?.isManagerOnly) {
-          managerShowSettings = false;
-          switchTab("tab-manager");
-        } else {
+      onSaveSettings: (cb) => {
+        const safe = safeCallback(cb);
+        $("save").addEventListener("click", () => {
+          const n = parseInt(winEl.value, 10);
+          const showDbg = root.getElementById("show-dbg").checked;
+          const useMems = root.getElementById("use-memories").checked;
+          const autoRegenMems = root.getElementById("auto-regen-memories").checked;
+          const cardCommands = {};
+          for (const k of TYPE_KEYS) {
+            const el = root.getElementById("cc-" + k);
+            const v = el?.value.trim();
+            if (v) cardCommands[k] = v;
+          }
+          const fmtMode = root.getElementById("fmt-mode")?.value || DEFAULT_FORMATTING_MODE;
+          const mtl = parseInt(memoraidThoughtWinEl.value, 10);
+          const mpl = parseInt(memoraidPresenceWinEl.value, 10);
+          const to = parseInt(interceptTimeoutEl.value, 10);
+          const memoraidThoughtLookback = Number.isFinite(mtl) && mtl >= 1 ? mtl : 1;
+          const memoraidPresenceLookback = Number.isFinite(mpl) && mpl > 0 ? mpl : 5;
+          const interceptTimeout = Number.isFinite(to) && to > 0 ? to : 4;
+          const locMode = root.getElementById("location-mode").value;
+          const properNounDetect = root.getElementById("enable-proper-noun-detection").checked;
+          const enableAutomaticUpdates = root.getElementById("enable-automatic-updates").checked;
+          const enableMemoraid = root.getElementById("enable-memoraid")?.checked ?? true;
+          const enableCrystallized = root.getElementById("enable-crystallized")?.checked ?? false;
+          const cVal = parseInt(root.getElementById("crystallized-interval")?.value || "", 10);
+          const crystallizedInterval = Number.isFinite(cVal) && cVal > 0 ? cVal : 20;
+          const mcVal = parseInt(root.getElementById("crystallized-max-chars")?.value || "", 10);
+          const crystallizedEntryMaxChars = Number.isFinite(mcVal) && mcVal > 0 ? mcVal : 900;
+          const ncVal = parseInt(root.getElementById("crystallized-node-cap")?.value || "", 10);
+          const crystallizedNodeCap = Number.isFinite(ncVal) && ncVal > 0 ? ncVal : 12;
+          const kcVal = parseInt(root.getElementById("crystallized-knows-cap")?.value || "", 10);
+          const crystallizedKnowsCap = Number.isFinite(kcVal) && kcVal > 0 ? kcVal : 2;
+          const rcVal = parseInt(root.getElementById("crystallized-recalls-cap")?.value || "", 10);
+          const crystallizedRecallsCap = Number.isFinite(rcVal) && rcVal >= 0 ? rcVal : 2;
+          const vcVal = parseInt(root.getElementById("crystallized-vivid-cap")?.value || "", 10);
+          const crystallizedVividCap = Number.isFinite(vcVal) && vcVal > 0 ? vcVal : 4;
+          const ocVal = parseInt(root.getElementById("crystallized-outlook-cap")?.value || "", 10);
+          const crystallizedOutlookCap = Number.isFinite(ocVal) && ocVal > 0 ? ocVal : 2;
+          const pcVal = parseInt(root.getElementById("crystallized-preferences-cap")?.value || "", 10);
+          const crystallizedPreferencesCap = Number.isFinite(pcVal) && pcVal > 0 ? pcVal : 4;
+          const nmVal = parseInt(root.getElementById("crystallized-npc-memory-cap")?.value || "", 10);
+          const crystallizedNpcMemoryCap = Number.isFinite(nmVal) && nmVal > 0 ? nmVal : 400;
+          const crystallizedKnowsEnabled = root.getElementById("crystallized-knows-enabled")?.checked ?? true;
+          const crystallizedNodesEnabled = root.getElementById("crystallized-nodes-enabled")?.checked ?? true;
+          const crystallizedOutlookEnabled = root.getElementById("crystallized-outlook-enabled")?.checked ?? true;
+          const crystallizedPreferencesEnabled = root.getElementById("crystallized-preferences-enabled")?.checked ?? true;
+          const crystallizedNpcMemoryEnabled = root.getElementById("crystallized-npc-memory-enabled")?.checked ?? true;
+          const tcl = parseInt(thoughtCardLimitEl.value, 10);
+          const thoughtCardLimit = Number.isFinite(tcl) && tcl >= 100 ? tcl : 2e3;
+          const settings = {
+            provider: provEl.value,
+            model: modelEl.value.trim() || void 0,
+            analyzeWindow: Number.isFinite(n) && n > 0 ? n : 20,
+            showDebug: showDbg,
+            theme: themeEl.value,
+            customPromptSection1: root.getElementById("prompt-s1").value,
+            customPromptSection2: root.getElementById("prompt-s2").value,
+            customPromptSection3: root.getElementById("prompt-s3").value,
+            customPromptSection4: root.getElementById("prompt-s4").value,
+            cardCommands,
+            useMemories: useMems,
+            formattingMode: fmtMode,
+            memoraidThoughtLookback,
+            memoraidPresenceLookback,
+            thoughtCardLimit,
+            autoRegenerateMemoryBankEntry: autoRegenMems,
+            interceptTimeout,
+            locationMode: locMode,
+            enableProperNounDetection: properNounDetect,
+            enableAutomaticUpdates,
+            enableMemorAID: enableMemoraid,
+            enableLivingCharacters: enableLcEl.checked,
+            livingCharactersTitlePrefix: lcTitlePrefixEl.value,
+            livingCharactersKeyPrefix: lcKeyPrefixEl.value,
+            groupThoughtsInRoster: groupThoughtsEl.checked,
+            enableCrystallized,
+            crystallizedInterval,
+            crystallizedEntryMaxChars,
+            crystallizedNodeCap,
+            crystallizedKnowsCap,
+            crystallizedRecallsCap,
+            crystallizedVividCap,
+            crystallizedOutlookCap,
+            crystallizedPreferencesCap,
+            crystallizedNpcMemoryCap,
+            crystallizedKnowsEnabled,
+            crystallizedNodesEnabled,
+            crystallizedOutlookEnabled,
+            crystallizedPreferencesEnabled,
+            crystallizedNpcMemoryEnabled
+          };
+          const apiKey = keyEl.value.trim();
+          if (apiKey) {
+            settings.apiKeys = { [provEl.value]: apiKey };
+          }
+          safe(settings, protEl.value.trim());
           showTrackerView();
+        });
+        const lcSaveBtn = root.getElementById("lc-btn-save-config");
+        if (lcSaveBtn) {
+          lcSaveBtn.addEventListener("click", () => {
+            if (!lastState || !lastState.settings) return;
+            const rosterEl = root.getElementById("lc-config-roster");
+            const pressuresEl = root.getElementById("lc-config-pressures");
+            const protagonistEl = root.getElementById("lc-config-protagonist");
+            const involvementEl = root.getElementById("lc-config-involvement");
+            const intervalEl = root.getElementById("lc-config-interval");
+            const maxEl = root.getElementById("lc-config-max");
+            const relevanceEl = root.getElementById("lc-config-relevance");
+            const dormancyEl = root.getElementById("lc-config-dormancy");
+            const reseedEl = root.getElementById("lc-config-reseed-cooldown");
+            const staleEl = root.getElementById("lc-config-stale");
+            const maxLifetimeEl = root.getElementById("lc-config-max-lifetime");
+            const nInterval = intervalEl ? parseInt(intervalEl.value, 10) : 15;
+            const nMax = maxEl ? parseInt(maxEl.value, 10) : 2;
+            const nDormancy = dormancyEl ? parseInt(dormancyEl.value, 10) : 7;
+            const nReseed = reseedEl ? parseInt(reseedEl.value, 10) : 15;
+            const nStale = staleEl ? parseInt(staleEl.value, 10) : 14;
+            const nMaxLifetime = maxLifetimeEl ? parseInt(maxLifetimeEl.value, 10) : 4;
+            const pairingContainerSave = root.getElementById("lc-pairing-pools");
+            const pressurePairs = pairingContainerSave ? Array.from(pairingContainerSave.querySelectorAll(".lc-pairing-row")).map((row) => ({
+              a: row.querySelector(".lc-pair-a")?.value.trim() || "",
+              b: row.querySelector(".lc-pair-b")?.value.trim() || "",
+              pressures: (row.querySelector(".lc-pair-pressures")?.value || "").split(",").map((s) => s.trim()).filter(Boolean)
+            })).filter((p) => p.a && p.b && p.pressures.length) : [];
+            const config = {
+              roster: rosterEl ? rosterEl.value.trim() : "",
+              pressures: pressuresEl ? pressuresEl.value.trim() : "",
+              pressurePairs,
+              protagonistInvolvement: involvementEl ? involvementEl.value : "normal",
+              interval: Number.isFinite(nInterval) ? nInterval : 15,
+              maxActive: Number.isFinite(nMax) ? nMax : 2,
+              sceneRelevance: relevanceEl ? relevanceEl.value : "strict",
+              dormancyTurns: Number.isFinite(nDormancy) ? nDormancy : 7,
+              reseedCooldown: Number.isFinite(nReseed) ? nReseed : 15,
+              staleTurns: Number.isFinite(nStale) ? nStale : 14,
+              maxActiveTurns: Number.isFinite(nMaxLifetime) && nMaxLifetime >= 0 ? nMaxLifetime : 4,
+              continueInjectionMode: root.getElementById("lc-config-continue-mode")?.value || "defer"
+            };
+            const protName = protagonistEl ? protagonistEl.value.trim() : "";
+            if (cbs.setLivingConfig) {
+              cbs.setLivingConfig(config, protName).then((res) => {
+                if (res?.error) showToast(res.error, true);
+                else showToast("Simulation config saved!");
+              }).catch((err) => showToast(err?.message || String(err), true));
+            }
+          });
         }
-      }),
-      onThemeChange: (cb) => {
-        themeChangeCb = cb;
-      },
-      onApplyInstruction: (cb) => {
-        applyInstructionCb = cb;
-      },
-      onProposalDecision: (cb) => {
-        decisionCb = cb;
-      },
-      onPushVersion: (cb) => {
-        pushCb = cb;
-      },
-      onGenerateCard: (cb) => {
-        genCardCb = cb;
-      },
-      onUpdateMemoryBank: (cb) => {
-        updateMemoryBankCb = cb;
-      },
-      onCreateConfigCard: (cb) => {
-        createConfigCb = cb;
-      },
-      onCreateStoryCard: (cb) => {
-        createStoryCardCb = cb;
-      },
-      onSaveCardKeys: (cb) => {
-        saveCardKeysCb = cb;
       },
       onGrantPermissions: (cb) => {
-        $("grant-permissions")?.addEventListener("click", cb);
+        $("grant-permissions")?.addEventListener("click", safeCallback(cb));
       },
-      onSetActiveLocation: (cb) => {
-        setActiveLocationCb = cb;
-      },
-      onRespondToProperNounSuggestion: (cb) => {
-        respondToProperNounSuggestionCb = cb;
-      },
-      onUpdateProperNounLog: (cb) => {
-        updateProperNounLogCb = cb;
-      },
-      onLinkProperNounToCard: (cb) => {
-        linkProperNounToCardCb = cb;
-      },
-      onDeleteProperNounLog: (cb) => {
-        deleteProperNounLogCb = cb;
-      },
-      onClearProperNounLogs: (cb) => {
-        clearProperNounLogsCb = cb;
-      },
-      onSaveGlobalAsset: (cb) => {
-        saveGlobalAssetCb = cb;
-      },
-      onDeleteGlobalAsset: (cb) => {
-        deleteGlobalAssetCb = cb;
-      },
-      onImportGlobalAsset: (cb) => {
-        importGlobalAssetCb = cb;
-      },
+      on: registerPanelEvent,
       onRefresh: (cb) => {
-        refreshCb = cb;
-      },
-      onProviderChange: (cb) => {
-        providerChangeCb = cb;
-      },
-      onDismissMemoraidBanner: (cb) => {
-        dismissMemoraidBannerCb = cb;
-      },
-      onBackupAll: (cb) => {
-        backupAllCb = cb;
-      },
-      onRestoreAll: (cb) => {
-        restoreAllCb = cb;
-      },
-      onSaveCardValue: (cb) => {
-        saveCardValueCb = cb;
+        refreshCb = safeCallback(cb);
       },
       updateActionCount: (count2, lastAnalysisAction) => {
         if (lastState) {
@@ -5278,40 +7612,95 @@ HARD RULES (weaker models break these \u2014 do not):
       },
       updateMemories: (memories) => {
         if (!lastState) return;
-        lastState.memoryBankEntries = memories ?? [];
+        lastState.aidMemories = memories ?? [];
         renderMemoriesSection(lastState);
-      },
-      updateMemoraidTiming: (stats) => {
-        if (lastState) lastState.memoraidTiming = stats;
-        applyMemoraidTiming(stats);
       },
       setModels: (models, current) => {
         const opts = [...models];
         if (current && !opts.includes(current)) opts.unshift(current);
         setSafeHTML(modelEl, opts.length ? opts.map((m) => `<option value="${esc(m)}"${m === current ? " selected" : ""}>${esc(m)}</option>`).join("") : `<option value="">(enter API key, then reopen settings)</option>`);
         if (current) modelEl.value = current;
-        if (modelSearchEl) {
-          modelSearchEl.value = modelEl.value;
-          modelSearchEl.placeholder = opts.length ? "Search models\u2026" : "(enter API key, then reopen settings)";
-        }
-        if (modelListEl && modelListEl.style.display === "block" && modelSearchEl) {
-          renderModelList(modelSearchEl.value);
-        }
       },
       showDebug: (d) => {
-        if (d && lastState?.settings?.logPlotEssentials) {
-          console.log("[AID] Update Plot Essentials \u2014 raw analyze debug:", {
-            characters: d.characters,
-            narrativeChars: d.narrativeChars,
-            narrativeTail: d.narrativeTail,
-            rawResponse: d.rawSnippet,
-            windowN: d.windowN
-          });
+        lastDebug = d;
+        const dbgContainer = root.getElementById("debug-container");
+        if (dbgContainer) {
+          if (d) {
+            setSafeHTML(dbgContainer, `<details open style="margin-top:8px;border-top:1px solid #333;padding-top:4px;"><summary style="cursor:pointer;color:#8a8;">\u{1F50D} Analyze debug</summary><div class="note">characters: ${esc((d.characters || []).join(", "))}</div><div class="note">narrative chars: ${esc(String(d.narrativeChars))}</div><div class="note">narrative tail:</div><div>${esc(d.narrativeTail || "")}</div><div class="note">raw response (truncated):</div><div>${esc(d.rawSnippet || "")}</div></details>`);
+          } else {
+            dbgContainer.textContent = "";
+          }
         }
       },
       render: (state) => {
         const prevState = lastState;
         lastState = state;
+        if (state.activeSetupQuestion) {
+          setupHelperContainer.style.display = "block";
+          const q = state.activeSetupQuestion;
+          const prevDrawer = setupHelperContainer.querySelector(".setup-helper-drawer");
+          const wasOpen = prevDrawer ? prevDrawer.open : true;
+          const searchInput = setupHelperContainer.querySelector("#setup-favorites-search");
+          const searchVal = searchInput ? searchInput.value : "";
+          const activeEl = root.activeElement;
+          const wasSearchFocused = activeEl && activeEl.id === "setup-favorites-search";
+          const listEl = setupHelperContainer.querySelector("#setup-favorites-list");
+          setSafeHTML(setupHelperContainer, `
+          <details class="group-header setup-helper-drawer" ${wasOpen ? "open" : ""} style="--accent-color:#c084fc; --accent-glow:rgba(168,85,247,0.15); border-left-color:#c084fc !important; margin-bottom:8px;">
+            <summary style="color:#c084fc !important; font-weight:700;">
+              <span>\u{1F52E} Scenario Setup: ${q.type === "text" ? "Text Input" : "Multiple Choice"}</span>
+            </summary>
+            <div style="padding:10px 12px; display:flex; flex-direction:column; gap:8px; box-sizing:border-box; width:100%; background:rgba(168,85,247,0.02); border-top:1px solid rgba(168,85,247,0.15);">
+              <div style="font-size:11.5px; line-height:1.45; color:var(--text-primary); font-weight:500; word-break:break-word; max-height:80px; overflow-y:auto; border-left:2px solid rgba(168,85,247,0.3); padding-left:8px; margin-bottom:4px;">
+                ${esc(q.question)}
+              </div>
+              
+              ${q.type === "text" ? `
+                <div style="position:relative; margin-top:2px;">
+                  <input type="text" id="setup-favorites-search" placeholder="Search Favorites..." value="${esc(searchVal)}" style="width:100%; margin:0; padding:5px 8px; font-size:11px; background:rgba(0,0,0,0.3); color:var(--text-primary); border-radius:6px; border:1px solid rgba(255,255,255,0.08); box-sizing:border-box; font-family:inherit;" />
+                </div>
+                <div id="setup-favorites-list" style="margin-top:4px; padding-right:4px;">
+                  ${renderSetupFavorites(state.globalAssets || [], searchVal, q.question, listEl || void 0)}
+                </div>
+              ` : `
+                <div style="font-size:10px; color:var(--text-secondary); font-style:italic;">
+                  Select one of the numbered options on the page to proceed.
+                </div>
+              `}
+            </div>
+          </details>
+        `);
+          if (wasSearchFocused) {
+            const newSearch = root.getElementById("setup-favorites-search");
+            if (newSearch) {
+              newSearch.focus();
+              newSearch.setSelectionRange(searchVal.length, searchVal.length);
+            }
+          }
+        } else {
+          setupHelperContainer.style.display = "none";
+          setupHelperContainer.innerHTML = "";
+        }
+        const setupActionCount = state.actionCount ?? state.actionsCount ?? 0;
+        const inSetupPhase = isSetupPhase({
+          isManagerOnly: !!state.isManagerOnly,
+          hasActiveSetupQuestion: !!state.activeSetupQuestion,
+          actionCount: setupActionCount
+        });
+        const mainTabNav = viewTracker.querySelector(".main-tab-nav");
+        const locationBanners = root.getElementById("location-banners-container");
+        const trackerScrollable = root.getElementById("view-tracker-scrollable");
+        const mainTabTracker = root.getElementById("main-tab-tracker");
+        if (mainTabNav) mainTabNav.style.display = inSetupPhase ? "none" : "";
+        if (locationBanners) locationBanners.style.display = inSetupPhase ? "none" : "";
+        if (trackerScrollable) trackerScrollable.style.display = inSetupPhase ? "none" : "";
+        if (mainTabTracker) mainTabTracker.style.overflowY = inSetupPhase ? "auto" : "";
+        if (!state.isManagerOnly) {
+          const targetPane = visibleMainTabPane(inSetupPhase, activeTabId);
+          root.querySelectorAll(".main-tab-pane").forEach((p) => {
+            p.style.display = p.id === targetPane ? "flex" : "none";
+          });
+        }
         const tabManagerPane = root.getElementById("tab-manager");
         if (tabManagerPane && (tabManagerPane.style.display === "block" || tabManagerPane.style.display === "flex" || state.isManagerOnly)) {
           renderAdventuresManager(state);
@@ -5322,45 +7711,18 @@ HARD RULES (weaker models break these \u2014 do not):
           viewSettings.style.display = "flex";
           viewAnalyze.style.display = "none";
           const tabNav = viewSettings.querySelector(".tab-nav");
+          if (tabNav) tabNav.style.display = "none";
           const footer = root.getElementById("settings-footer");
-          if (managerShowSettings) {
-            if (tabNav) {
-              tabNav.style.display = "flex";
-              tabNav.querySelectorAll(".tab-btn").forEach((btn) => {
-                const tab = btn.getAttribute("data-tab");
-                if (tab === "tab-prov" || tab === "tab-debug") {
-                  btn.style.display = "";
-                } else {
-                  btn.style.display = "none";
-                }
-              });
+          if (footer) footer.style.display = "none";
+          viewSettings.querySelectorAll(".tab-pane").forEach((pane) => {
+            if (pane.id !== "tab-manager") {
+              pane.style.display = "none";
             }
-            if (footer) footer.style.display = "flex";
-            const activeBtn = viewSettings.querySelector(".tab-btn.active");
-            const currentActiveTab = activeBtn?.getAttribute("data-tab");
-            if (currentActiveTab !== "tab-prov" && currentActiveTab !== "tab-debug") {
-              switchTab("tab-prov");
-            } else {
-              switchTab(currentActiveTab || "tab-prov");
-            }
-          } else {
-            if (tabNav) tabNav.style.display = "none";
-            if (footer) footer.style.display = "none";
-            viewSettings.querySelectorAll(".tab-pane").forEach((pane) => {
-              if (pane.id !== "tab-manager") {
-                pane.style.display = "none";
-              }
-            });
-            if (tabManagerPane) tabManagerPane.style.display = "flex";
-          }
+          });
+          if (tabManagerPane) tabManagerPane.style.display = "flex";
         } else {
           const tabNav = viewSettings.querySelector(".tab-nav");
-          if (tabNav) {
-            tabNav.style.display = "flex";
-            tabNav.querySelectorAll(".tab-btn").forEach((btn) => {
-              btn.style.display = "";
-            });
-          }
+          if (tabNav) tabNav.style.display = "flex";
           const footer = root.getElementById("settings-footer");
           if (footer) footer.style.display = "flex";
           const activeBtn = viewSettings.querySelector(".tab-btn.active");
@@ -5378,12 +7740,12 @@ HARD RULES (weaker models break these \u2014 do not):
         }
         const titleTail = [state.scenario, state.protagonist].filter(Boolean).join(" - ");
         st.textContent = titleTail ? `AID Story Helper: ${titleTail}` : "AID Story Helper";
-        const shouldForceUpdate = isShortIdChanged || !prevState;
         if (isShortIdChanged) {
           protEl.value = state.protagonist || "";
-        } else if (root.activeElement !== protEl) {
+        } else if (document.activeElement !== protEl) {
           protEl.value = state.protagonist || "";
         }
+        const shouldForceUpdate = isShortIdChanged || !prevState;
         if (state.settings?.theme && (shouldForceUpdate || root.activeElement !== themeEl) && themeEl.value !== state.settings.theme) {
           themeEl.value = state.settings.theme;
           updateThemeClass();
@@ -5398,59 +7760,33 @@ HARD RULES (weaker models break these \u2014 do not):
         } else if (!keyEl.value) {
           updateProviderLabels();
         }
-        if (state.settings?.analyzeWindow && (shouldForceUpdate || root.activeElement !== winEl) && winEl.value !== String(state.settings.analyzeWindow)) {
+        if (state.settings?.analyzeWindow && (!winEl.value || shouldForceUpdate || root.activeElement !== winEl)) {
           winEl.value = String(state.settings.analyzeWindow);
         }
-        if (state.settings && (shouldForceUpdate || root.activeElement !== memoraidWinEl) && memoraidWinEl.value !== String(state.settings.memoraidLookback ?? 8)) {
-          memoraidWinEl.value = String(state.settings.memoraidLookback ?? 8);
+        if (state.settings && (!memoraidThoughtWinEl.value || shouldForceUpdate || root.activeElement !== memoraidThoughtWinEl)) {
+          memoraidThoughtWinEl.value = String(Math.max(1, state.settings.memoraidThoughtLookback ?? 1));
         }
-        if (state.settings && (shouldForceUpdate || root.activeElement !== memoraidThoughtWinEl) && memoraidThoughtWinEl.value !== String(state.settings.memoraidThoughtLookback ?? 1)) {
-          const val = state.settings.memoraidThoughtLookback ?? 1;
-          memoraidThoughtWinEl.value = String(val >= 1 ? val : 1);
-        }
-        if (state.settings && (shouldForceUpdate || root.activeElement !== memoraidPresenceWinEl) && memoraidPresenceWinEl.value !== String(state.settings.memoraidPresenceLookback ?? 5)) {
+        if (state.settings && (!memoraidPresenceWinEl.value || shouldForceUpdate || root.activeElement !== memoraidPresenceWinEl)) {
           memoraidPresenceWinEl.value = String(state.settings.memoraidPresenceLookback ?? 5);
         }
-        if (state.settings && (shouldForceUpdate || root.activeElement !== interceptTimeoutEl) && interceptTimeoutEl.value !== String(state.settings.interceptTimeout ?? 10)) {
-          interceptTimeoutEl.value = String(state.settings.interceptTimeout ?? 10);
+        if (state.settings && (!interceptTimeoutEl.value || shouldForceUpdate || root.activeElement !== interceptTimeoutEl)) {
+          interceptTimeoutEl.value = String(state.settings.interceptTimeout ?? 4);
         }
-        if (state.settings && (shouldForceUpdate || root.activeElement !== charCardLimitEl) && charCardLimitEl.value !== String(state.settings.characterCardLimit ?? 600)) {
-          charCardLimitEl.value = String(state.settings.characterCardLimit ?? 600);
-        }
-        if (state.settings && (shouldForceUpdate || root.activeElement !== thoughtCardLimitEl) && thoughtCardLimitEl.value !== String(state.settings.thoughtCardLimit ?? 2e3)) {
-          thoughtCardLimitEl.value = String(state.settings.thoughtCardLimit ?? 2e3);
-        }
-        applyMemoraidTiming(state.memoraidTiming);
         const locModeEl = root.getElementById("location-mode");
-        if (locModeEl && state.settings && (shouldForceUpdate || root.activeElement !== locModeEl) && locModeEl.value !== (state.settings.locationMode || "optionA")) {
+        if (locModeEl && state.settings && (shouldForceUpdate || root.activeElement !== locModeEl)) {
           locModeEl.value = state.settings.locationMode || "optionA";
         }
         const properNounDetectEl = root.getElementById("enable-proper-noun-detection");
         if (properNounDetectEl && state.settings && (shouldForceUpdate || root.activeElement !== properNounDetectEl)) {
           properNounDetectEl.checked = state.settings.enableProperNounDetection !== false;
         }
-        const hasConfigCard = (state.cards ?? []).some(
-          (c) => !c.deletedAt && (c.title || "").toLowerCase() === "configure memoraid"
-        );
-        const memoraidTabBannerContainer = root.getElementById("memoraid-tab-config-banner-container");
-        if (memoraidTabBannerContainer) {
-          if (!hasConfigCard) {
-            memoraidTabBannerContainer.innerHTML = `<div class="memoraid-config-banner" style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2);border-radius:8px;padding:10px;margin-bottom:12px;display:flex;flex-direction:column;gap:6px;box-sizing:border-box;width:100%;"><div style="font-weight:700;color:#fbbf24;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;">Enable MemorAID Thought Tracking</div><div class="note" style="margin:0;font-size:11px;line-height:1.4;color:var(--text-secondary);">To automatically track NPC thoughts in memory cards, create the config card first.</div><button id="create-memoraid-config-btn-tab" style="background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.3);padding:5px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:500;align-self:flex-start;transition:background 0.2s;width:auto;min-height:unset;">Create Config Card</button></div>`;
-          } else {
-            memoraidTabBannerContainer.innerHTML = "";
-          }
-        }
-        const manualModeEl = root.getElementById("enable-manual-mode");
-        if (manualModeEl && state.settings && (shouldForceUpdate || root.activeElement !== manualModeEl)) {
-          manualModeEl.checked = !!state.settings.manualMode;
+        const autoUpdatesEl = root.getElementById("enable-automatic-updates");
+        if (autoUpdatesEl && state.settings && (shouldForceUpdate || root.activeElement !== autoUpdatesEl)) {
+          autoUpdatesEl.checked = !!state.settings.enableAutomaticUpdates;
         }
         const showDbgEl = root.getElementById("show-dbg");
         if (showDbgEl && state.settings && (shouldForceUpdate || root.activeElement !== showDbgEl)) {
           showDbgEl.checked = !!state.settings.showDebug;
-        }
-        const logPeEl = root.getElementById("log-pe-console");
-        if (logPeEl && state.settings && (shouldForceUpdate || root.activeElement !== logPeEl)) {
-          logPeEl.checked = !!state.settings.logPlotEssentials;
         }
         const useMemsEl = root.getElementById("use-memories");
         if (useMemsEl && state.settings && (shouldForceUpdate || root.activeElement !== useMemsEl)) {
@@ -5460,6 +7796,68 @@ HARD RULES (weaker models break these \u2014 do not):
         if (autoRegenMemsEl && state.settings && (shouldForceUpdate || root.activeElement !== autoRegenMemsEl)) {
           autoRegenMemsEl.checked = !!state.settings.autoRegenerateMemoryBankEntry;
         }
+        if (enableLcEl && state.settings && (shouldForceUpdate || root.activeElement !== enableLcEl)) {
+          enableLcEl.checked = state.settings.enableLivingCharacters !== false;
+        }
+        if (lcTitlePrefixEl && state.settings && (shouldForceUpdate || root.activeElement !== lcTitlePrefixEl)) {
+          lcTitlePrefixEl.value = state.settings.livingCharactersTitlePrefix ?? "Life - ";
+        }
+        if (lcKeyPrefixEl && state.settings && (shouldForceUpdate || root.activeElement !== lcKeyPrefixEl)) {
+          lcKeyPrefixEl.value = state.settings.livingCharactersKeyPrefix ?? "chaos-v2:";
+        }
+        if (groupThoughtsEl && state.settings && (shouldForceUpdate || root.activeElement !== groupThoughtsEl)) {
+          groupThoughtsEl.checked = !!state.settings.groupThoughtsInRoster;
+        }
+        if (charCardLimitEl && (!charCardLimitEl.value || shouldForceUpdate || root.activeElement !== charCardLimitEl)) {
+          charCardLimitEl.value = "600";
+        }
+        if (memoraidWinEl && (!memoraidWinEl.value || shouldForceUpdate || root.activeElement !== memoraidWinEl)) {
+          memoraidWinEl.value = "8";
+        }
+        if (thoughtCardLimitEl && state.settings && (shouldForceUpdate || root.activeElement !== thoughtCardLimitEl) && thoughtCardLimitEl.value !== String(state.settings.thoughtCardLimit ?? 2e3)) {
+          thoughtCardLimitEl.value = String(state.settings.thoughtCardLimit ?? 2e3);
+        }
+        const enableMemoraidEl = root.getElementById("enable-memoraid");
+        if (enableMemoraidEl) enableMemoraidEl.checked = state.settings?.enableMemorAID !== false;
+        const enableCrystallizedEl = root.getElementById("enable-crystallized");
+        if (enableCrystallizedEl) enableCrystallizedEl.checked = !!state.settings?.enableCrystallized;
+        if (crystallizedIntervalEl && (shouldForceUpdate || root.activeElement !== crystallizedIntervalEl)) {
+          crystallizedIntervalEl.value = String(state.settings?.crystallizedInterval ?? 20);
+        }
+        if (crystallizedEntryMaxCharsEl && (shouldForceUpdate || root.activeElement !== crystallizedEntryMaxCharsEl)) {
+          crystallizedEntryMaxCharsEl.value = String(state.settings?.crystallizedEntryMaxChars ?? 900);
+        }
+        if (crystallizedNodeCapEl && (shouldForceUpdate || root.activeElement !== crystallizedNodeCapEl)) {
+          crystallizedNodeCapEl.value = String(state.settings?.crystallizedNodeCap ?? 12);
+        }
+        if (crystallizedKnowsCapEl && (shouldForceUpdate || root.activeElement !== crystallizedKnowsCapEl)) {
+          crystallizedKnowsCapEl.value = String(state.settings?.crystallizedKnowsCap ?? 2);
+        }
+        if (crystallizedRecallsCapEl && (shouldForceUpdate || root.activeElement !== crystallizedRecallsCapEl)) {
+          crystallizedRecallsCapEl.value = String(state.settings?.crystallizedRecallsCap ?? 2);
+        }
+        if (crystallizedVividCapEl && (shouldForceUpdate || root.activeElement !== crystallizedVividCapEl)) {
+          crystallizedVividCapEl.value = String(state.settings?.crystallizedVividCap ?? 4);
+        }
+        if (crystallizedOutlookCapEl && (shouldForceUpdate || root.activeElement !== crystallizedOutlookCapEl)) {
+          crystallizedOutlookCapEl.value = String(state.settings?.crystallizedOutlookCap ?? 2);
+        }
+        if (crystallizedPreferencesCapEl && (shouldForceUpdate || root.activeElement !== crystallizedPreferencesCapEl)) {
+          crystallizedPreferencesCapEl.value = String(state.settings?.crystallizedPreferencesCap ?? 4);
+        }
+        if (crystallizedNpcMemoryCapEl && (shouldForceUpdate || root.activeElement !== crystallizedNpcMemoryCapEl)) {
+          crystallizedNpcMemoryCapEl.value = String(state.settings?.crystallizedNpcMemoryCap ?? 400);
+        }
+        const crystKnowsEl = root.getElementById("crystallized-knows-enabled");
+        if (crystKnowsEl) crystKnowsEl.checked = state.settings?.crystallizedKnowsEnabled !== false;
+        const crystNodesEl = root.getElementById("crystallized-nodes-enabled");
+        if (crystNodesEl) crystNodesEl.checked = state.settings?.crystallizedNodesEnabled !== false;
+        const crystOutlookEnEl = root.getElementById("crystallized-outlook-enabled");
+        if (crystOutlookEnEl) crystOutlookEnEl.checked = state.settings?.crystallizedOutlookEnabled !== false;
+        const crystPrefsEnEl = root.getElementById("crystallized-preferences-enabled");
+        if (crystPrefsEnEl) crystPrefsEnEl.checked = state.settings?.crystallizedPreferencesEnabled !== false;
+        const crystNpcMemEnEl = root.getElementById("crystallized-npc-memory-enabled");
+        if (crystNpcMemEnEl) crystNpcMemEnEl.checked = state.settings?.crystallizedNpcMemoryEnabled !== false;
         if (state.settings) {
           const s1 = root.getElementById("prompt-s1");
           const s2 = root.getElementById("prompt-s2");
@@ -5478,10 +7876,6 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
         const statTurn = root.getElementById("stat-turn");
         const statLastAuto = root.getElementById("stat-last-auto");
         const curAction = state.actionCount ?? state.actionsCount ?? 0;
-        const selfHealBanner = root.getElementById("self-heal-banner");
-        if (selfHealBanner) {
-          selfHealBanner.style.display = isLocalDbEmpty(state) && !selfHealDismissed ? "block" : "none";
-        }
         if (statTurn) statTurn.textContent = String(curAction);
         if (statLastAuto) {
           statLastAuto.textContent = state.lastAutoUpdatedCard || "-";
@@ -5493,16 +7887,13 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
           arr.push(v);
           charGroups.set(key, arr);
         }
-        for (const [name, list] of charGroups.entries()) {
+        for (const missingKey of activeCardsMissingFromRoster(state.cards ?? [], charGroups.keys())) {
+          if (!charGroups.has(missingKey)) charGroups.set(missingKey, []);
+        }
+        for (const list of charGroups.values()) {
           list.sort((a, b) => a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0);
         }
         let html = "";
-        const hasConfigCardVal = (state.cards ?? []).some(
-          (c) => !c.deletedAt && (c.title || "").toLowerCase() === "configure memoraid"
-        );
-        if (!hasConfigCardVal && state.settings?.memoraidBannerDismissed !== true) {
-          html += `<div class="memoraid-config-banner" style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2);border-radius:8px;padding:10px;margin-bottom:12px;display:flex;flex-direction:column;gap:6px;box-sizing:border-box;width:100%;"><div style="font-weight:700;color:#fbbf24;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;">Enable MemorAID Thought Tracking</div><div class="note" style="margin:0;font-size:11px;line-height:1.4;color:var(--text-secondary);">To automatically track NPC thoughts in memory cards, create the config card first.</div><div style="display:flex;gap:8px;align-items:center;margin-top:4px;"><button id="create-memoraid-config-btn" style="background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.3);padding:5px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:500;transition:background 0.2s;width:auto;min-height:unset;">Create Config Card</button><button id="dismiss-memoraid-banner-btn" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:11px;font-weight:500;padding:5px 10px;text-decoration:underline;margin:0;">Dismiss</button></div></div>`;
-        }
         const allNames = Array.from(charGroups.keys());
         const sortedNames = [];
         const placedNames = /* @__PURE__ */ new Set();
@@ -5538,33 +7929,19 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
         const sortedChars = sortedNames.map((name) => [name, charGroups.get(name)]);
         const cardTypeByName = /* @__PURE__ */ new Map();
         const cardIdByName = /* @__PURE__ */ new Map();
-        const deletedNames = /* @__PURE__ */ new Set();
+        const deletedNames = computeDeletedNames(state.cards ?? []);
         for (const c of state.cards ?? []) {
           const keysList = (c.keys || "").split(/[,;]+/).map((k) => k.trim().toLowerCase()).filter(Boolean);
           for (const k of keysList) {
             cardTypeByName.set(k, c.type || "character");
             cardIdByName.set(k + "::" + (c.type || "character").toLowerCase(), c.id);
             cardIdByName.set(k, c.id);
-            if (c.deletedAt) {
-              deletedNames.add(k + "::" + (c.type || "character").toLowerCase());
-              deletedNames.add(k);
-            } else {
-              deletedNames.delete(k + "::" + (c.type || "character").toLowerCase());
-              deletedNames.delete(k);
-            }
           }
           const fullKey = (c.title || c.keys || "").trim().toLowerCase();
           if (fullKey) {
             cardTypeByName.set(fullKey, c.type || "character");
             cardIdByName.set(fullKey + "::" + (c.type || "character").toLowerCase(), c.id);
             cardIdByName.set(fullKey, c.id);
-            if (c.deletedAt) {
-              deletedNames.add(fullKey + "::" + (c.type || "character").toLowerCase());
-              deletedNames.add(fullKey);
-            } else {
-              deletedNames.delete(fullKey + "::" + (c.type || "character").toLowerCase());
-              deletedNames.delete(fullKey);
-            }
           }
         }
         for (const c of state.cards ?? []) {
@@ -5573,13 +7950,6 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
             cardTypeByName.set(titleLower, c.type || "character");
             cardIdByName.set(titleLower + "::" + (c.type || "character").toLowerCase(), c.id);
             cardIdByName.set(titleLower, c.id);
-            if (c.deletedAt) {
-              deletedNames.add(titleLower + "::" + (c.type || "character").toLowerCase());
-              deletedNames.add(titleLower);
-            } else {
-              deletedNames.delete(titleLower + "::" + (c.type || "character").toLowerCase());
-              deletedNames.delete(titleLower);
-            }
           }
         }
         const plotNames = /* @__PURE__ */ new Set();
@@ -5590,39 +7960,114 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
           const parts = key.split("::");
           const name = parts[0] || "";
           const type = parts[1];
+          const titlePrefix = (state.settings?.livingCharactersTitlePrefix || "Life - ").toLowerCase();
+          const keyPrefix = (state.settings?.livingCharactersKeyPrefix || "chaos-v2:").toLowerCase();
+          const explicit = explicitTypeLabel(name, type, titlePrefix);
+          if (explicit) return explicit;
+          const isLifeCard = () => {
+            if (type && type.toLowerCase() === "life") return true;
+            const nameLower = name.trim().toLowerCase();
+            if (nameLower.startsWith(titlePrefix)) return true;
+            const card = (state.cards ?? []).find((c) => !c.deletedAt && (c.title?.toLowerCase() === nameLower || c.keys?.split(/[,;]+/).map((k) => k.trim().toLowerCase()).includes(nameLower)));
+            if (card) {
+              if ((card.type || "").toLowerCase() === "life") return true;
+              if ((card.title || "").toLowerCase().startsWith(titlePrefix)) return true;
+              const keysList = (card.keys || "").split(/[,;]+/).map((k) => k.trim().toLowerCase()).filter(Boolean);
+              if (keysList.some((k) => k.startsWith(keyPrefix))) return true;
+            }
+            return false;
+          };
+          if (isLifeCard()) {
+            return "Life";
+          }
+          const isThoughtCard = () => {
+            if (!state.settings?.groupThoughtsInRoster) return false;
+            if (type && (type.toLowerCase() === "memory" || type.toLowerCase() === "thoughts")) return true;
+            const nameLower = name.trim().toLowerCase();
+            if (nameLower.endsWith(" (memory)") || nameLower.endsWith(" - thoughts")) return true;
+            const card = (state.cards ?? []).find((c) => !c.deletedAt && (c.title?.toLowerCase() === nameLower || c.keys?.split(/[,;]+/).map((k) => k.trim().toLowerCase()).includes(nameLower)));
+            if (card) {
+              const cardTypeLower = (card.type || "").toLowerCase();
+              if (cardTypeLower === "memory" || cardTypeLower === "thoughts") return true;
+              const cardTitleLower = (card.title || "").toLowerCase();
+              if (cardTitleLower.endsWith(" (memory)") || cardTitleLower.endsWith(" - thoughts")) return true;
+            }
+            return false;
+          };
+          const isCrystallizedCard = () => {
+            const nameLower = name.trim().toLowerCase();
+            if (nameLower.endsWith(" - crystallized")) return true;
+            if (type && type.toLowerCase() === "crystallized") return true;
+            const exactTitleCard = (state.cards ?? []).find((c) => !c.deletedAt && (c.title || "").trim().toLowerCase() === nameLower);
+            if (!exactTitleCard) return false;
+            const cardTypeLower = (exactTitleCard.type || "").toLowerCase();
+            if (cardTypeLower === "crystallized") return true;
+            return (exactTitleCard.title || "").trim().toLowerCase().endsWith(" - crystallized");
+          };
+          if (isCrystallizedCard()) {
+            return "Crystallized";
+          }
+          if (isThoughtCard()) {
+            return "Thoughts";
+          }
           if (type) {
-            return TYPE_LABELS[type.toLowerCase()] ?? type;
+            const lowerType = type.toLowerCase();
+            if (TYPE_LABELS[lowerType]) return TYPE_LABELS[lowerType];
+            return type.charAt(0).toUpperCase() + type.slice(1);
           }
           const lower = name.trim().toLowerCase();
           const t = cardTypeByName.get(lower);
-          if (t) return TYPE_LABELS[t.toLowerCase()] ?? t;
+          if (t) {
+            const lowerT = t.toLowerCase();
+            if (TYPE_LABELS[lowerT]) return TYPE_LABELS[lowerT];
+            return t.charAt(0).toUpperCase() + t.slice(1);
+          }
           if (plotNames.has(lower)) return "Plot Essentials";
           return "Other";
         };
+        const activeNames = /* @__PURE__ */ new Set();
+        for (const c of state.cards ?? []) {
+          if (c.deletedAt) continue;
+          const type = (c.type || "character").toLowerCase();
+          const add = (n) => {
+            const k = n.trim().toLowerCase();
+            if (k) {
+              activeNames.add(k);
+              activeNames.add(`${k}::${type}`);
+            }
+          };
+          if (c.title) add(c.title);
+          for (const k of (c.keys || "").split(/[,;]+/)) add(k);
+        }
         const isArchived = (key) => {
           const parts = key.split("::");
           const name = parts[0] || "";
           const type = parts[1];
-          const lookupKey = type ? `${name.trim().toLowerCase()}::${type.toLowerCase()}` : name.trim().toLowerCase();
-          return deletedNames.has(lookupKey) || deletedNames.has(name.trim().toLowerCase());
+          const bareName = name.trim().toLowerCase();
+          const lookupKey = type ? `${bareName}::${type.toLowerCase()}` : bareName;
+          if (activeNames.has(lookupKey) || activeNames.has(bareName)) return false;
+          return deletedNames.has(lookupKey) || deletedNames.has(bareName);
         };
         const activeGrouped = /* @__PURE__ */ new Map();
         const archivedGrouped = /* @__PURE__ */ new Map();
         activeGrouped.set("Plot Essentials", []);
+        const memoraidEnabled = state.settings?.enableMemorAID !== false;
+        const memoraidNames = state.memoraidCharacters ?? [];
         for (const entry of sortedChars) {
+          if ((entry[0].split("::")[0] || "").trim().toLowerCase() === "configure memoraid") continue;
           const lbl = typeLabelFor(entry[0]);
           const target = isArchived(entry[0]) ? archivedGrouped : activeGrouped;
           const arr = target.get(lbl) ?? [];
           arr.push(entry);
           target.set(lbl, arr);
         }
-        const LABEL_ORDER = ["Plot Essentials", "Characters", "Classes", "Races", "Locations", "Factions"];
+        const LABEL_ORDER = ["Plot Essentials", "Characters", "Thoughts", "Crystallized", "Life", "Classes", "Races", "Locations", "Factions"];
         const rank = (l) => l === "Other" ? 1e3 : LABEL_ORDER.indexOf(l) === -1 ? 500 : LABEL_ORDER.indexOf(l);
         const orderLabels = (keys) => [...keys].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
         const openGroups = /* @__PURE__ */ new Set();
         const hasExistingGroups = results.querySelectorAll("details[data-group]").length > 0;
         if (!hasExistingGroups) {
-          openGroups.add("active-Plot Essentials");
+          openGroups.add(memoraidEnabled && memoraidNames.length ? "memoraid-config" : "active-Plot Essentials");
         } else {
           results.querySelectorAll("details[data-group]").forEach((d) => {
             if (d.open) openGroups.add(d.getAttribute("data-group") || "");
@@ -5648,16 +8093,24 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
                 actionText = ` <span style="color:var(--text-secondary);font-size:10.5px;font-weight:normal;margin-left:4px;">(Last Updated: Action #${latest.actionCount})</span>`;
               }
             }
-            out += `<details class="char-card"${isCharOpen}${stateStyles ? ` style="${stateStyles}"` : ""}><summary${titleColor ? ` style="${titleColor}"` : ""}><span>${esc(displayName)}${actionText}` + (hasPending ? ` <span style="background:rgba(239, 68, 68, 0.2);color:#fca5a5;font-size:9px;padding:2px 6px;border-radius:4px;margin-left:6px;display:inline-block;vertical-align:middle;font-weight:bold;">Proposal</span>` : "") + (isArchivedSection ? ` <span style="background:rgba(255, 255, 255, 0.06);color:var(--text-secondary);font-size:9px;padding:2px 6px;border-radius:4px;margin-left:6px;display:inline-block;vertical-align:middle;">Archived</span>` : "") + `</span></summary><div class="char-card-body">`;
+            out += `<details class="char-card" data-card-title="${esc(displayName)}"${isCharOpen}${stateStyles ? ` style="${stateStyles}"` : ""}><summary${titleColor ? ` style="${titleColor}"` : ""}><span>${esc(displayName)}${actionText}` + (hasPending ? ` <span style="background:rgba(239, 68, 68, 0.2);color:#fca5a5;font-size:9px;padding:2px 6px;border-radius:4px;margin-left:6px;display:inline-block;vertical-align:middle;font-weight:bold;">Proposal</span>` : "") + (isArchivedSection ? ` <span style="background:rgba(255, 255, 255, 0.06);color:var(--text-secondary);font-size:9px;padding:2px 6px;border-radius:4px;margin-left:6px;display:inline-block;vertical-align:middle;">Archived</span>` : "") + `</span></summary><div class="char-card-body">`;
             const lookupKey = type ? `${displayName.trim().toLowerCase()}::${type.toLowerCase()}` : displayName.trim().toLowerCase();
             const genCardId = cardIdByName.get(lookupKey) ?? cardIdByName.get(displayName.trim().toLowerCase());
             if (genCardId && !isArchivedSection) {
-              const providerKey = state.settings?.provider || "claude";
-              let providerLabel = "Claude";
-              if (providerKey === "openai") providerLabel = "OpenAI";
-              else if (providerKey === "gemini") providerLabel = "Gemini";
-              else if (providerKey === "ollama") providerLabel = "Ollama";
-              out += `<button class="action-btn" data-gen-card="${esc(genCardId)}" style="margin-bottom:8px;background:rgba(245,158,11,0.12);color:#fbbf24;border-color:rgba(245,158,11,0.3);">\u26A1 Generate (${providerLabel})</button>`;
+              const isCrystallized = displayName.toLowerCase().endsWith(" - crystallized") || type && type.toLowerCase() === "crystallized";
+              if (isCrystallized) {
+                const charName = displayName.replace(/\s*-\s*crystallized$/i, "");
+                out += `<button class="action-btn distill-now-btn" data-card-id="${esc(genCardId)}" data-char-name="${esc(charName)}" style="margin-bottom:8px;margin-right:6px;background:rgba(59,130,246,0.12);color:#60a5fa;border-color:rgba(59,130,246,0.3);">Distill now</button><button class="action-btn consolidate-crystallized-btn" data-card-id="${esc(genCardId)}" style="margin-bottom:8px;margin-right:6px;background:rgba(168,85,247,0.12);color:#c084fc;border-color:rgba(168,85,247,0.3);">Consolidate</button><button class="action-btn consolidate-outlook-btn" data-char-name="${esc(charName)}" title="Fold this character's settled beliefs (Outlook) into their character card as a proposed revision, then clear them from Crystallized" style="margin-bottom:8px;background:rgba(245,158,11,0.12);color:#fbbf24;border-color:rgba(245,158,11,0.3);">Consolidate Outlook</button>`;
+              } else {
+                const isCharacterType = (type || "").toLowerCase() === "character";
+                const genLabel = isCharacterType ? "\u26A1 Generate Core Character" : "\u26A1 Generate (AID)";
+                out += `<button class="action-btn" data-gen-card="${esc(genCardId)}" style="margin-bottom:8px;background:rgba(245,158,11,0.12);color:#fbbf24;border-color:rgba(245,158,11,0.3);">${genLabel}</button>`;
+                if (isCharacterType) {
+                  out += `<button class="action-btn" data-gen-compact="${esc(genCardId)}" style="margin-bottom:8px;margin-left:6px;background:rgba(34,211,238,0.12);color:#22d3ee;border-color:rgba(34,211,238,0.3);" title="Generate a shorter side-character card \u2014 details without high resolution">\u2728 Generate Side Character</button>`;
+                  out += `<button class="action-btn" data-reroll-card="${esc(genCardId)}" style="margin-bottom:8px;margin-left:6px;background:rgba(168,85,247,0.12);color:#c084fc;border-color:rgba(168,85,247,0.3);" title="Re-sample this character's body and rewrite their physical description (keeps personality)">\u{1F3B2} Re-roll Body</button>`;
+                }
+              }
+              out += `<button class="action-btn card-delete-btn" data-card-id="${esc(genCardId)}" style="margin-bottom:8px;margin-left:6px;background:rgba(239,68,68,0.12);color:#f87171;border-color:rgba(239,68,68,0.3);">Delete</button>`;
             }
             if (hasPending) {
               out += `<div class="pending-proposal-box"><div class="pending-title">Pending Proposal</div>` + charPending.map((v) => {
@@ -5670,10 +8123,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
               const actionText2 = latest.actionCount != null ? ` (Last Updated Action: #${latest.actionCount})` : "";
               out += `<details class="char-section"><summary>Current Entry${actionText2}</summary><div class="char-section-body"><div class="code-card" style="margin:0;"><div class="code-card-header">Latest: ${esc(latest.changeSummary)}</div><pre>${esc(latest.entry)}</pre></div></div></details>`;
               if (genCardId && !isArchivedSection) {
-                const card = state.cards?.find((c) => c.id === genCardId);
-                const currentTriggers = card?.keys || "";
-                out += `<div class="triggers-section" style="margin-top:10px;margin-bottom:10px;padding:8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:8px;"><label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;display:block;margin-bottom:4px;">Triggers</label><div style="display:flex;gap:6px;align-items:center;"><input class="triggers-input" data-card-id="${esc(genCardId)}" type="text" value="${esc(currentTriggers)}" style="margin:0;flex:1;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:5px 8px;border-radius:6px;font-size:11px;font-family:inherit;box-sizing:border-box;" /><button class="triggers-submit-btn" data-card-id="${esc(genCardId)}" style="margin:0;padding:5px 8px;background:rgba(16, 185, 129, 0.15);color:#10b981;border-color:rgba(16, 185, 129, 0.3);border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;width:24px;height:24px;" title="Save Triggers">\u2713</button></div></div>`;
-                out += `<div class="entry-section" style="margin-top:10px;margin-bottom:10px;padding:8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:8px;"><label style="font-weight:700;color:var(--text-secondary);font-size:10px;text-transform:uppercase;display:block;margin-bottom:4px;">Entry</label><div style="display:flex;gap:6px;align-items:flex-start;"><textarea class="entry-input" data-card-id="${esc(genCardId)}" rows="5" style="margin:0;flex:1;background:rgba(255,255,255,0.03);color:var(--text-primary);border:1px solid rgba(255,255,255,0.08);padding:5px 8px;border-radius:6px;font-size:11px;font-family:SFMono-Regular,Consolas,monospace;box-sizing:border-box;resize:vertical;">${esc(card?.value || "")}</textarea><button class="entry-submit-btn" data-card-id="${esc(genCardId)}" style="margin:0;padding:5px 8px;background:rgba(16, 185, 129, 0.15);color:#10b981;border-color:rgba(16, 185, 129, 0.3);border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;width:24px;height:24px;" title="Save Entry">\u2713</button></div></div>`;
+                out += `<div style="margin-top:10px;margin-bottom:10px;"><button class="open-card-editor action-btn" data-card-id="${esc(genCardId)}" style="background:rgba(255,255,255,0.04);color:var(--text-primary);border-color:var(--border-color);">\u270F\uFE0F Edit Card (entry &amp; triggers)</button></div>`;
               }
               out += `<div class="history-header">History & Rewrites</div><div class="history-list">` + [...charApplied].reverse().map((v) => {
                 const time = new Date(v.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -5696,9 +8146,9 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
             const chars = grouped.get(lbl);
             const wasOpen = openGroups.has(groupKey);
             const charCount = chars.length;
-            const pendingCount2 = chars.reduce((sum, [, vs]) => sum + vs.filter((v) => v.status === "pending").length, 0);
+            const pendingCount = chars.reduce((sum, [, vs]) => sum + vs.filter((v) => v.status === "pending").length, 0);
             const openAttr = wasOpen ? " open" : "";
-            const pendingBadge = pendingCount2 > 0 ? ` <span class="badge-new-proposals">+${pendingCount2}</span>` : "";
+            const pendingBadge = pendingCount > 0 ? ` <span class="badge-new-proposals">+${pendingCount}</span>` : "";
             const countBadge = ` <span style="color:var(--text-secondary);font-size:10px;font-weight:normal;">(${charCount})</span>`;
             if (lbl === "Characters" && !isArchivedSection) {
               console.log("[AID panel] Characters group names:", chars.map((c) => c[0]));
@@ -5709,14 +8159,23 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
               const curAction2 = state.actionCount ?? state.actionsCount ?? 0;
               const lastAnAction = state.lastAnalysisAction ?? 0;
               const sinceLastUpdate = lastAnAction > 0 ? String(curAction2 - lastAnAction) : "-";
-              prefixHtml = `<button id="an" style="width:100%;margin-bottom:6px;">\u27F3 Update Plot Essentials</button><div style="font-size:9.5px;color:var(--text-secondary);margin-bottom:10px;text-align:center;font-family:SFMono-Regular,Consolas,monospace;display:flex;justify-content:space-around;gap:8px;box-sizing:border-box;width:100%;"><div>Since Last Update Check: <span id="stat-since" style="color:var(--accent-color);font-weight:bold;">${sinceLastUpdate}</span></div><div>Action Lookback Window: <span id="stat-lookback" style="color:var(--accent-color);font-weight:bold;">${lookbackVal}</span></div></div>`;
+              prefixHtml = `<button id="an" class="btn-primary" style="width:100%;margin-bottom:6px;">\u27F3 Update Plot Essentials</button><div style="font-size:9.5px;color:var(--text-secondary);margin-bottom:10px;text-align:center;font-family:SFMono-Regular,Consolas,monospace;display:flex;justify-content:space-around;gap:8px;box-sizing:border-box;width:100%;"><div>Since Last Update Check: <span id="stat-since" style="color:var(--accent-color);font-weight:bold;">${sinceLastUpdate}</span></div><div>Action Lookback Window: <span id="stat-lookback" style="color:var(--accent-color);font-weight:bold;">${lookbackVal}</span></div></div>`;
             }
-            const hasPending = pendingCount2 > 0;
+            const hasPending = pendingCount > 0;
             const proposalsClass = hasPending ? " has-proposals" : "";
-            sectionHtml += `<details class="group-header${proposalsClass}" data-group="${esc(groupKey)}"${openAttr}><summary><span>${esc(lbl)}${countBadge}${pendingBadge}</span></summary><div style="padding:4px 8px 8px;">` + prefixHtml + renderChars(chars, isArchivedSection) + `</div></details>`;
+            const isCrystal = lbl === "Crystallized";
+            const groupStyle = isCrystal ? ` style="--accent-color:#22d3ee; --accent-glow:rgba(34,211,238,0.18); border-left-color:#22d3ee !important;"` : "";
+            const lblHtml = isCrystal ? `\u{1F48E} ${esc(lbl)}` : esc(lbl);
+            sectionHtml += `<details class="group-header${proposalsClass}" data-group="${esc(groupKey)}"${openAttr}${groupStyle}><summary><span>${lblHtml}${countBadge}${pendingBadge}</span></summary><div style="padding:4px 8px 8px;">` + prefixHtml + renderChars(chars, isArchivedSection) + `</div></details>`;
           }
           return sectionHtml;
         };
+        if (memoraidEnabled) {
+          const mOpen = openGroups.has("memoraid-config") ? " open" : "";
+          html += `<details class="group-header" data-group="memoraid-config"${mOpen} style="--accent-color:#fbbf24; --accent-glow:rgba(245,158,11,0.15); border-left-color:#fbbf24 !important;"><summary><span>\u{1F9E0} MemorAID</span></summary><div style="padding:6px 8px 8px;"><div class="note" style="margin:0 0 6px;">Characters listed here get NPC thought tracking (MemorAID memory cards). One name per line.</div><label style="font-weight:600;font-size:11px;color:var(--text-primary);">Important Characters</label><textarea class="memoraid-chars-input input-dark" placeholder="e.g.
+Anna
+Bob" style="width:100%;min-height:90px;margin:4px 0 8px;box-sizing:border-box;resize:vertical;">${esc(memoraidNames.join("\n"))}</textarea><button class="memoraid-save-btn btn-primary" style="width:100%;">\u{1F4BE} Save Characters</button></div></details>`;
+        }
         html += renderSection(activeGrouped, "active");
         if (archivedGrouped.size > 0) {
           const totalArchived = [...archivedGrouped.values()].reduce((s, arr) => s + arr.length, 0);
@@ -5727,70 +8186,30 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
         setSafeHTML(results, html);
         const bannersContainer = root.getElementById("location-banners-container");
         const locationCards = (state.cards ?? []).filter(
-          (c) => !c.deletedAt && c.type.toLowerCase() === "location"
+          (c) => !c.deletedAt && (c.type || "").toLowerCase() === "location"
         );
-        const pendingSuggestions = (state.locationSuggestions ?? []).filter((s) => s.status === "pending");
         let bannersHtml = "";
         if (locationCards.length > 0) {
           const activeId = state.activeLocationId || "";
+          const prevAlm = root.getElementById("alm-banner");
+          const almOpen = prevAlm ? prevAlm.open : window.innerWidth > 600;
+          const activeName = activeId ? locationCards.find((c) => c.id === activeId)?.title || "?" : "";
           bannersHtml += `
-          <div class="location-manager-banner" style="background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15);border-radius:8px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;gap:6px;box-sizing:border-box;">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-              <span style="font-weight:700;color:var(--theme-text-color);font-size:11px;text-transform:uppercase;letter-spacing:0.03em;">Active Location Manager</span>
-              ${activeId ? `<button id="clear-active-location" style="margin:0;padding:2px 6px;font-size:9.5px;background:rgba(239,68,68,0.1);color:#fca5a5;border:1px solid rgba(239,68,68,0.2);border-radius:4px;cursor:pointer;">Clear</button>` : ""}
+          <details id="alm-banner" class="location-manager-banner"${almOpen ? " open" : ""} style="background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15);border-radius:8px;padding:8px 10px;margin-bottom:8px;box-sizing:border-box;">
+            <summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:6px;list-style:none;">
+              <span style="font-weight:700;color:var(--theme-text-color);font-size:11px;text-transform:uppercase;letter-spacing:0.03em;white-space:nowrap;">Active Location</span>
+              <span style="font-size:11px;color:${activeId ? "var(--accent-color)" : "var(--text-secondary)"};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;text-align:right;">${activeId ? esc(activeName) : "none"}</span>
+            </summary>
+            <div style="display:flex;gap:6px;align-items:center;margin-top:6px;">
+              <select id="active-location-select" style="margin:0;padding:4px 8px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);flex:1;min-width:0;">
+                <option value="" ${!activeId ? "selected" : ""}>-- Select Active Location --</option>
+                ${locationCards.map((c) => `
+                  <option value="${esc(c.id)}"${c.id === activeId ? " selected" : ""}>${esc(c.title || c.keys)}</option>
+                `).join("")}
+              </select>
+              ${activeId ? `<button id="clear-active-location" class="btn-micro btn-micro--red" style="flex-shrink:0;">Clear</button>` : ""}
             </div>
-            <select id="active-location-select" style="margin:2px 0 0 0;padding:4px 8px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);width:100%;">
-              <option value="" ${!activeId ? "selected" : ""}>-- Select Active Location --</option>
-              ${locationCards.map((c) => `
-                <option value="${esc(c.id)}"${c.id === activeId ? " selected" : ""}>${esc(c.title || c.keys)}</option>
-              `).join("")}
-            </select>
-          </div>
-        `;
-        }
-        if (pendingSuggestions.length > 0) {
-          const sug = pendingSuggestions[0];
-          const properNoun = sug.properNoun;
-          const defaultTypes = /* @__PURE__ */ new Set(["character", "location", "faction", "class", "race", "memory"]);
-          const existingCustomTypes = Array.from(new Set(
-            (state.cards ?? []).filter((c) => c.type && !defaultTypes.has(c.type.toLowerCase())).map((c) => c.type)
-          ));
-          bannersHtml += `
-          <div class="location-suggestion-banner" style="background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.20);border-radius:8px;padding:10px;margin-bottom:8px;display:flex;flex-direction:column;gap:8px;box-sizing:border-box;">
-            <div style="font-weight:700;color:var(--theme-text-color);font-size:11px;text-transform:uppercase;letter-spacing:0.03em;">New Noun Detected: "${esc(properNoun)}"</div>
-            <div class="note" style="margin:0;font-size:11.5px;line-height:1.4;">Detected in action: <em>"${esc(sug.actionText)}"</em></div>
-            
-            <div style="display:flex;flex-direction:column;gap:4px;">
-              <div style="display:flex;gap:6px;align-items:center;">
-                <label style="font-size:11px;color:var(--text-secondary);white-space:nowrap;">This is a:</label>
-                <select id="suggestion-type-select" style="padding:4px 6px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);flex-grow:1;">
-                  <option value="character">Character</option>
-                  <option value="location">Location</option>
-                  <option value="faction">Faction</option>
-                  <option value="class">Class</option>
-                  <option value="race">Race</option>
-                  <option value="custom">Custom...</option>
-                </select>
-                
-                <input type="text" id="suggestion-custom-type-input" list="existing-custom-types" placeholder="Enter type..." style="display:none;padding:4px 6px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);width:100px;box-sizing:border-box;" />
-                
-                <datalist id="existing-custom-types">
-                  ${existingCustomTypes.map((t) => `<option value="${esc(t)}"></option>`).join("")}
-                </datalist>
-              </div>
-            </div>
-            
-            <div style="display:flex;gap:6px;margin-top:2px;">
-              <button id="sug-accept-btn" style="background:rgba(16,185,129,0.15);color:#34d399;border-color:rgba(16,185,129,0.3);padding:4px 10px;font-size:10.5px;border-radius:4px;border:1px solid;cursor:pointer;">Add Card</button>
-              <button id="sug-ignore-btn" style="background:rgba(239,68,68,0.15);color:#fca5a5;border-color:rgba(239,68,68,0.3);padding:4px 10px;font-size:10.5px;border-radius:4px;border:1px solid;cursor:pointer;">Ignore</button>
-            </div>
-
-            <div style="display:flex;gap:6px;align-items:center;margin-top:2px;border-top:1px solid rgba(255,255,255,0.06);padding-top:6px;">
-              <label style="font-size:11px;color:var(--text-secondary);white-space:nowrap;">Already tracked?</label>
-              <select id="sug-link-select" style="padding:4px 6px;font-size:11.5px;background:rgba(0,0,0,0.3);color:var(--text-primary);border-radius:6px;border:1px solid rgba(255,255,255,0.08);flex-grow:1;min-width:0;">${buildCardPickerOptions(state.cards)}</select>
-              <button id="sug-link-btn" style="background:rgba(59,130,246,0.15);color:#93c5fd;border-color:rgba(59,130,246,0.3);padding:4px 10px;font-size:10.5px;border-radius:4px;border:1px solid;cursor:pointer;white-space:nowrap;">Link</button>
-            </div>
-          </div>
+          </details>
         `;
         }
         if (bannersContainer) {
@@ -5798,61 +8217,22 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
           const selectEl = root.getElementById("active-location-select");
           selectEl?.addEventListener("change", () => {
             const cardId = selectEl.value || null;
-            if (setActiveLocationCb) {
-              setActiveLocationCb(cardId);
+            if (cbs.setActiveLocation) {
+              cbs.setActiveLocation(cardId);
             }
           });
           const clearBtn = root.getElementById("clear-active-location");
           clearBtn?.addEventListener("click", () => {
-            if (setActiveLocationCb) {
-              setActiveLocationCb(null);
-            }
-          });
-          const sugTypeSelect = root.getElementById("suggestion-type-select");
-          const sugCustomInput = root.getElementById("suggestion-custom-type-input");
-          sugTypeSelect?.addEventListener("change", () => {
-            if (sugCustomInput) {
-              sugCustomInput.style.display = sugTypeSelect.value === "custom" ? "inline-block" : "none";
-              if (sugTypeSelect.value === "custom") {
-                sugCustomInput.focus();
-              }
-            }
-          });
-          const acceptBtn = root.getElementById("sug-accept-btn");
-          acceptBtn?.addEventListener("click", () => {
-            if (!pendingSuggestions.length) return;
-            const sug = pendingSuggestions[0];
-            let selectedType = sugTypeSelect?.value || "character";
-            if (selectedType === "custom") {
-              selectedType = sugCustomInput?.value.trim() || "custom";
-            }
-            if (respondToProperNounSuggestionCb) {
-              respondToProperNounSuggestionCb(sug.properNoun, true, selectedType);
-            }
-          });
-          const ignoreBtn = root.getElementById("sug-ignore-btn");
-          ignoreBtn?.addEventListener("click", () => {
-            if (!pendingSuggestions.length) return;
-            const sug = pendingSuggestions[0];
-            if (respondToProperNounSuggestionCb) {
-              respondToProperNounSuggestionCb(sug.properNoun, false, "character");
-            }
-          });
-          const linkSelect = root.getElementById("sug-link-select");
-          const linkBtn = root.getElementById("sug-link-btn");
-          linkBtn?.addEventListener("click", () => {
-            if (!pendingSuggestions.length) return;
-            const cardId = linkSelect?.value || "";
-            if (!cardId) {
-              showToast("Pick a card to link to", true);
-              return;
-            }
-            const sug = pendingSuggestions[0];
-            if (linkProperNounToCardCb) {
-              linkProperNounToCardCb(sug.properNoun, cardId);
+            if (cbs.setActiveLocation) {
+              cbs.setActiveLocation(null);
             }
           });
         }
+        renderHome(root, state, {
+          respondToProperNounSuggestion: cbs.respondToProperNounSuggestion,
+          linkProperNounToCard: cbs.linkProperNounToCard,
+          proposalDecision: cbs.proposalDecision
+        }, { esc, setSafeHTML, buildCardPickerOptions, showToast });
         const pnLogsList = root.getElementById("pn-logs-list");
         if (pnLogsList && state.properNounLogs) {
           if (state.properNounLogs.length === 0) {
@@ -5887,8 +8267,8 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
                 const item = sel.closest(".pn-log-item");
                 const pn = item?.getAttribute("data-pn") || "";
                 const val = sel.value;
-                if (updateProperNounLogCb) {
-                  updateProperNounLogCb(pn, val);
+                if (cbs.updateProperNounLog) {
+                  cbs.updateProperNounLog(pn, val);
                 }
               });
             });
@@ -5904,8 +8284,8 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
                 const item = sel.closest(".pn-log-item");
                 const pn = item?.getAttribute("data-pn") || "";
                 const cardId = sel.value;
-                if (cardId && linkProperNounToCardCb) {
-                  linkProperNounToCardCb(pn, cardId);
+                if (cardId && cbs.linkProperNounToCard) {
+                  cbs.linkProperNounToCard(pn, cardId);
                 }
               });
             });
@@ -5913,8 +8293,8 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
               btn.addEventListener("click", () => {
                 const item = btn.closest(".pn-log-item");
                 const pn = item?.getAttribute("data-pn") || "";
-                if (deleteProperNounLogCb) {
-                  deleteProperNounLogCb(pn);
+                if (cbs.deleteProperNounLog) {
+                  cbs.deleteProperNounLog(pn);
                 }
               });
             });
@@ -5925,36 +8305,158 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
           const newBtn = clearPnLogsBtn.cloneNode(true);
           clearPnLogsBtn.parentNode?.replaceChild(newBtn, clearPnLogsBtn);
           newBtn.addEventListener("click", () => {
-            if (clearProperNounLogsCb) {
-              clearProperNounLogsCb();
+            if (cbs.clearProperNounLogs) {
+              cbs.clearProperNounLogs();
             }
           });
         }
+        const dbgContainer = root.getElementById("debug-container");
+        if (dbgContainer) {
+          dbgContainer.style.display = state.settings?.showDebug ? "block" : "none";
+          if (state.settings?.showDebug && lastDebug) {
+            setSafeHTML(dbgContainer, `<details open style="margin-top:8px;border-top:1px solid #333;padding-top:4px;"><summary style="cursor:pointer;color:#8a8;">\u{1F50D} Analyze debug</summary><div class="note">characters: ${esc((lastDebug.characters || []).join(", "))}</div><div class="note">narrative chars: ${esc(String(lastDebug.narrativeChars))}</div><div class="note">narrative tail:</div><div>${esc(lastDebug.narrativeTail || "")}</div><div class="note">raw response (truncated):</div><div>${esc(lastDebug.rawSnippet || "")}</div></details>`);
+          } else if (!state.settings?.showDebug) {
+            dbgContainer.textContent = "";
+          }
+        }
         renderMemoriesSection(state);
-        const pendingCount = state.versions.filter((v) => v.status === "pending").length;
-        const proposalsBadge = root.getElementById("tracker-proposals-badge");
-        if (proposalsBadge) {
-          if (activeTabId === "main-tab-tracker") {
-            proposalsBadge.style.display = "none";
-            proposalsBadge.className = "";
-          } else if (pendingCount > 0) {
-            proposalsBadge.textContent = `+${pendingCount}`;
-            proposalsBadge.style.display = "inline-block";
-            proposalsBadge.className = "badge-new-proposals";
+        renderNpcMemoryBank(state);
+        renderLivingCharactersSection(state);
+        const pendingTotal = pendingDecisionsCount(state.locationSuggestions, state.versions);
+        const homeBadge = root.getElementById("home-pending-badge");
+        if (homeBadge) {
+          if (activeTabId === "main-tab-home" || pendingTotal === 0) {
+            homeBadge.style.display = "none";
+            homeBadge.className = "";
           } else {
-            proposalsBadge.style.display = "none";
-            proposalsBadge.className = "";
+            homeBadge.textContent = `+${pendingTotal}`;
+            homeBadge.style.display = "inline-block";
+            homeBadge.className = "badge-new-proposals";
           }
         }
         updateMinState();
+      },
+      clearCrystallizedSchemaCache: (cardId) => {
+        crystallizedSchemaCache.delete(cardId);
+        crystallizedPreferencesCache.delete(cardId);
+      },
+      refreshNpcMemory: (charName, generated, remaining, done, block) => {
+        if (block && !insertNpcMemBlock(charName, block)) {
+          npcMemoryCache.delete(charName.toLowerCase());
+          if (lastState) renderNpcMemoryBank(lastState);
+        }
+        const setBtn = (text) => {
+          root.querySelectorAll(".backfill-npc-memories-btn").forEach((b) => {
+            if (b.getAttribute("data-char-name") === charName) {
+              b.disabled = !!text;
+              b.textContent = text ?? "Backfill memories";
+            }
+          });
+        };
+        if (npcBackfillWatchdog) {
+          clearTimeout(npcBackfillWatchdog);
+          npcBackfillWatchdog = null;
+        }
+        if (done) {
+          setBtn(null);
+          if (typeof generated === "number") {
+            panelHandle.showToast(remaining && remaining > 0 ? `Backfilled ${generated} \u2014 ${remaining} left, click again to continue.` : `Backfilled ${generated} memories \u2014 ${charName} up to date.`);
+          }
+          return;
+        }
+        if (typeof generated === "number") {
+          setBtn(remaining && remaining > 0 ? `\u23F3 ${generated} done, ${remaining} left\u2026` : `\u23F3 ${generated}\u2026`);
+        }
+        npcBackfillWatchdog = setTimeout(() => {
+          npcBackfillWatchdog = null;
+          setBtn(null);
+          panelHandle.showToast(`Backfill for ${charName} stopped responding \u2014 refresh to see what landed.`, true);
+        }, 6e4);
       }
     };
-    return api;
+    return panelHandle;
   }
 
   // src/content/content.ts
+  function isContextValid2() {
+    try {
+      if (typeof browser === "undefined" || !browser.runtime) {
+        return false;
+      }
+      browser.runtime.getManifest();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
   var activeShortId = null;
+  var lastKnownActionCount = null;
   var autoBackfillsInFlight = /* @__PURE__ */ new Set();
+  function detectSetupQuestion(actionCount) {
+    if (actionCount != null && actionCount > 0) return null;
+    let typeHereInput = document.querySelector('input[placeholder*="Type here" i], textarea[placeholder*="Type here" i]');
+    if (!typeHereInput) {
+      const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea'));
+      typeHereInput = inputs.find((el) => {
+        if (el.getRootNode() !== document) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return false;
+        const id = (el.id || "").toLowerCase();
+        const cls = (el.className || "").toLowerCase();
+        const placeholder = (el.getAttribute("placeholder") || "").toLowerCase();
+        if (id.includes("search") || cls.includes("search") || placeholder.includes("search")) return false;
+        return true;
+      }) || null;
+    }
+    if (typeHereInput) {
+      let questionText = "";
+      const parentContainer = typeHereInput.closest("div");
+      if (parentContainer) {
+        const texts = Array.from(parentContainer.querySelectorAll("p, span, h1, h2, h3, h4, div")).map((el) => el.textContent?.trim() || "").filter((t) => t && t.length > 5 && !t.toLowerCase().includes("type here") && !t.includes("NEXT") && !t.includes("FINISH"));
+        if (texts.length > 0) {
+          questionText = texts[0] || "";
+        }
+      }
+      return {
+        type: "text",
+        question: questionText || "Enter setup placeholder",
+        inputEl: typeHereInput
+      };
+    }
+    const candidates = Array.from(document.querySelectorAll('div, button, a, [role="button"], li, span'));
+    const choiceButtons = candidates.filter((btn) => {
+      const text = btn.textContent?.trim() || "";
+      if (text.length > 80) return false;
+      const isChoiceFormat = /^\d+\s*[\s\.\:\)\-]?\s*[A-Za-z]/.test(text) || /^\(\d+\)/.test(text) || /^\d+$/.test(text);
+      if (!isChoiceFormat) return false;
+      const children = Array.from(btn.querySelectorAll("div, button, a, li, span"));
+      const hasChildChoice = children.some((child) => {
+        const childText = child.textContent?.trim() || "";
+        return childText.length <= 80 && (/^\d+\s*[\s\.\:\)\-]?\s*[A-Za-z]/.test(childText) || /^\(\d+\)/.test(childText) || /^\d+$/.test(childText));
+      });
+      if (hasChildChoice) return false;
+      return true;
+    });
+    if (choiceButtons.length > 0) {
+      let questionText = "";
+      const firstBtn = choiceButtons[0];
+      if (firstBtn) {
+        const parent = firstBtn.parentElement;
+        if (parent) {
+          const texts = Array.from(parent.querySelectorAll("h1, h2, h3, h4, p, span, div")).map((el) => el.textContent?.trim() || "").filter((t) => t && t.length > 5 && !choiceButtons.some((btn) => (btn.textContent || "").includes(t)));
+          if (texts.length > 0) {
+            questionText = texts[0] || "";
+          }
+        }
+      }
+      return {
+        type: "choice",
+        question: questionText || "Select setup choice",
+        buttons: choiceButtons
+      };
+    }
+    return null;
+  }
   function checkIsPlayUrl() {
     return location.pathname === "/play" || location.pathname.endsWith("/play") || location.pathname.startsWith("/play/") || location.pathname.startsWith("/adventure/");
   }
@@ -5971,6 +8473,9 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     return null;
   }
   var panel = mountPanel();
+  function sendBg(msg) {
+    return browser.runtime.sendMessage(msg);
+  }
   async function decompressSettings(payload) {
     if (payload.startsWith("gz:")) {
       const base64Data = payload.slice(3);
@@ -6002,6 +8507,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
   }
   async function checkAndImportQrSettings() {
+    if (!isContextValid2()) return;
     try {
       const urlParams = new URLSearchParams(window.location.search);
       const importPayload = urlParams.get("importSettings");
@@ -6029,28 +8535,21 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     dlog("[AID content] Direct refresh requested by panel callback");
     refresh();
   });
-  panel.onBackupAll(async () => {
-    return browser.runtime.sendMessage({ kind: "exportAll" });
-  });
-  panel.onRestoreAll(async (data) => {
-    const res = await browser.runtime.sendMessage({ kind: "importAll", data });
-    refresh();
-    return res;
-  });
-  panel.onSaveCardValue(async (cardId, value) => {
-    const sid = currentShortId();
-    if (!sid) return { error: "No active adventure." };
-    const res = await browser.runtime.sendMessage({ kind: "saveCardValue", shortId: sid, cardId, value });
-    refresh();
-    return res;
-  });
   var count = 0;
+  (async () => {
+    try {
+      const res = await browser.runtime.sendMessage({ kind: "isDbEmpty" });
+      if (res?.empty) panel.showSelfHealBanner();
+    } catch {
+    }
+  })();
   var debugEnabled = false;
   var _log = console.log.bind(console);
   function dlog(...args) {
     if (debugEnabled) _log(...args);
   }
   function send(msg) {
+    if (!isContextValid2()) return;
     browser.runtime.sendMessage(msg).catch(() => {
     });
   }
@@ -6066,6 +8565,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       clearTimeout(actionUpdateTimeout);
     }
     actionUpdateTimeout = setTimeout(() => {
+      if (!isContextValid2()) return;
       if (accumulatedActions.length > 0 && lastActionPayload) {
         dlog(`[AID content] Sending debounced actionUpdate with ${accumulatedActions.length} actions.`);
         send({
@@ -6080,8 +8580,10 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
         lastActionPayload = null;
         browser.runtime.sendMessage({ kind: "getState", shortId: sid }).then((state) => {
           if (state) {
+            const actionCountVal = state.actionCount ?? state.actionsCount ?? 0;
+            lastKnownActionCount = actionCountVal;
             panel.updateActionCount(
-              state.actionCount ?? state.actionsCount ?? 0,
+              actionCountVal,
               state.lastAnalysisAction ?? null
             );
           }
@@ -6098,9 +8600,10 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       clearTimeout(memoriesUpdateTimeout);
     }
     memoriesUpdateTimeout = setTimeout(() => {
-      dlog(`[AID content] Sending debounced memoryBankUpdate with ${latestMemories.length} memories.`);
+      if (!isContextValid2()) return;
+      dlog(`[AID content] Sending debounced adventureMemories with ${latestMemories.length} memories.`);
       send({
-        kind: "memoryBankUpdate",
+        kind: "adventureMemories",
         shortId: sid,
         memories: latestMemories
       });
@@ -6113,15 +8616,30 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     panel.setModels(res?.models ?? [], current);
   }
   async function refresh() {
+    if (!isContextValid2()) return;
     const sid = currentShortId();
     const isPlayUrl = checkIsPlayUrl();
-    if (sid && isPlayUrl) {
-      const state = await browser.runtime.sendMessage({ kind: "getState", shortId: sid });
+    let activeQuestion = isPlayUrl ? detectSetupQuestion() : null;
+    if (activeQuestion || sid && isPlayUrl) {
+      const targetSid = sid || activeShortId;
+      let state = null;
+      if (targetSid) {
+        state = await browser.runtime.sendMessage({ kind: "getState", shortId: targetSid });
+      } else {
+        state = await browser.runtime.sendMessage({ kind: "getManagerData" });
+      }
       if (state) {
         debugEnabled = !!state.settings?.showDebug;
+        const actionCountVal = state.actionCount ?? state.actionsCount ?? 0;
+        lastKnownActionCount = actionCountVal;
+        if (actionCountVal > 0) {
+          activeQuestion = null;
+        }
         panel.render({
-          shortId: state.shortId || sid,
+          shortId: state.shortId || targetSid || void 0,
           protagonist: state.protagonist,
+          memoraidCharacters: state.memoraidCharacters ?? [],
+          livingConfig: state.livingConfig ?? {},
           scenario: state.scenario ?? null,
           settings: state.settings,
           versions: state.versions ?? [],
@@ -6133,20 +8651,30 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
           actionsCount: state.actionsCount,
           actionCount: state.actionCount,
           lastAnalysisAction: state.lastAnalysisAction,
-          memoryBankEntries: state.memoryBankEntries ?? [],
+          // getState emits the Memory Bank list as `memoryBankEntries` (renamed from `aidMemories`);
+          // the panel prop is still `aidMemories`, so map it here. Reading state.aidMemories directly
+          // resolved to undefined -> [] and blanked the list on every full refresh() (e.g. after a
+          // "Regenerate Latest"), until the next live memory update repopulated it via updateMemories.
+          aidMemories: state.memoryBankEntries ?? state.aidMemories ?? [],
           ops: state.ops ?? [],
           activeLocationId: state.activeLocationId ?? null,
           locationSuggestions: state.locationSuggestions ?? [],
           properNounLogs: state.properNounLogs ?? [],
-          isManagerOnly: false
+          isManagerOnly: false,
+          activeSetupQuestion: activeQuestion ? {
+            type: activeQuestion.type,
+            question: activeQuestion.question
+          } : null
         });
         refreshModels(state.settings?.model);
-        window.postMessage({
-          source: "aid-extension-host",
-          kind: "settingsUpdate",
-          interceptTimeout: state.settings?.interceptTimeout ?? 10,
-          debug: !!state.settings?.showDebug
-        }, location.origin);
+        if (state.settings) {
+          window.postMessage({
+            source: "aid-extension-host",
+            kind: "settingsUpdate",
+            interceptTimeout: state.settings?.interceptTimeout ?? 4,
+            debug: !!state.settings?.showDebug
+          }, location.origin);
+        }
       }
     } else {
       const state = await browser.runtime.sendMessage({ kind: "getManagerData" });
@@ -6158,7 +8686,8 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
           globalAssets: state.globalAssets,
           settings: state.settings,
           versions: [],
-          protagonist: null
+          protagonist: null,
+          activeSetupQuestion: null
         });
       }
     }
@@ -6166,20 +8695,31 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
   var lastShortId = null;
   var lastPath = null;
   var lastDocTitle = null;
-  var checkNavigationInterval = null;
+  var lastActiveQuestionStr = "";
   function checkNavigation() {
-    if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.id) {
-      if (checkNavigationInterval) {
-        clearInterval(checkNavigationInterval);
-      }
-      return;
-    }
+    if (!isContextValid2()) return;
     const sid = currentShortId();
     const path = location.pathname;
     const docTitle = document.title;
+    const isPlayUrl = checkIsPlayUrl();
+    if (path !== lastPath) {
+      const hasIdInUrl = /\/(play|adventure)\/([^/]+)/.test(path) || new URLSearchParams(location.search).has("adventureId") || new URLSearchParams(location.search).has("adventure") || new URLSearchParams(location.search).has("id");
+      if (path.includes("/scenario/") || !hasIdInUrl && (path === "/play" || path.endsWith("/play"))) {
+        activeShortId = null;
+      }
+    }
     const isNavChanged = sid !== lastShortId || path !== lastPath;
     const isTitleChanged = docTitle !== lastDocTitle;
-    if (isNavChanged || isTitleChanged) {
+    let shouldRefresh = isNavChanged || isTitleChanged;
+    if (isPlayUrl) {
+      const activeQuestion = detectSetupQuestion(lastKnownActionCount ?? void 0);
+      const activeQuestionStr = activeQuestion ? JSON.stringify({ type: activeQuestion.type, question: activeQuestion.question }) : "";
+      if (activeQuestionStr !== lastActiveQuestionStr) {
+        lastActiveQuestionStr = activeQuestionStr;
+        shouldRefresh = true;
+      }
+    }
+    if (shouldRefresh) {
       lastShortId = sid;
       lastPath = path;
       lastDocTitle = docTitle;
@@ -6208,26 +8748,29 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       refresh();
     }
   }
-  checkNavigationInterval = setInterval(checkNavigation, 1e3);
+  setInterval(checkNavigation, 1e3);
   checkNavigation();
   window.addEventListener("message", (ev) => {
-    if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.id) return;
+    if (!isContextValid2()) return;
     if (ev.source !== window || ev.data?.source !== "aid-tracker") return;
     const detail = ev.data.detail;
     if (detail?.transport === "adventureLoaded") {
       const { shortId, title, memory, authorsNote, instructions, storyCards } = detail;
       activeShortId = shortId;
       browser.runtime.sendMessage({ kind: "getState", shortId }).then((state) => {
-        if (state && Array.isArray(state.cards)) {
-          window.postMessage({
-            source: "aid-extension-host",
-            kind: "seedApprovedCards",
-            cards: state.cards.map((card) => ({
-              id: card.id,
-              value: card.value,
-              description: card.description || ""
-            }))
-          }, location.origin);
+        if (state) {
+          lastKnownActionCount = state.actionCount ?? state.actionsCount ?? 0;
+          if (Array.isArray(state.cards)) {
+            window.postMessage({
+              source: "aid-extension-host",
+              kind: "seedApprovedCards",
+              cards: state.cards.map((card) => ({
+                id: card.id,
+                value: card.value,
+                description: card.description || ""
+              }))
+            }, location.origin);
+          }
         }
         const hasAdventure = state && Array.isArray(state.adventures) && state.adventures.some((a) => a.shortId === shortId);
         const isSkeleton = hasAdventure && (!state.actionCount || state.actionCount === 0);
@@ -6259,7 +8802,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
           description: c.description || "",
           deletedAt: c.deletedAt ?? null
         }));
-        send({ kind: "cardsUpdate", shortId, cards });
+        send({ kind: "cardsUpdate", shortId, cards, isFullList: true });
       }
       if (memory) {
         const m = memory.match(/(?:your name|player name)\s*:\s*([^\n\]]+)/i);
@@ -6282,7 +8825,8 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
           source: "aid-extension-host",
           kind: "actionApproved",
           requestId: detail.requestId,
-          updatedNames: res?.updatedNames || []
+          updatedNames: res?.updatedNames || [],
+          injectText: res?.injectText || ""
         }, location.origin);
       }).catch((err) => {
         console.error("[AID content] Error processing intercepted action:", err);
@@ -6325,8 +8869,12 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       const raw = detail.data?.adventureStoryCardsUpdate?.storyCards;
       if (Array.isArray(raw)) {
         const cards = raw.map((c) => ({ shortId: sid, id: c.id, type: c.type, title: c.title, keys: c.keys, value: c.value, description: c.description || "", deletedAt: c.deletedAt ?? null }));
-        send({ kind: "cardsUpdate", shortId: sid, cards });
+        send({ kind: "cardsUpdate", shortId: sid, cards, isFullList: true });
       }
+      return;
+    }
+    if (detail?.transport === "authorsNoteUpdate" && detail.shortId) {
+      send({ kind: "setAuthorsNote", shortId: detail.shortId, authorsNote: detail.authorsNote || "" });
       return;
     }
     if (detail?.transport === "cardWrites" && Array.isArray(detail.cards)) {
@@ -6342,7 +8890,16 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       }));
       if (cards.length) {
         dlog("[AID content] Captured page card writes:", cards.map((c) => c.title || c.id).join(", "));
-        send({ kind: "cardsUpdate", shortId: sid, cards });
+        send({ kind: "cardsUpdate", shortId: sid, cards, isFullList: false });
+      }
+      return;
+    }
+    if (detail?.transport === "cardDeletes" && Array.isArray(detail.ids)) {
+      const ids = detail.ids.map((x) => String(x)).filter(Boolean);
+      if (ids.length) {
+        dlog("[AID content] Captured page card deletions:", ids.join(", "));
+        browser.runtime.sendMessage({ kind: "cardsDeleted", shortId: sid, cardIds: ids }).then(() => refresh()).catch(() => {
+        });
       }
       return;
     }
@@ -6355,10 +8912,10 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       return;
     }
     if (detail?.transport === "ws" && detail.operationName === "AdventureMemoriesUpdate") {
-      const memories = detail.data?.memoryBankUpdateUpdate?.memories;
-      if (Array.isArray(memories)) {
+      const memories = detail.data?.adventureMemoriesUpdate?.memories;
+      if (Array.isArray(memories) && memories.length > 0) {
         dlog("[AID content] Captured real-time adventure memories update. count:", memories.length);
-        bufferMemoriesUpdate(sid, memories || []);
+        bufferMemoriesUpdate(sid, memories);
       }
       return;
     }
@@ -6386,8 +8943,8 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       blob = new Blob([memory], { type: "text/plain" });
       filename = `aid-pe-${sid}.txt`;
     } else if (type === "aidmemories") {
-      const memoryBankEntries = backup.adventure?.memoryBankEntries || [];
-      blob = new Blob([JSON.stringify(memoryBankEntries, null, 2)], { type: "application/json" });
+      const aidMemories = backup.adventure?.memoryBankEntries || backup.adventure?.aidMemories || [];
+      blob = new Blob([JSON.stringify(aidMemories, null, 2)], { type: "application/json" });
       filename = `aid-memories-${sid}.json`;
     } else if (type === "propernouns") {
       const logs = backup.adventure?.properNounLogs || [];
@@ -6403,6 +8960,50 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     a.click();
     panel.showToast("Data exported successfully!");
     setTimeout(() => URL.revokeObjectURL(a.href), 5e3);
+  });
+  panel.onBackupAll(async () => {
+    try {
+      const dump = await browser.runtime.sendMessage({ kind: "exportAll" });
+      if (!dump || dump.error || !dump.__aidBackup) {
+        panel.showToast(dump?.error || "Backup failed", true);
+        return;
+      }
+      const stamp = (/* @__PURE__ */ new Date()).toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      const blob = new Blob([JSON.stringify(dump, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `aid-story-helper-backup-${stamp}.json`;
+      a.click();
+      const total = Object.values(dump.stores || {}).reduce((n, r) => n + (Array.isArray(r) ? r.length : 0), 0);
+      panel.showToast(`Backed up ${total} records. Keep this file private \u2014 it contains your settings/API keys.`);
+      setTimeout(() => URL.revokeObjectURL(a.href), 5e3);
+    } catch (err) {
+      panel.showToast(err?.message || String(err), true);
+    }
+  });
+  panel.onRestoreAll(async () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json,.json";
+    input.addEventListener("change", async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        const res = await browser.runtime.sendMessage({ kind: "importAll", data });
+        if (res?.error) {
+          panel.showToast(res.error, true);
+          return;
+        }
+        const total = Object.values(res?.counts || {}).reduce((n, c) => n + (Number(c) || 0), 0);
+        panel.showToast(`Restored ${total} records. Reloading\u2026`);
+        setTimeout(() => location.reload(), 1200);
+      } catch (err) {
+        panel.showToast(`Restore failed: ${err?.message || String(err)}`, true);
+      }
+    }, { once: true });
+    input.click();
   });
   panel.onBackfill(async () => {
     const sid = currentShortId();
@@ -6424,65 +9025,27 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
     refresh();
   });
-  panel.onSaveSettings(async (provider, apiKey, protagonist, model, analyzeWindow, showDebug, theme, s1, s2, s3, s4, cardCommands, useMemories, formattingMode, memoraidLookback, memoraidThoughtLookback, memoraidPresenceLookback, autoRegenerateMemoryBankEntry, interceptTimeout, useSinglePassGeneration, locationMode, enableProperNounDetection, manualMode, logPlotEssentials, characterCardLimit, thoughtCardLimit) => {
-    const sid = currentShortId();
-    const settings = {
-      provider,
-      model: model || void 0,
-      analyzeWindow,
-      showDebug,
-      theme,
-      customPromptSection1: s1,
-      customPromptSection2: s2,
-      customPromptSection3: s3,
-      customPromptSection4: s4,
-      cardCommands,
-      formattingMode,
-      useMemories,
-      memoraidLookback,
-      memoraidThoughtLookback,
-      memoraidPresenceLookback,
-      autoRegenerateMemoryBankEntry,
-      interceptTimeout,
-      useSinglePassGeneration,
-      locationMode,
-      enableProperNounDetection,
-      manualMode,
-      logPlotEssentials,
-      characterCardLimit,
-      thoughtCardLimit
-    };
-    if (apiKey) settings.apiKeys = { [provider]: apiKey };
+  panel.onSaveSettings(async (settings, protagonist) => {
     await browser.runtime.sendMessage({ kind: "setSettings", settings });
-    if (sid && protagonist) await browser.runtime.sendMessage({ kind: "setProtagonist", shortId: sid, name: protagonist });
+    const sid = currentShortId();
+    if (sid && protagonist) {
+      await browser.runtime.sendMessage({ kind: "setProtagonist", shortId: sid, name: protagonist });
+    }
     window.postMessage({
       source: "aid-extension-host",
       kind: "settingsUpdate",
-      interceptTimeout,
-      debug: !!showDebug
+      interceptTimeout: settings.interceptTimeout,
+      debug: !!settings.showDebug
     }, location.origin);
     panel.showToast("Settings saved!");
-    refreshModels(model || void 0);
+    refreshModels(settings.model || void 0);
     refresh();
   });
-  panel.onThemeChange(async (theme) => {
+  panel.on("themeChange", async (theme) => {
     const settings = { theme };
     await browser.runtime.sendMessage({ kind: "setSettings", settings });
   });
-  panel.onDismissMemoraidBanner(async () => {
-    await browser.runtime.sendMessage({ kind: "setSettings", settings: { memoraidBannerDismissed: true } });
-    refresh();
-  });
-  panel.onProviderChange(async (provider, apiKey) => {
-    const res = await browser.runtime.sendMessage({
-      kind: "listModels",
-      provider,
-      apiKey: apiKey || void 0
-    });
-    const models = res?.models ?? [];
-    panel.setModels(models, models[0] || void 0);
-  });
-  panel.onAnalyze(async () => {
+  panel.on("analyze", async () => {
     const sid = currentShortId();
     if (!sid) return;
     const res = await browser.runtime.sendMessage({ kind: "analyzeRequest", shortId: sid });
@@ -6491,7 +9054,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     await refresh();
     panel.showDebug(res?.debug);
   });
-  panel.onGenerateCard(async (cardId) => {
+  panel.on("generateCard", async (cardId) => {
     const sid = currentShortId();
     if (!sid) return;
     panel.showToast("Generating via AI Dungeon\u2026");
@@ -6500,8 +9063,84 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     else if (res?.id) panel.showToast(`Proposal ready for ${res.characterName} \u2014 review & approve.`);
     await refresh();
   });
+  panel.on("generateCompactCard", async (cardId) => {
+    const sid = currentShortId();
+    if (!sid) return;
+    panel.showToast("Generating compact description via AI Dungeon\u2026");
+    const res = await browser.runtime.sendMessage({ kind: "generateCompactCard", shortId: sid, cardId });
+    if (res?.error) panel.showToast(`Compact generate failed: ${res.error}`, true);
+    else if (res?.id) panel.showToast(`Compact proposal ready for ${res.characterName} \u2014 review & approve.`);
+    await refresh();
+  });
+  panel.on("rerollAppearance", async (cardId) => {
+    const sid = currentShortId();
+    if (!sid) return;
+    panel.showToast("Re-rolling body via AI Dungeon\u2026");
+    const res = await browser.runtime.sendMessage({ kind: "rerollAppearance", shortId: sid, cardId });
+    if (res?.error) panel.showToast(`Re-roll failed: ${res.error}`, true);
+    else if (res?.id) panel.showToast(`Re-rolled body ready for ${res.characterName} \u2014 review & approve.`);
+    await refresh();
+  });
+  panel.on("distillCrystallized", async (cardId, charName) => {
+    const sid = currentShortId();
+    if (!sid) return;
+    panel.showToast(`Distilling long-term memory for ${charName}...`);
+    const res = await sendBg({ kind: "distillCrystallized", shortId: sid, cardId, name: charName });
+    if (res?.error) panel.showToast(`Distillation failed: ${res.error}`, true);
+    else panel.showToast(`Distillation complete for ${charName}!`);
+    panel.clearCrystallizedSchemaCache(cardId);
+    await refresh();
+  });
+  panel.on("backfillNpcMemories", async (charName) => {
+    const sid = currentShortId();
+    if (!sid) return;
+    panel.showToast(`Backfilling ${charName}'s memories from native memory blocks...`);
+    sendBg({ kind: "backfillNpcMemories", shortId: sid, characterTitle: charName }).then((res) => {
+      if (res?.error) panel.showToast(`Backfill failed: ${res.error}`, true);
+    }).catch(() => {
+    });
+  });
+  panel.on("getNpcMemoryBank", async (charName) => {
+    const sid = currentShortId();
+    if (!sid) return { blocks: [] };
+    return await sendBg({ kind: "getNpcMemoryBank", shortId: sid, characterTitle: charName });
+  });
+  panel.on("saveNpcMemoryBlock", async (charName, blockId, povText) => {
+    const sid = currentShortId();
+    if (!sid) return { error: "No adventure." };
+    const res = await sendBg({ kind: "saveNpcMemoryBlock", shortId: sid, characterTitle: charName, blockId, povText });
+    if (res?.error) panel.showToast(`Save failed: ${res.error}`, true);
+    else panel.showToast("Memory saved.");
+    return res;
+  });
+  panel.on("deleteNpcMemoryBlock", async (charName, blockId) => {
+    const sid = currentShortId();
+    if (!sid) return { error: "No adventure." };
+    const res = await sendBg({ kind: "deleteNpcMemoryBlock", shortId: sid, characterTitle: charName, blockId });
+    if (res?.error) panel.showToast(`Delete failed: ${res.error}`, true);
+    return res;
+  });
+  panel.on("regenerateNpcMemoryBlock", async (charName, blockId) => {
+    const sid = currentShortId();
+    if (!sid) return { error: "No adventure." };
+    const res = await sendBg({ kind: "regenerateNpcMemoryBlock", shortId: sid, characterTitle: charName, blockId });
+    if (res?.error) panel.showToast(`Regenerate failed: ${res.error}`, true);
+    return res;
+  });
+  panel.on("consolidateOutlook", async (charName) => {
+    const sid = currentShortId();
+    if (!sid) return;
+    panel.showToast(`Consolidating ${charName}'s Outlook into their card...`);
+    const res = await sendBg({ kind: "consolidateOutlook", shortId: sid, characterTitle: charName });
+    if (res?.error) panel.showToast(`Consolidation failed: ${res.error}`, true);
+    else {
+      const n = res?.incorporated ?? 0;
+      panel.showToast(n > 0 ? `Proposed a card revision folding in ${n} belief${n === 1 ? "" : "s"} \u2014 review & approve.` : `No settled beliefs to consolidate for ${charName}.`);
+    }
+    await refresh();
+  });
   async function handleSuccessfulPush(res) {
-    if (res?.ok && res.source === "card" && res.cardId && typeof res.value === "string") {
+    if (res?.ok && res.source === "card" && res.cardId && (typeof res.value === "string" || res.deletedAt)) {
       dlog("[AID content] Successful card push detected. Notifying injected script to sync Apollo cache...");
       window.postMessage({
         source: "aid-extension-host",
@@ -6510,7 +9149,9 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
         value: res.value,
         description: res.description,
         keys: res.keys,
-        prevKeys: res.prevKeys
+        prevKeys: res.prevKeys,
+        deletedAt: res.deletedAt,
+        blockAutosave: res.blockAutosave
       }, location.origin);
     } else if (res?.ok && res.source === "plot" && typeof res.memory === "string") {
       dlog("[AID content] Successful plot push detected. Notifying injected script to sync Apollo cache...");
@@ -6525,9 +9166,9 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       }
     }
   }
-  panel.onProposalDecision(async (id, status) => {
+  panel.on("proposalDecision", async (id, status) => {
     try {
-      const res = await browser.runtime.sendMessage({ kind: "setVersionStatus", id, status });
+      const res = await sendBg({ kind: "setVersionStatus", id, status });
       if (status === "applied") {
         if (res?.ok) {
           panel.showToast("Approved & pushed to AI Dungeon!");
@@ -6541,11 +9182,11 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
     refresh();
   });
-  panel.onPushVersion(async (id) => {
+  panel.on("pushVersion", async (id) => {
     dlog("[AID content] onPushVersion handler triggered for id:", id);
     panel.setStatus("Pushing update to AI Dungeon\u2026");
     try {
-      const res = await browser.runtime.sendMessage({ kind: "applyToAid", id });
+      const res = await sendBg({ kind: "applyToAid", id });
       dlog("[AID content] applyToAid response received:", res);
       if (res?.ok) {
         panel.setStatus("Push successful!");
@@ -6562,34 +9203,43 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
     refresh();
   });
-  panel.onUpdateMemoryBank(async (memories) => {
+  panel.on("updateAidMemories", async (memories) => {
     const sid = currentShortId();
     if (!sid) return;
-    await browser.runtime.sendMessage({ kind: "updateMemoryBank", shortId: sid, memories });
+    await browser.runtime.sendMessage({ kind: "updateAidMemories", shortId: sid, memories });
     refresh();
   });
-  panel.onCreateConfigCard(async () => {
+  panel.on("setMemoraidCharacters", async (characters) => {
     const sid = currentShortId();
-    if (!sid) return;
-    panel.setStatus("Creating Configure MemorAID card...");
+    if (!sid) return { error: "No active adventure shortId found" };
     try {
-      const res = await browser.runtime.sendMessage({ kind: "createConfigCard", shortId: sid });
-      if (res?.ok) {
-        panel.showToast("Configure MemorAID card created! Refreshing...");
-      } else {
-        panel.showToast(`Creation failed: ${res?.error || "unknown error"}`, true);
-      }
+      const res = await sendBg({ kind: "setMemoraidCharacters", shortId: sid, characters });
+      refresh();
+      if (res?.ok) return { ok: true };
+      return { error: res?.error || "unknown error" };
     } catch (err) {
-      panel.showToast(`Creation error: ${err?.message || err}`, true);
+      return { error: err?.message || String(err) };
     }
-    refresh();
   });
-  panel.onCreateStoryCard(async (card) => {
+  panel.on("setLivingConfig", async (config, protagonistName) => {
+    const sid = currentShortId();
+    if (!sid) return { error: "No active adventure shortId found" };
+    try {
+      const res = await sendBg({ kind: "setLivingConfig", shortId: sid, config });
+      if (protagonistName) await browser.runtime.sendMessage({ kind: "setProtagonist", shortId: sid, name: protagonistName });
+      refresh();
+      if (res?.ok) return { ok: true };
+      return { error: res?.error || "unknown error" };
+    } catch (err) {
+      return { error: err?.message || String(err) };
+    }
+  });
+  panel.on("createStoryCard", async (card) => {
     const sid = currentShortId();
     if (!sid) return { error: "No active adventure shortId found" };
     panel.setStatus("Creating story card...");
     try {
-      const res = await browser.runtime.sendMessage({ kind: "createStoryCard", shortId: sid, card });
+      const res = await sendBg({ kind: "createStoryCard", shortId: sid, card });
       refresh();
       if (res?.ok) {
         return { ok: true };
@@ -6600,18 +9250,124 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       return { error: err?.message || String(err) };
     }
   });
-  panel.onSaveCardKeys(async (cardId, keys) => {
+  panel.on("saveCardKeys", async (cardId, keys) => {
     const sid = currentShortId();
     if (!sid) return { error: "No active adventure shortId found" };
     panel.setStatus("Saving card triggers...");
     try {
-      const res = await browser.runtime.sendMessage({ kind: "saveCardKeys", shortId: sid, cardId, keys });
+      const res = await sendBg({ kind: "saveCardKeys", shortId: sid, cardId, keys });
       refresh();
       if (res?.ok) {
         return { ok: true };
       } else {
         return { error: res?.error || "unknown error" };
       }
+    } catch (err) {
+      return { error: err?.message || String(err) };
+    }
+  });
+  panel.on("saveCardValue", async (cardId, value) => {
+    const sid = currentShortId();
+    if (!sid) return { error: "No active adventure shortId found" };
+    panel.setStatus("Saving card entry...");
+    try {
+      const res = await sendBg({ kind: "saveCardValue", shortId: sid, cardId, value });
+      refresh();
+      if (res?.ok) {
+        return { ok: true };
+      } else {
+        return { error: res?.error || "unknown error" };
+      }
+    } catch (err) {
+      return { error: err?.message || String(err) };
+    }
+  });
+  panel.on("saveCrystallizedSchema", async (cardId, schema) => {
+    const sid = currentShortId();
+    if (!sid) return { error: "No active adventure shortId found" };
+    try {
+      const res = await sendBg({ kind: "saveCrystallizedSchema", shortId: sid, cardId, schema });
+      refresh();
+      if (res?.ok) {
+        panel.showToast("Knows updated.");
+      }
+      return res || { error: "No response" };
+    } catch (e) {
+      return { error: e?.message || String(e) };
+    }
+  });
+  panel.on("savePreferences", async (cardId, prefs) => {
+    const sid = currentShortId();
+    if (!sid) return { error: "No active adventure shortId found" };
+    try {
+      const res = await sendBg({ kind: "savePreferences", shortId: sid, cardId, prefs });
+      refresh();
+      if (res?.ok) {
+        panel.showToast("Preferences updated.");
+      }
+      return res || { error: "No response" };
+    } catch (e) {
+      return { error: e?.message || String(e) };
+    }
+  });
+  panel.on("consolidateCrystallized", async (cardId) => {
+    const sid = currentShortId();
+    if (!sid) return { error: "No active adventure shortId found" };
+    try {
+      const res = await sendBg({ kind: "consolidateCrystallizedSchema", shortId: sid, cardId });
+      refresh();
+      if (res?.ok) {
+        panel.showToast("Schema consolidated.");
+      }
+      return res || { error: "No response" };
+    } catch (e) {
+      return { error: e?.message || String(e) };
+    }
+  });
+  panel.on("getCrystallizedSchema", async (cardId) => {
+    const sid = currentShortId();
+    if (!sid) return { error: "No active adventure shortId found" };
+    try {
+      const res = await sendBg({ kind: "getCrystallizedState", shortId: sid, cardId });
+      return res || { error: "No response" };
+    } catch (e) {
+      return { error: e?.message || String(e) };
+    }
+  });
+  panel.on("deleteStoryCard", async (cardId) => {
+    const sid = currentShortId();
+    if (!sid) return { error: "No active adventure shortId found" };
+    panel.setStatus("Deleting story card...");
+    try {
+      const res = await sendBg({ kind: "deleteStoryCard", shortId: sid, cardId });
+      refresh();
+      if (res?.ok) {
+        return { ok: true };
+      } else {
+        return { error: res?.error || "unknown error" };
+      }
+    } catch (err) {
+      return { error: err?.message || String(err) };
+    }
+  });
+  panel.on("setLifeCardStatus", async (cardId, status) => {
+    const sid = currentShortId();
+    if (!sid) return { error: "No active adventure shortId found" };
+    panel.setStatus(status === "resolved" ? "Resolving relationship..." : `Setting relationship ${status}...`);
+    try {
+      const res = await sendBg({ kind: "setLifeCardStatus", shortId: sid, cardId, status });
+      refresh();
+      if (res?.ok) return { ok: true };
+      return { error: res?.error || "unknown error" };
+    } catch (err) {
+      return { error: err?.message || String(err) };
+    }
+  });
+  panel.on("enqueueLifeInjection", async (owner, target, pressure, momentum) => {
+    const sid = currentShortId();
+    if (!sid) return { error: "No active adventure shortId found" };
+    try {
+      return await sendBg({ kind: "enqueueLifeInjection", shortId: sid, owner, target, pressure, momentum }) || { error: "No response" };
     } catch (err) {
       return { error: err?.message || String(err) };
     }
@@ -6619,9 +9375,9 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
   panel.onRefineMemoryBlock(async (index) => {
     const sid = currentShortId();
     if (!sid) return;
-    panel.setStatus(`Refining memory block #${index + 1}...`);
+    panel.setStatus(`Regenerating memory block #${index + 1}...`);
     try {
-      const res = await browser.runtime.sendMessage({ kind: "refineMemoryBlock", shortId: sid, index });
+      const res = await sendBg({ kind: "refineMemoryBlock", shortId: sid, index });
       if (res?.ok) {
         panel.showToast(`Memory block #${index + 1} regenerated and pushed to AID!`);
       } else {
@@ -6642,11 +9398,11 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       panel.showToast("Failed to open permissions tab: " + err.message, true);
     });
   });
-  panel.onSetActiveLocation(async (cardId) => {
+  panel.on("setActiveLocation", async (cardId) => {
     const sid = currentShortId();
     if (!sid) return;
     try {
-      const res = await browser.runtime.sendMessage({ kind: "setActiveLocation", shortId: sid, cardId });
+      const res = await sendBg({ kind: "setActiveLocation", shortId: sid, cardId });
       if (res?.error) {
         panel.showToast(`Failed to set location: ${res.error}`, true);
       } else {
@@ -6657,11 +9413,11 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
     refresh();
   });
-  panel.onRespondToProperNounSuggestion(async (properNoun, accept, type) => {
+  panel.on("respondToProperNounSuggestion", async (properNoun, accept, type) => {
     const sid = currentShortId();
     if (!sid) return;
     try {
-      const res = await browser.runtime.sendMessage({ kind: "respondToProperNounSuggestion", shortId: sid, properNoun, accept, type });
+      const res = await sendBg({ kind: "respondToProperNounSuggestion", shortId: sid, properNoun, accept, type });
       if (res?.error) {
         panel.showToast(`Suggestion response failed: ${res.error}`, true);
       } else if (accept) {
@@ -6672,7 +9428,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
     refresh();
   });
-  panel.onUpdateProperNounLog(async (properNoun, type) => {
+  panel.on("updateProperNounLog", async (properNoun, type) => {
     const sid = currentShortId();
     if (!sid) return;
     try {
@@ -6681,11 +9437,11 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
     refresh();
   });
-  panel.onLinkProperNounToCard(async (properNoun, cardId) => {
+  panel.on("linkProperNounToCard", async (properNoun, cardId) => {
     const sid = currentShortId();
     if (!sid) return;
     try {
-      const res = await browser.runtime.sendMessage({ kind: "linkProperNounToCard", shortId: sid, properNoun, cardId });
+      const res = await sendBg({ kind: "linkProperNounToCard", shortId: sid, properNoun, cardId });
       if (res?.error) {
         panel.showToast(`Link failed: ${res.error}`, true);
       } else {
@@ -6696,7 +9452,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
     refresh();
   });
-  panel.onDeleteProperNounLog(async (properNoun) => {
+  panel.on("deleteProperNounLog", async (properNoun) => {
     const sid = currentShortId();
     if (!sid) return;
     try {
@@ -6705,7 +9461,7 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
     refresh();
   });
-  panel.onClearProperNounLogs(async () => {
+  panel.on("clearProperNounLogs", async () => {
     const sid = currentShortId();
     if (!sid) return;
     try {
@@ -6716,35 +9472,50 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
     refresh();
   });
-  panel.onApplyInstruction(() => {
+  panel.on("applyInstruction", () => {
     refresh();
   });
-  panel.onSaveGlobalAsset(async (asset) => {
+  panel.on("saveGlobalAsset", async (asset) => {
     const res = await browser.runtime.sendMessage({ kind: "saveGlobalAsset", asset });
     refresh();
     return res;
   });
-  panel.onDeleteGlobalAsset(async (id) => {
+  panel.on("deleteGlobalAsset", async (id) => {
     const res = await browser.runtime.sendMessage({ kind: "deleteGlobalAsset", id });
     refresh();
     return res;
   });
-  panel.onImportGlobalAsset(async (assetId) => {
+  panel.on("importGlobalAsset", async (assetId) => {
     const sid = currentShortId();
     if (!sid) return { error: "No active adventure." };
     const res = await browser.runtime.sendMessage({ kind: "importGlobalAsset", shortId: sid, assetId });
     refresh();
     return res;
   });
+  panel.on("fillSetupValue", (value) => {
+    const activeQuestion = detectSetupQuestion();
+    if (!activeQuestion || activeQuestion.type !== "text" || !activeQuestion.inputEl) {
+      panel.showToast("No active text input question found to fill.", true);
+      return;
+    }
+    window.postMessage({
+      source: "aid-extension-host",
+      kind: "fillSetupInput",
+      value
+    }, location.origin);
+    panel.showToast(`Filled "${value.length > 20 ? value.slice(0, 20) + "..." : value}"`);
+  });
   browser.runtime.onMessage.addListener((msg) => {
+    if (!isContextValid2()) return;
     if (msg && msg.kind === "approvedCardSync") {
       handleSuccessfulPush(msg.payload);
+      if (msg.payload?.cardId) panel.clearCrystallizedSchemaCache(msg.payload.cardId);
       refresh();
       return;
     }
     if (msg && msg.kind === "stateUpdated") {
       dlog(`[AID content] State updated received from background. Refreshing...`);
-      if (msg.type && msg.text) {
+      if (msg.type && typeof msg.text === "string") {
         window.postMessage({
           source: "aid-extension-host",
           kind: "approvedState",
@@ -6774,8 +9545,8 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
       refresh();
       return;
     }
-    if (msg && msg.kind === "memoraidTiming") {
-      panel.updateMemoraidTiming(msg.payload);
+    if (msg && msg.kind === "npcMemoryProgress") {
+      panel.refreshNpcMemory(msg.characterTitle, msg.generated, msg.remaining, msg.done, msg.block);
       return;
     }
     if (msg && msg.kind === "relayFetch") {
@@ -6800,7 +9571,6 @@ ${o.query.trim()}`).join("\n\n---\n\n") : "None";
     }
   });
   window.addEventListener("aid-refresh-panel", () => {
-    if (typeof browser === "undefined" || !browser.runtime || !browser.runtime.id) return;
     dlog("[AID content] Direct refresh requested by panel");
     refresh();
   });

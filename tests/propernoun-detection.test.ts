@@ -93,9 +93,43 @@ describe("detectProperNouns - Fixes and Improvements", () => {
   it("should preserve single-word proper nouns that are not common verbs/adjectives", () => {
     const text = "They listened to Gojira and Meshuggah. Steve listened to them.";
     const result = detectProperNouns(text, ["Luna", "Stella", "Kevin"]);
-    
+
     expect(result).toContain("Gojira");
     expect(result).toContain("Meshuggah");
     expect(result).toContain("Steve");
+  });
+
+  it("filters demonyms / nationalities / languages (not entities)", () => {
+    const text = "The French chef served American diners while a Russian and a Japanese woman argued about Greek philosophy.";
+    const result = detectProperNouns(text, []);
+    for (const dem of ["French", "American", "Russian", "Japanese", "Greek"]) {
+      expect(result).not.toContain(dem);
+    }
+    // But a real place name is kept.
+    expect(detectProperNouns("They flew to France for the weekend.", [])).toContain("France");
+  });
+
+  it("filters sentence-initial discourse markers capitalized at sentence start", () => {
+    const text = "Exactly. Sorry about that. Thanks, though. Almost forgot. Seriously? Unless you disagree.";
+    const result = detectProperNouns(text, []);
+    for (const w of ["Exactly", "Sorry", "Thanks", "Almost", "Seriously", "Unless"]) {
+      expect(result).not.toContain(w);
+    }
+  });
+
+  it("filters generic descriptive nicknames but keeps a distinctive one", () => {
+    const generic = detectProperNouns("The Big Guy nodded at the Pretty Girl by the door.", []);
+    expect(generic).not.toContain("Big Guy");
+    expect(generic).not.toContain("Pretty Girl");
+    // A distinctive epithet is NOT in the generic block-list, so it still surfaces.
+    expect(detectProperNouns("The Ice Queen swept past.", [])).toContain("Ice Queen");
+  });
+
+  it("suppresses a name (and its sub-name) already known — the Plot Essentials mechanism", () => {
+    // runProperNounAutoDetection seeds known-names from Plot Essentials, incl. the player's epithet
+    // 'The Beast'; the known-name + sub-name filter then keeps 'Beast' from re-firing.
+    const result = detectProperNouns("The Beast crushed the weights while Marcus watched.", ["The Beast"]);
+    expect(result).not.toContain("Beast");
+    expect(result).toContain("Marcus");
   });
 });

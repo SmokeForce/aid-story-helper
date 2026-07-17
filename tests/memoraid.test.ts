@@ -138,6 +138,7 @@ describe("MemorAID NPC Memory Cards", () => {
 
     // Dynamically import background to ensure the browser mock is defined first
     const bg = await import("../src/background/background");
+    bg.__resetMemoraidStateForTests();
     checkMemorAIDUpdates = bg.checkMemorAIDUpdates;
     checkLookbackAutoUpdates = bg.checkLookbackAutoUpdates;
 
@@ -431,7 +432,7 @@ describe("MemorAID NPC Memory Cards", () => {
     const dbCards = await repo.getCards(shortId);
     const memCard = dbCards.find(c => c.title === "Anna (Memory)");
     expect(memCard).toBeDefined();
-    expect(memCard?.value).toContain("Anna's Thoughts:");
+    expect(memCard?.value).toContain("Anna's Thoughts (newest to oldest):");
 
     // 5. Run check again with same pending text, should skip (duplicate check)
     fetchMock.mockClear();
@@ -472,22 +473,22 @@ describe("MemorAID NPC Memory Cards", () => {
       } as any
     ]);
 
-    // 3. First, we generate memory for the action-1 (turnNow = 1)
+    // 3. First invocation generates a thought for the current turn.
     fetchMock.mockClear();
-    const updated = await checkMemorAIDUpdates(shortId, undefined, "do");
+    const updated = await checkMemorAIDUpdates(shortId);
     expect(updated).toEqual(["Anna"]);
     expect(fetchMock).toHaveBeenCalled();
 
-    // 4. If we retry (turnNow = 1), it should regenerate because isRetry is true
+    // 4. Private model: an immediate re-invocation for the SAME turn/scene is deduped — the per-turn
+    // thought already exists and the scene-novelty gate sees no change — so nothing regenerates.
     fetchMock.mockClear();
-    const updatedRetry = await checkMemorAIDUpdates(shortId, undefined, "retry");
-    expect(updatedRetry).toEqual(["Anna"]);
-    expect(fetchMock).toHaveBeenCalled();
+    const updatedAgain = await checkMemorAIDUpdates(shortId);
+    expect(updatedAgain).toEqual([]);
 
-    // 5. If we continue (turnNow = 2), it should generate because it's a new turn
+    // 5. A genuinely new beat (fresh pending action) is novel, so it generates again.
     fetchMock.mockClear();
-    const updatedContinue = await checkMemorAIDUpdates(shortId, undefined, "continue");
-    expect(updatedContinue).toEqual(["Anna"]);
+    const updatedNext = await checkMemorAIDUpdates(shortId, "Anna leans in close and whispers your name.");
+    expect(updatedNext).toEqual(["Anna"]);
     expect(fetchMock).toHaveBeenCalled();
   });
 
@@ -548,13 +549,13 @@ describe("MemorAID NPC Memory Cards", () => {
     });
 
     // 3. Trigger retry
-    const updated = await checkMemorAIDUpdates(shortId, undefined, "retry");
+    const updated = await checkMemorAIDUpdates(shortId);
     expect(updated).toEqual(["Anna"]);
 
-    // 4. Verify that the prompt sent to the AI contained the Player Action ("You wave at Anna")
-    // and NOT the retried AI Output ("Anna turns around")
+    // 4. The generation prompt injects the current-scene lookback window, so it contains the recent
+    // player action the character reacts to. (Private's model injects the whole window; it has no
+    // retry-flag to exclude the last AI output the way public's did.)
     expect(capturedUserPrompt).toContain("You wave at Anna");
-    expect(capturedUserPrompt).not.toContain("Anna turns around");
   });
 
   it("supports Promise return for runtime messaging in Firefox and callback/return-true in Chrome", async () => {
@@ -598,10 +599,10 @@ describe("MemorAID NPC Memory Cards", () => {
     });
   });
 
-  it("executes multi-pass generation for character cards and concatenates the outputs locally", async () => {
+  it("generates a Core Character card in ONE folded provider call using the new field schema (no Psychology/Worldview/Dynamic)", async () => {
     const bg = await import("../src/background/background");
-    
-    // Setup character card
+
+    // Setup character card (no established Appearance → phenotype rewrite path uses the generated one).
     await repo.putCards(shortId, [
       {
         shortId,
@@ -614,51 +615,229 @@ describe("MemorAID NPC Memory Cards", () => {
     ]);
     await repo.upsertAdventure({ shortId, protagonistName: "Smoke" });
 
-    // Mock fetch results for the 4 passes using Claude API endpoint
+    // The folded CORE_CARD_TEMPLATE call returns Appearance + Scent + the four behavioral fields at once.
     fetchMock.mockClear();
-    fetchMock.mockImplementation(async (url: string, init?: any) => {
+    fetchMock.mockImplementation(async (url: string) => {
       if (url.includes("api.anthropic.com")) {
-        const body = JSON.parse(init.body);
-        const messages = body.messages || [];
-        const content = messages[0]?.content || "";
-        // Prompt caching sends the user turn as content blocks ([prefix, tail]); flatten to text.
-        const text = Array.isArray(content)
-          ? content.map((b: any) => b?.text || "").join("\n")
-          : content;
-        let val = "";
-        if (text.includes("Goals") || text.includes("Quirks")) {
-          val = "Quirks: Twirls hair.\nVoice: Haughty.\nGoals: Win.\nDynamic (Smoke): Intrigued.";
-        } else {
-          val = "Name: Anna\nAppearance: Beautiful with long legs.\nPersonality: Proud.\nPsychology: Complex.\nWorldview: Rigid.";
-        }
         return {
           ok: true,
           json: async () => ({
-            content: [{ type: "text", text: val }]
+            content: [{ type: "text", text:
+              "Appearance: Tall and striking with long dark hair and cool green eyes.\n" +
+              "Scent: jasmine & smoke\n" +
+              "Background: Raised in a house that prized appearances over warmth.\n" +
+              "Personality: Proud and self-possessed, warm only with the few who earn it.\n" +
+              "Conversational Style: Speaks in measured, deliberate sentences.\n" +
+              "Voice: Low and cool, with a clipped precision.\n" +
+              "Drive: To be respected on her own terms."
+            }]
           })
         } as any;
       }
       return { ok: true, json: async () => ({}) } as any;
     });
 
-    // Run generateCard via mock runtime messaging listener
     const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
     const result = await listener({ kind: "generateCard", shortId, cardId: "char-anna" });
     expect(result).not.toHaveProperty("error");
-    
-    // Should have called fetchMock 2 times (one for each pass)
-    expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    // Verify concatenated entry
+    // Single folded provider call (the private two-pass collapses for BYO providers — no ~900-char cap).
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
     const entry = (result as any).entry;
     expect(entry).toContain("Name: Anna");
-    expect(entry).toContain("Appearance: Beautiful with long legs.");
-    expect(entry).toContain("Psychology: Complex.");
-    expect(entry).toContain("Quirks: Twirls hair.");
-    expect(entry).toContain("Voice: Haughty.");
-    expect(entry).toContain("Dynamic (Smoke): Intrigued.");
-    expect(entry.startsWith("[\n")).toBe(true);
-    expect(entry.endsWith("\n]")).toBe(true);
+    expect(entry).toContain("Appearance: Tall and striking");
+    expect(entry).toContain("Personality: Proud and self-possessed");
+    expect(entry).toContain("Conversational Style: Speaks in measured");
+    expect(entry).toContain("Voice: Low and cool");
+    expect(entry).toContain("Drive: To be respected on her own terms.");
+    // The retired multi-pass schema must be gone (this is the regression the wiring fix addresses).
+    expect(entry).not.toMatch(/Psychology:/);
+    expect(entry).not.toMatch(/Worldview:/);
+    expect(entry).not.toMatch(/Dynamic \(/);
+    expect(entry.startsWith("[")).toBe(true);
+    expect(entry.endsWith("]")).toBe(true);
+  });
+
+  // --- Body re-roll (phenotype-reroll-and-roster-dedup spec §A.6), ported from the private exploit
+  //     harness to the public provider mock. ---
+  it("re-rolls a character's body: regenerates Appearance + Scent, splices the new key-pair, carries behavioral verbatim (one gen call)", async () => {
+    await import("../src/background/background");
+    await repo.upsertAdventure({ shortId, title: "T", protagonistName: "Smoke" });
+    await repo.putCards(shortId, [{
+      shortId, id: "card-rr", type: "character", title: "Monsieur Vallois", keys: "Vallois",
+      value: "[\nName: Monsieur Vallois\nAppearance: A short man at 5'3\".\nSWH: 44-33-38\nQuirks: Right-handed\nScent: old iron\nBackground: Born to a dynasty.\nPersonality: A cold strategist.\nVoice: Clipped.\nDrive: Preserve the legacy.\n]",
+    }]);
+    await repo.putPhenotype({
+      shortId, characterKey: "monsieur vallois", provenance: "sampled", gender: "male", population: "western",
+      seed: 1, cues: [], archetype: { shape: "V-Taper", scale: "Average" },
+      measurements: { heightInches: 63, shoulders: 44, waist: 33, hip: 38 },
+      descriptorPhrase: "short, a strong V-taper", keyPair: "SWH: 44-33-38", quirks: ["Right-handed"],
+      sampledAt: new Date().toISOString(),
+    } as any);
+
+    let genCalls = 0;
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("api.anthropic.com")) {
+        genCalls++;
+        return { ok: true, json: async () => ({ content: [{ type: "text", text: "Appearance: A newly-drawn frame.\nScent: cedar & rain" }] }) } as any;
+      }
+      return { ok: true, json: async () => ({}) } as any;
+    });
+
+    const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
+    const res: any = await listener({ kind: "rerollAppearance", shortId, cardId: "card-rr" });
+    expect(res?.error).toBeUndefined();
+    expect(genCalls).toBe(1); // pass 1 only
+
+    const pending = (await repo.getVersions(shortId)).find((v) => v.status === "pending" && v.cardId === "card-rr");
+    expect(pending).toBeDefined();
+    const entry = pending!.entry;
+    expect(entry).toContain("Appearance: A newly-drawn frame."); // re-rolled appearance
+    expect(entry).toContain("Scent: cedar & rain");              // re-rolled scent
+    expect(entry).toContain("Personality: A cold strategist.");  // behavioral carried verbatim
+    expect(entry).toContain("Drive: Preserve the legacy.");
+    expect(entry).toMatch(/SWH: \d{1,2}-\d{1,2}-\d{1,2}/);       // a (re-rolled) male key-pair present
+    expect(entry).not.toMatch(/BWH:/);
+    const rec = await repo.getPhenotype(shortId, "monsieur vallois");
+    expect(rec?.reroll).toBe(1);                                 // reroll counter advanced
+  });
+
+  it("re-roll returns an error when the character has no persisted body, and creates no version", async () => {
+    await import("../src/background/background");
+    await repo.upsertAdventure({ shortId, title: "T", protagonistName: "Smoke" });
+    await repo.putCards(shortId, [{ shortId, id: "card-none", type: "character", title: "Nobody", keys: "Nobody", value: "[\nName: Nobody\n]" }]);
+    const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
+    const res: any = await listener({ kind: "rerollAppearance", shortId, cardId: "card-none" });
+    expect(res?.error).toMatch(/no sampled body/i);
+    expect((await repo.getVersions(shortId)).some((v) => v.cardId === "card-none")).toBe(false);
+  });
+
+  it("rejecting a body re-roll restores the prior phenotype record (no divergence)", async () => {
+    await import("../src/background/background");
+    await repo.upsertAdventure({ shortId, title: "T", protagonistName: "Smoke" });
+    await repo.putCards(shortId, [{
+      shortId, id: "card-rrx", type: "character", title: "Monsieur Vallois", keys: "Vallois",
+      value: "[\nName: Monsieur Vallois\nAppearance: A short man.\nSWH: 44-33-38\nBackground: b.\nPersonality: p.\nVoice: v.\nDrive: d.\n]",
+    }]);
+    await repo.putPhenotype({
+      shortId, characterKey: "monsieur vallois", provenance: "sampled", gender: "male", population: "western",
+      seed: 1, reroll: 0, cues: [], archetype: { shape: "V-Taper", scale: "Average" },
+      measurements: { heightInches: 63, shoulders: 44, waist: 33, hip: 38 },
+      descriptorPhrase: "short, a strong V-taper", keyPair: "SWH: 44-33-38", quirks: ["Right-handed"],
+      sampledAt: new Date().toISOString(),
+    } as any);
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("api.anthropic.com")) return { ok: true, json: async () => ({ content: [{ type: "text", text: "Appearance: A new frame.\nScent: cedar & rain" }] }) } as any;
+      return { ok: true, json: async () => ({}) } as any;
+    });
+    const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
+    await listener({ kind: "rerollAppearance", shortId, cardId: "card-rrx" });
+
+    const afterReroll = await repo.getPhenotype(shortId, "monsieur vallois");
+    expect(afterReroll?.reroll).toBe(1);
+    const pending = (await repo.getVersions(shortId)).find((v) => v.status === "pending" && v.cardId === "card-rrx");
+    expect((pending as any)?.phenotypeRollback?.reroll).toBe(0);
+
+    await listener({ kind: "setVersionStatus", id: pending!.id, status: "rejected" });
+    const restored = await repo.getPhenotype(shortId, "monsieur vallois");
+    expect(restored?.reroll).toBe(0);
+    expect(restored?.keyPair).toBe("SWH: 44-33-38");
+  });
+
+  // --- Outlook consolidation on manual Core generation (scene-aware-crystallized §7), ported to the
+  //     public provider mock. ---
+  it("Core generation injects the Crystallized Outlook + Knows grounding into the prompt", async () => {
+    await import("../src/background/background");
+    await repo.upsertAdventure({ shortId, title: "T", protagonistName: "Smoke" });
+    const renderedValue =
+      `[Veya's Crystallized Memory\nKnows:\n{"Fact 0": "Veya remembers a long grounding fact."}\n` +
+      `Vivid Memories:\n{Veya once stood alone in the rain and chose to stay.}\n` +
+      `Outlook:\n{I no longer perform for safety.}\n]`;
+    await repo.putCards(shortId, [
+      { shortId, id: "card-veya", type: "character", title: "Veya", keys: "Veya", value: "[\nName: Veya\nAppearance: Tall, sharp-eyed.\nPersonality: Guarded.\n]" },
+      { shortId, id: "card-veya-cryst", type: "custom", title: "Veya - Crystallized", keys: "Veya", value: renderedValue, description: "" },
+    ]);
+    await repo.putCrystallizedState(shortId, "veya", {
+      schema: [], nodes: [], unreferencedPasses: {},
+      outlook: [{ text: "I no longer perform for safety.", strength: 3 }, { text: "Autonomy is the real wealth.", strength: 3 }],
+    } as any);
+
+    let captured = "";
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(async (url: string, init?: any) => {
+      if (url.includes("api.anthropic.com")) {
+        const body = init?.body ? JSON.parse(init.body) : {};
+        const sys = Array.isArray(body.system) ? body.system.map((s: any) => s?.text || "").join("\n") : String(body.system || "");
+        const msgs = (body.messages || []).map((m: any) => Array.isArray(m.content) ? m.content.map((c: any) => c?.text || "").join("\n") : String(m.content || "")).join("\n");
+        captured = `${sys}\n${msgs}`;
+        return { ok: true, json: async () => ({ content: [{ type: "text", text: "Background: B.\nPersonality: P.\nVoice: V.\nDrive: D." }] }) } as any;
+      }
+      return { ok: true, json: async () => ({}) } as any;
+    });
+
+    const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
+    const res: any = await listener({ kind: "generateCard", shortId, cardId: "card-veya" });
+    expect(res?.error).toBeUndefined();
+    expect(captured).toContain("I no longer perform for safety."); // Outlook reached the prompt
+    expect(captured).toContain("Autonomy is the real wealth.");
+    expect(captured).toContain("Fact 0");                          // Knows grounding reached the prompt
+  });
+
+  it("Core generation with no Crystallized state omits the Outlook block but keeps Knows grounding", async () => {
+    await import("../src/background/background");
+    await repo.upsertAdventure({ shortId, title: "T", protagonistName: "Smoke" });
+    await repo.putCards(shortId, [
+      { shortId, id: "card-nadia", type: "character", title: "Nadia", keys: "Nadia", value: "[\nName: Nadia\nAppearance: Short.\nPersonality: Sharp.\n]" },
+      { shortId, id: "card-nadia-cryst", type: "custom", title: "Nadia - Crystallized", keys: "Nadia", value: "[Nadia's Crystallized Memory\nKnows:\n{\"Farm\": \"Nadia grew up on a farm.\"}\n]", description: "" },
+    ]);
+    // Deliberately no putCrystallizedState — no IndexedDB row for this character.
+    let captured = "";
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(async (url: string, init?: any) => {
+      if (url.includes("api.anthropic.com")) {
+        const body = init?.body ? JSON.parse(init.body) : {};
+        captured = (body.messages || []).map((m: any) => Array.isArray(m.content) ? m.content.map((c: any) => c?.text || "").join("\n") : String(m.content || "")).join("\n");
+        return { ok: true, json: async () => ({ content: [{ type: "text", text: "Background: B.\nPersonality: P.\nVoice: V.\nDrive: D." }] }) } as any;
+      }
+      return { ok: true, json: async () => ({}) } as any;
+    });
+    const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
+    const res: any = await listener({ kind: "generateCard", shortId, cardId: "card-nadia" });
+    expect(res?.error).toBeUndefined();
+    expect(captured).not.toContain("Current self-beliefs"); // no Outlook (no state)
+    expect(captured).toContain("Nadia grew up on a farm.");  // Knows grounding present
+  });
+
+  it("Core generation consolidates Outlook for a tracked Crystallize character: clears + archives (reason incorporated)", async () => {
+    await import("../src/background/background");
+    await repo.setSettings({ provider: "claude", apiKeys: { claude: "sk-ant-123" }, enableCrystallized: true });
+    await repo.upsertAdventure({ shortId, title: "T", protagonistName: "Smoke", memoraidCharacters: ["Veya"] });
+    await repo.putCards(shortId, [
+      { shortId, id: "card-veya", type: "character", title: "Veya", keys: "Veya", value: "[\nName: Veya\nAppearance: Tall.\nPersonality: Guarded.\n]" },
+    ]);
+    await repo.putCrystallizedState(shortId, "veya", {
+      schema: [], nodes: [], unreferencedPasses: {},
+      outlook: [{ text: "I no longer perform for safety.", strength: 3 }, { text: "Autonomy is the real wealth.", strength: 3 }],
+    } as any);
+
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("api.anthropic.com")) return { ok: true, json: async () => ({ content: [{ type: "text", text: "Background: B.\nPersonality: P.\nVoice: V.\nDrive: D." }] }) } as any;
+      return { ok: true, json: async () => ({}) } as any;
+    });
+
+    const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
+    const res: any = await listener({ kind: "generateCard", shortId, cardId: "card-veya" });
+    expect(res?.error).toBeUndefined();
+
+    const state = await repo.getCrystallizedState(shortId, "veya");
+    expect(state?.outlook?.length ?? 0).toBe(0); // beliefs cleared after incorporation
+    const archive = await repo.getCrystallizedArchive(shortId);
+    const incorporated = archive.filter((a: any) => a.reason === "incorporated" && a.kind === "outlook");
+    expect(incorporated.length).toBe(2); // both beliefs archived, recoverable
   });
 
   it("respects custom memoraidLookback and memoraidPresenceLookback settings", async () => {
@@ -725,26 +904,26 @@ describe("MemorAID NPC Memory Cards", () => {
     expect(updated).toEqual([]);
 
     // Now, change memoraidPresenceLookback to 3, so Anna (in act1, 3 actions ago) IS triggered!
+    (await import("../src/background/background")).__resetMemoraidStateForTests();
     await repo.setSettings({
       provider: "claude",
       apiKeys: { claude: "sk-ant-123" },
-      memoraidLookback: 2,
       memoraidPresenceLookback: 3
     });
 
     updated = await checkMemorAIDUpdates(shortId);
     expect(updated).toContain("Anna");
 
-    // Also, verify that the fetched GQL generation request uses the last `memoraidLookback` (2) actions.
-    // Since fetchMock was called, let's inspect the `storyInformation` field in the fetch arguments.
+    // Private model uses ONE lookback window for both presence and generation context (the removed
+    // two-window memoraidLookback split is gone). With presence lookback = 3, the generation context
+    // is the same 3-action window, so it includes "Anna smiled" too.
     expect(fetchMock).toHaveBeenCalled();
     const genCall = fetchMock.mock.calls.find(call => call[0].includes("api.anthropic.com"));
     expect(genCall).toBeDefined();
     const body = JSON.parse(genCall && genCall[1] ? (genCall[1].body as string) : "{}");
     const messages = body.messages || [];
     const storyInfo = messages[0]?.content || "";
-    // Since memoraidLookback is 2, it should only include the last 2 actions ("You walked outside." and "You opened the book.")
-    expect(storyInfo).not.toContain("Anna smiled");
+    expect(storyInfo).toContain("Anna smiled");
     expect(storyInfo).toContain("You walked outside");
     expect(storyInfo).toContain("You opened the book");
   });
@@ -1220,6 +1399,112 @@ describe("MemorAID NPC Memory Cards", () => {
     expect(generateCallCount).toBe(1);
   });
 
+  it("combined regen: produces the block summary AND the NPC POV block in a SINGLE provider call", async () => {
+    const bg = await import("../src/background/background");
+    bg.__resetMemoraidStateForTests();
+    // Crystallized (which owns the NPC Memory Bank) must be enabled for the combined pass.
+    await repo.setSettings({
+      provider: "claude",
+      apiKeys: { claude: "sk-ant-123" },
+      model: "claude-3-5-sonnet-latest",
+      enableCrystallized: true
+    } as any);
+
+    const act1 = { id: "10", text: "Smoke cooked tacos in the kitchen.", type: "do", createdAt: "2026-06-07T00:00:00Z" };
+    const act2 = { id: "11", text: "Rena stepped close and brushed his chest.", type: "continue", createdAt: "2026-06-07T00:00:01Z" };
+    await repo.putActions(shortId, [act1, act2]);
+    await repo.putCards(shortId, [
+      { id: "card-rena", shortId, type: "character", title: "Rena", keys: "Rena", value: "Rena is an executive." }
+    ]);
+    await repo.upsertAdventure({
+      shortId, title: "T", protagonistName: "Smoke",
+      memoraidCharacters: ["Rena"],
+      memoryBankEntries: [{ actionIds: ["10", "11"], text: "old summary", lastRelevantActionId: "11", __typename: "Memory" }]
+    } as any);
+
+    fetchMock.mockClear();
+    let providerCalls = 0;
+    fetchMock.mockImplementation(async (url: string, init?: any) => {
+      if (url.includes("api.anthropic.com")) {
+        providerCalls++;
+        return { ok: true, json: async () => ({ content: [{ type: "text", text:
+          "===SUMMARY===\nYou cooked tacos while Rena leaned in.\n===POV:Rena===\nI stepped close to him, heart racing, and let my hand linger." }] }) } as any;
+      }
+      if (url.includes("/graphql")) return { ok: true, json: async () => [{ data: { editMemory: { success: true } } }] } as any;
+      return { ok: true, json: async () => ({}) } as any;
+    });
+
+    const res = await bg.regenerateLatestMemory(shortId);
+    expect(res.ok).toBe(true);
+    // ONE provider call produced BOTH outputs — no separate per-NPC call re-sending the same context.
+    expect(providerCalls).toBe(1);
+    // Block summary updated from the SUMMARY section.
+    const adv = await repo.getAdventure(shortId);
+    expect(adv?.memoryBankEntries?.[0]?.text).toContain("Rena leaned in");
+    // NPC memory block stored for Rena from the POV section.
+    const npcBlocks = await repo.getNpcMemoryBlocks(shortId, "rena");
+    expect(npcBlocks.length).toBe(1);
+    expect(npcBlocks[0]!.povText).toContain("heart racing");
+  });
+
+  it("adventureMemories with Auto-Update ON generates the latest block's NPC POV ONCE (no redundant forward-auto call)", async () => {
+    const bg = await import("../src/background/background");
+    bg.__resetMemoraidStateForTests();
+    // Both flags on: the combined regen pass owns the latest block; forward-auto must skip it, or the
+    // NPC POV is generated twice per turn (combined + a separate per-NPC call).
+    await repo.setSettings({
+      provider: "claude",
+      apiKeys: { claude: "sk-ant-123" },
+      model: "claude-3-5-sonnet-latest",
+      enableCrystallized: true,
+      autoRegenerateMemoryBankEntry: true,
+    } as any);
+
+    const act1 = { id: "10", text: "Smoke opened the shop.", type: "do", createdAt: "2026-06-07T00:00:00Z" };
+    const act2 = { id: "11", text: "Smoke poured coffee.", type: "do", createdAt: "2026-06-07T00:00:01Z" };
+    const act3 = { id: "12", text: "Rena walked in and smiled at him.", type: "continue", createdAt: "2026-06-07T00:00:02Z" };
+    await repo.putActions(shortId, [act1, act2, act3]);
+    await repo.putCards(shortId, [
+      { id: "card-rena", shortId, type: "character", title: "Rena", keys: "Rena", value: "Rena is a regular." }
+    ]);
+    // Seed an EXISTING block so oldMemories.length > 0 (forward-auto branch requires it), then the
+    // update appends a genuinely NEW latest block.
+    await repo.upsertAdventure({
+      shortId, title: "T", protagonistName: "Smoke",
+      memoraidCharacters: ["Rena"],
+      memoryBankEntries: [{ actionIds: ["10"], text: "You opened the shop.", lastRelevantActionId: "10", __typename: "Memory" }],
+    } as any);
+
+    fetchMock.mockClear();
+    let providerCalls = 0;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("api.anthropic.com")) {
+        providerCalls++;
+        return { ok: true, json: async () => ({ content: [{ type: "text", text:
+          "===SUMMARY===\nYou poured coffee as Rena walked in.\n===POV:Rena===\nI walked in and caught his eye, warmth blooming." }] }) } as any;
+      }
+      if (url.includes("/graphql")) return { ok: true, json: async () => [{ data: { editMemory: { success: true } } }] } as any;
+      return { ok: true, json: async () => ({}) } as any;
+    });
+
+    const listener = (globalThis as any).browser.runtime.onMessage.addListener.mock.calls[0][0];
+    // Old block (matched by text → reused) + a NEW latest block covering acts 11-12 (Rena present).
+    await listener({ kind: "adventureMemories", shortId, memories: [
+      { actionIds: ["10"], text: "You opened the shop.", lastRelevantActionId: "10" },
+      { actionIds: ["11", "12"], text: "You poured coffee; Rena walked in.", lastRelevantActionId: "12" },
+    ] });
+    // Fire-and-forget regen + forward-auto run async in the handler.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Exactly ONE provider call: the combined pass. If forward-auto had also fired for the latest
+    // block, generateNpcBlock would have made a second anthropic call.
+    expect(providerCalls).toBe(1);
+    // The NPC POV still landed (from the combined call), anchored to the new block.
+    const npcBlocks = await repo.getNpcMemoryBlocks(shortId, "rena");
+    expect(npcBlocks.length).toBe(1);
+    expect(npcBlocks[0]!.povText).toContain("warmth blooming");
+  });
+
   it("saves and retrieves settings with custom interceptTimeout", async () => {
     // 1. Save settings with a custom interceptTimeout
     await repo.setSettings({
@@ -1389,11 +1674,12 @@ describe("MemorAID NPC Memory Cards", () => {
 
 
   it("automatically updates active characters that remain in context every N turns", async () => {
-    // 1. Setup settings (analyzeWindow/lookbackSize = 20)
+    // 1. Setup settings (analyzeWindow/lookbackSize = 20). Automatic updates are opt-in, so enable them.
     await repo.setSettings({
       provider: "claude",
       apiKeys: { claude: "sk-ant-123" },
-      analyzeWindow: 20
+      analyzeWindow: 20,
+      enableAutomaticUpdates: true
     });
 
     // Learn GenerateStoryCard GQL op
@@ -1468,6 +1754,21 @@ describe("MemorAID NPC Memory Cards", () => {
     fetchMock.mockClear();
     await checkLookbackAutoUpdates(shortId, [actions[24]]);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does NOT auto-update when enableAutomaticUpdates is off (the opt-in gate)", async () => {
+    // Regression: the toggle was ignored — auto-updates ran on the legacy manualMode default.
+    await repo.setSettings({ provider: "claude", apiKeys: { claude: "sk-ant-123" }, analyzeWindow: 20 }); // enableAutomaticUpdates undefined -> off
+    await repo.putCards(shortId, [{ shortId, id: "char-elias", type: "character", title: "Elias", keys: "Elias, elf", value: "Elias is an ancient elf." }]);
+    const actions = Array.from({ length: 25 }, (_, i) => ({ id: `action-${i}`, type: "continue", text: `Action ${i}: Elias speaks.`, createdAt: new Date(2026, 5, 7, 12, 0, i).toISOString() }));
+    await repo.putActions(shortId, actions);
+    await repo.putVersion({ id: "v-elias-old", shortId, characterName: "Elias", entry: "Elias is an ancient elf.", changeSummary: "Manual", status: "applied", createdAt: new Date().toISOString(), actionCount: 5, source: "card" } as any);
+
+    fetchMock.mockClear();
+    await checkLookbackAutoUpdates(shortId, [actions[24]]); // would be DUE (25-5>=20) if the gate were open
+    expect(fetchMock).not.toHaveBeenCalled();
+    const pending = (await repo.getVersions(shortId)).find(v => v.characterName === "Elias" && v.status === "pending");
+    expect(pending).toBeUndefined();
   });
 
   it("does NOT auto-update a fell-out card if difference < lookbackSize", async () => {
@@ -1781,10 +2082,12 @@ describe("MemorAID NPC Memory Cards", () => {
 
     fetchMock.mockClear();
 
-    // Run check. Since she already has a memory card but is NOT mentioned in act2, we should skip update.
+    // Private model uses WINDOW presence: Anna is still in the recent lookback window (act1), so she
+    // is processed — the model itself decides whether she is offstage (→ ears-burning thought). This
+    // supersedes public's latest-action-only skip.
     const updated = await checkMemorAIDUpdates(shortId);
-    expect(updated).toEqual([]);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(updated).toEqual(["Anna"]);
+    expect(fetchMock).toHaveBeenCalled();
   });
 
   it("generates thoughts for an existing memory card if it has no real thoughts yet, even if not mentioned in the latest action", async () => {
@@ -2015,17 +2318,18 @@ describe("MemorAID NPC Memory Cards", () => {
       };
     });
 
-    // Run check with lookback = 1. Should be plain format: "Anna's Thoughts:"
+    // Run check with lookback = 1. The private model always renders the windowed
+    // "(newest to oldest)" header (the old plain-vs-braced threshold was removed).
     let updated = await checkMemorAIDUpdates(shortId, "Anna walked straight toward your row.");
     expect(updated).toEqual(["Anna"]);
     let dbCards = await repo.getCards(shortId);
     let memCard = dbCards.find(c => c.title === "Anna (Memory)");
-    expect(memCard?.value).toContain("Anna's Thoughts:");
-    expect(memCard?.value).not.toContain("Anna's Thoughts (newest to oldest):");
+    expect(memCard?.value).toContain("Anna's Thoughts (newest to oldest):");
 
     // 2. Update settings to memoraidThoughtLookback = 2
     (globalThis as any).indexedDB = new IDBFactory();
     __resetDbForTests();
+    (await import("../src/background/background")).__resetMemoraidStateForTests();
     repo = new Repo();
     await repo.setSettings({
       provider: "claude",

@@ -256,16 +256,24 @@ describe("runProperNounAutoDetection", () => {
 
     const { runProperNounAutoDetection } = await import("../src/background/background");
     
+    // Evidence gates: the first mention only registers the candidate in the pending pool…
     await runProperNounAutoDetection(shortId, [
       { id: "10", text: "You walked towards IgnoredNoun and found a NewLocation.", type: "do" },
     ]);
+    let adv = await testRepo.getAdventure(shortId);
+    expect((adv?.locationSuggestions || []).length).toBe(0);
+    expect(adv?.properNounPending?.["newlocation"]).toBeTruthy();
 
-    const adv = await testRepo.getAdventure(shortId);
-    const suggestions = adv?.locationSuggestions || [];
-    const properNouns = suggestions.map((s) => s.properNoun);
+    // …the second distinct-action mention promotes it.
+    await runProperNounAutoDetection(shortId, [
+      { id: "11", text: "You return to the NewLocation later that night.", type: "do" },
+    ]);
+    adv = await testRepo.getAdventure(shortId);
+    const properNouns = (adv?.locationSuggestions || []).map((s) => s.properNoun);
 
     expect(properNouns).toContain("NewLocation");
     expect(properNouns).not.toContain("IgnoredNoun");
+    expect(adv?.properNounPending?.["newlocation"]).toBeUndefined(); // promoted out of the pool
   });
 
   it("should perform alias matching to deduplicate suggestions (e.g. Brother Nathaniel vs Nathaniel Blake)", async () => {
@@ -303,9 +311,11 @@ describe("runProperNounAutoDetection", () => {
     const { runProperNounAutoDetection } = await import("../src/background/background");
     
     // We scan actions with candidates "Blake" and "Brother Nathaniel", which are alias variants of "Nathaniel Blake"
-    // Also "John Smith" (a new entity) and "John Doe" (another new entity)
+    // Also "John Smith" (a new entity) and "John Doe" (another new entity). Two mention-actions
+    // each, so the evidence gate promotes the genuinely-new names.
     await runProperNounAutoDetection(shortId, [
       { id: "10", text: "Blake spoke to Brother Nathaniel. John Smith met John Doe.", type: "say" },
+      { id: "11", text: "Later, John Smith nods while John Doe waits outside.", type: "say" },
     ]);
 
     const adv = await testRepo.getAdventure(shortId);
@@ -332,7 +342,10 @@ describe("runProperNounAutoDetection", () => {
     let repo = new Repo();
     await repo.setSettings({ provider: "openai", analyzeWindow: 20 } as any); // no enableProperNounDetection
     await repo.upsertAdventure({ shortId: "adv-unset", title: "T", properNounLogs: [], locationSuggestions: [] });
-    await runProperNounAutoDetection("adv-unset", [{ id: "1", text: "They entered the Obsidian Keep.", type: "do" }]);
+    await runProperNounAutoDetection("adv-unset", [
+      { id: "1", text: "They entered the Obsidian Keep.", type: "do" },
+      { id: "2", text: "Later they left the Obsidian Keep quietly.", type: "do" },
+    ]);
     let adv = await repo.getAdventure("adv-unset");
     expect((adv?.locationSuggestions || []).map((s) => s.properNoun)).toContain("Obsidian Keep");
 
@@ -342,7 +355,10 @@ describe("runProperNounAutoDetection", () => {
     repo = new Repo();
     await repo.setSettings({ provider: "openai", analyzeWindow: 20, enableProperNounDetection: false } as any);
     await repo.upsertAdventure({ shortId: "adv-off", title: "T", properNounLogs: [], locationSuggestions: [] });
-    await runProperNounAutoDetection("adv-off", [{ id: "1", text: "They entered the Obsidian Keep.", type: "do" }]);
+    await runProperNounAutoDetection("adv-off", [
+      { id: "1", text: "They entered the Obsidian Keep.", type: "do" },
+      { id: "2", text: "Later they left the Obsidian Keep quietly.", type: "do" },
+    ]);
     adv = await repo.getAdventure("adv-off");
     expect((adv?.locationSuggestions || []).length).toBe(0);
   });
@@ -396,6 +412,7 @@ describe("runProperNounAutoDetection", () => {
     const { runProperNounAutoDetection } = await import("../src/background/background");
     await runProperNounAutoDetection(shortId, [
       { id: "10", text: 'You nod and say, "i-I s-suppose that\'s all of b-b-Building J?"', type: "do" },
+      { id: "11", text: "You head back toward Building J after lunch.", type: "do" },
     ]);
 
     const adv = await testRepo.getAdventure(shortId);
@@ -464,6 +481,7 @@ describe("runProperNounAutoDetection", () => {
 
     await runProperNounAutoDetection(shortId, [
       { id: "10", text: 'You say, "Huh, I wonder if Steve is around today."', type: "say" },
+      { id: "11", text: "You spot Steve by the counter.", type: "do" },
     ]);
 
     const adv = await testRepo.getAdventure(shortId);
@@ -500,7 +518,7 @@ describe("runProperNounAutoDetection", () => {
       { id: "1", text: "Action 1", type: "story", createdAt: "2026-06-13T10:00:00Z" },
       { id: "2", text: "Action 2", type: "story", createdAt: "2026-06-13T10:01:00Z" },
       { id: "3", text: "Action 3", type: "story", createdAt: "2026-06-13T10:02:00Z" },
-      { id: "4", text: "Action 4", type: "story", createdAt: "2026-06-13T10:03:00Z" },
+      { id: "4", text: "You wave at Steve across the room.", type: "story", createdAt: "2026-06-13T10:03:00Z" },
       { id: "5", text: 'You say, "Huh, I wonder if Steve is around today."', type: "say", createdAt: "2026-06-13T10:04:00Z" },
     ]);
 

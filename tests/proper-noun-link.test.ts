@@ -9,6 +9,10 @@ import { IDBFactory } from "fake-indexeddb";
       get: vi.fn().mockResolvedValue({ aidToken: "Bearer token123", aidEndpoint: "https://api.aidungeon.com/graphql" }),
       set: vi.fn().mockResolvedValue(undefined),
     },
+    local: {
+      get: vi.fn().mockResolvedValue({ aidToken: "Bearer token123", aidEndpoint: "https://api.aidungeon.com/graphql" }),
+      set: vi.fn().mockResolvedValue(undefined),
+    },
   },
   runtime: { onMessage: { addListener: vi.fn() } },
   tabs: {

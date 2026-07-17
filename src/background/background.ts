@@ -20,6 +20,28 @@ import { countActions, sliceLastActions, determineFellOutCards, isCharacterTrigg
 import { parseOffMetaText, type OffMetaSection } from "../shared/offmeta-parser";
 import { defaultCommandForType, resolveCommand, hasTitleToken, parseProtagonistName, DEFAULT_CARD_COMMANDS, DEFAULT_FORMATTING_MODE } from "../inference/card-command";
 import { parseMemoNotes, buildMemoNotes, pushThought, thoughtsSince, buildThoughtContext, renderThoughtWindow } from "../inference/memoraid-notes";
+// Shared background infra used by the ported feature modules (bg-life/bg-crystallized/bg-npc-memory/
+// bg-memoraid/bg-scene). Its `auth` is kept in sync with this module's learned token below so the
+// feature modules can make AID card save/delete calls.
+import { auth as infraAuth, setDebugEnabled as setInfraDebug } from "./bg-infra";
+import { cachedRecentActions, updateRecentActionsCache, cachedSceneText, getSceneText } from "./bg-scene";
+// Ported feature engines. Each self-gates on its enable flag (Crystallized/Living Characters default
+// OFF for this build), so calling them on the turn-check path is a no-op until the user opts in.
+import { checkCrystallizedUpdates, refreshSceneAwareCrystallized, runCrystallizedDistillationManual, saveCrystallizedState, invalidateSceneCastGate } from "./bg-crystallized";
+import { checkLifeCardUpdates, archiveLifeCard, tryNativeCardDelete } from "./bg-life";
+import { parseCrystallized, parseLlmOutput, dedupeSchema, formatSubjectLabel, buildConsolidateCommand, applyManualPreferences, reconcileOutlook, reconcilePreferences, findCrystallizedCard, type OutlookBelief } from "../inference/crystallized";
+import { coercePending, formatLivingCharactersDirective, shouldFireLcOnAction, planInjection, filterLiveDirectives, pressureKey, type PendingInjection, type SeededPair } from "../inference/injection";
+import { addUserDeletedCards, removeUserDeletedTitles, isAutoCardTitle } from "../inference/deleted-cards";
+import { setLifeCardStatusValue, parseLifeCardEntry } from "../inference/living-characters";
+import { generateCard } from "../inference/native";
+import { snapshotOutlookForIncorporation, extractFieldBlock, spliceField, buildBoundedRevisionCommand, OUTLOOK_INCORPORATION_INSTRUCTION, clearIncorporatedOutlook, hasEstablishedAppearance, existingKeyPairLine, buildCoreCardCommand, buildCoreAppearanceCommand, assembleCoreCard, extractBehavioralBlock, extractCarriedTopLevelFields, buildAppearanceBlock } from "../inference/core-character";
+import { resolveGender, buildPhenotypeInputs, rerollPhenotype } from "../inference/phenotype";
+import { extractBlockTags } from "../inference/npc-memory-bank";
+import { checkMemorAIDUpdates, selfHealMemoraidEntries, __resetMemoraidStateForTests } from "./bg-memoraid";
+export { checkMemorAIDUpdates, selfHealMemoraidEntries, __resetMemoraidStateForTests };
+import { presentNpcSourcesForBlock, storeNpcBlockFromPov, generateNpcBlock, backfillNpcMemories, regenerateNpcMemoryBlock, generateNpcBlocksForNewNativeBlock } from "./bg-npc-memory";
+import { registerCandidate, updatePendingEvidence, readyToPromote, prunePending, PN_CONNECTORS, isContractionToken, isElisionToken, multiwordDisqualified, trimJunkEdgeWords } from "../inference/proper-nouns";
+import type { PendingProperNoun } from "../shared/types";
 
 
 const repo = new Repo();
@@ -30,7 +52,6 @@ let sessionToken: string | null = null;       // in-memory only; never persisted
 let gqlEndpoint: string | null = null;        // learned AID GraphQL endpoint
 
 const cachedImportantCharacters = new Map<string, string[]>();
-const cachedRecentActions = new Map<string, CanonicalAction[]>();
 
 // Session-scoped MemorAID intercept-path timing (resets when the background worker restarts).
 // Only the action-intercept path is measured — that is where latency races interceptTimeout.
@@ -178,10 +199,58 @@ export function detectProperNouns(text: string, knownNames: string[], lexiconNam
     "type", "types", "class", "faction", "event", "events", "command", "commands", "prompt", "prompts", "guide",
     "guides", "user", "player", "protagonist", "vocals", "intro", "outro", "chorus", "verse", "solo", "guitar",
     "drum", "drums", "bass", "piano", "melody", "rhythm", "lyrics", "tempo", "breakdown", "transition",
-    "transitions", "climax", "continuation"
+    "transitions", "climax", "continuation",
+
+    // Demonyms / languages / nationalities — proper ADJECTIVES, not entities (biggest live false-positive
+    // source; "French" alone fired 100+ times). Kept as an explicit list because compromise unreliably
+    // tags these as #ProperNoun even lowercased, defeating the POS filter below.
+    "french", "english", "spanish", "italian", "german", "greek", "russian", "chinese", "japanese",
+    "korean", "dutch", "portuguese", "brazilian", "mexican", "canadian", "american", "british", "irish",
+    "scottish", "welsh", "jamaican", "basque", "afrikaans", "gallic", "bostonian", "frenchwoman",
+    "european", "asian", "african", "arab", "arabic", "latin", "roman", "nordic", "slavic", "indian",
+    "thai", "vietnamese", "filipino", "turkish", "polish", "swedish", "norwegian", "danish", "finnish",
+    "hungarian", "czech", "austrian", "swiss", "belgian", "australian", "egyptian", "persian", "hebrew",
+    // Period / style adjectives that read as proper nouns
+    "gothic", "renaissance", "baroque", "victorian", "medieval", "olympic", "cartesian",
+
+    // Sentence-initial discourse markers / interjections (capitalized at sentence start, not names).
+    "almost", "exactly", "seems", "since", "sorry", "thanks", "totally", "unless", "howdy", "complicated",
+    "certainly", "especially", "despite", "except", "enough", "alright", "goodnight", "describe", "discuss",
+    "dismissed", "besides", "seriously", "obviously", "apparently", "literally", "frankly", "regardless", "luckily",
+    "nonetheless", "furthermore", "moreover", "anyway", "anyhow", "indeed", "absolutely", "definitely",
+    "probably", "possibly", "hopefully", "thankfully", "unfortunately", "fortunately", "admittedly",
+    "whatever", "somehow", "anyways", "okay", "alrighty", "welp", "yikes", "oops", "ouch", "ugh", "huh",
+
+    // French loanwords / interjections that surface capitalized
+    "cela", "dieu", "reine", "c'est", "mon dieu", "voila", "voilà",
+
+    // Generic descriptive nicknames (keep distinctive story epithets; suppress generic placeholders)
+    "big guy", "big man", "big boy", "tall guy", "little guy", "pretty girl", "pink one", "man of mystery"
   ]);
 
   const knownLower = new Set(knownNames.map(n => n.toLowerCase().trim()));
+  // Individual WORDS of known names — a multiword candidate whose every word is already known is
+  // nothing new ("Veya French" after the demonym trim is just "Veya").
+  const knownWordSet = new Set<string>();
+  for (const n of knownNames) for (const w of n.toLowerCase().split(/\s+/)) if (w) knownWordSet.add(w);
+  // Per-word junk tests for the multiword edge-trim (see trimJunkEdgeWords). Both edges: lowercase
+  // non-connector words, contraction/elision shells, demonyms. LEADING edge only: ignore-listed
+  // words ("Seems Juniper" → "Juniper", "Luckily Vegas" → "Vegas" — recovering the name the old
+  // firstWord check used to drop wholesale). The ignore list must NOT apply to the trailing edge —
+  // it is full of noun-verb homographs that are name material there ("Obsidian Keep", the list has
+  // "keep"). No POS-based junk at all: compromise reads "building" as a gerund #Verb, which would
+  // mangle "Building J".
+  const isJunkWord = (w: string): boolean => {
+    const lw = w.toLowerCase();
+    if (PN_CONNECTORS.has(lw)) return false;
+    if (/^[a-z]/.test(w)) return true;
+    if (isContractionToken(w) || isElisionToken(w)) return true;
+    return nlp(lw).match('#Demonym').found;
+  };
+  const isLeadJunkWord = (w: string): boolean => {
+    const lw = w.toLowerCase();
+    return !PN_CONNECTORS.has(lw) && ignoreList.has(lw);
+  };
   const candidates: string[] = [];
   const rawTerms: string[] = [];
   const escapeRe = (s: string) => s.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
@@ -227,6 +296,25 @@ export function detectProperNouns(text: string, knownNames: string[], lexiconNam
         words = cleanedPart.split(/\s+/);
       }
 
+      // --- NLP hardening gates (stateless; src/inference/proper-nouns.ts) ---
+      // G3: contraction/elision shells ("We've", "Didn't", "J'aime") are never names.
+      if (words.length === 1 && (isContractionToken(cleanedPart) || isElisionToken(cleanedPart))) continue;
+      if (words.length > 1) {
+        // Edge-trim junk glued onto a real name ("Luckily Vegas" → "Vegas", "Chad sneers" → "Chad",
+        // "Veya French" → "Veya"); an all-junk phrase trims to nothing.
+        const trimmed = trimJunkEdgeWords(cleanedPart, isJunkWord, isLeadJunkWord);
+        if (!trimmed) continue;
+        if (trimmed !== cleanedPart) {
+          cleanedPart = trimmed;
+          words = cleanedPart.split(/\s+/);
+          if (words.length === 1 && (isContractionToken(cleanedPart) || isElisionToken(cleanedPart))) continue;
+        }
+        // G2: interior lowercase/contraction words = NLP span over-extension ("Lyon without").
+        if (words.length > 1 && multiwordDisqualified(cleanedPart)) continue;
+        // Every remaining word already known → nothing new to suggest.
+        if (words.length > 1 && words.every(w => PN_CONNECTORS.has(w.toLowerCase()) || knownWordSet.has(w.toLowerCase()))) continue;
+      }
+
       const lower = cleanedPart.toLowerCase();
       if (ignoreList.has(lower) || knownLower.has(lower)) continue;
 
@@ -250,6 +338,9 @@ export function detectProperNouns(text: string, knownNames: string[], lexiconNam
       // and not considered a proper noun by compromise.js, filter it out.
       if (words.length === 1) {
         const docLower = nlp(lower);
+        // Demonyms/nationalities are proper ADJECTIVES, not entities — drop them even when compromise
+        // (unreliably) tags them #ProperNoun, which would otherwise bypass the POS filter below.
+        if (docLower.match('#Demonym').found) continue;
         if (!docLower.match('#ProperNoun').found) {
           if (docLower.match('#Verb|#Adjective|#Adverb|#Pronoun|#Conjunction|#Preposition').found) {
             continue;
@@ -263,8 +354,7 @@ export function detectProperNouns(text: string, knownNames: string[], lexiconNam
     }
   }
 
-  // Deduplicate and filter out substrings (e.g. if we have "Silverwood Forest" and "Forest", drop
-  // "Forest").
+  // Deduplicate and filter out substrings
   const filtered: string[] = [];
   for (const item of candidates) {
     const itemLower = item.toLowerCase();
@@ -327,6 +417,9 @@ function isAliasMatch(nameA: string, nameB: string): boolean {
     "brother", "sister", "father", "mother", "mr", "mrs", "ms", "dr", "lord", "lady", "sir",
     "king", "queen", "prince", "princess", "captain", "general", "agent", "officer", "constable",
     "detective", "st", "saint", "uncle", "aunt", "grandpa", "grandma", "elder",
+    // Non-English / additional honorifics so title-prefixed variants dedup onto an existing card
+    // (e.g. "Mademoiselle Vallois" / "Monsieur Vallois" → "Vallois"). Proper-noun hardening spec §Dedup.
+    "monsieur", "madame", "mademoiselle", "miss", "señor", "senor", "herr", "frau",
     "the", "a", "an", "of", "and", "in", "on", "at", "to", "from", "with"
   ]);
 
@@ -385,6 +478,18 @@ export async function runProperNounAutoDetection(shortId: string, newActions?: C
     existingNames.push(adv.protagonistName);
   }
 
+  // Plot Essentials entities — the always-in-context character/entity block, including the player's own
+  // epithets (e.g. "The Beast") that live in the description rather than on a card — are already known
+  // and must never be re-flagged as new proper nouns. Add each block's name, then extract any proper
+  // nouns embedded in the PE descriptions so aliases/epithets are suppressed too.
+  const peBlocks = parsePlotEssentials(adv.memory);
+  for (const b of peBlocks) {
+    if (b.name) existingNames.push(b.name);
+  }
+  for (const pn of detectProperNouns(adv.memory || "", existingNames, [])) {
+    existingNames.push(pn);
+  }
+
   for (const l of logs) {
     if (l.properNoun) existingNames.push(l.properNoun);
   }
@@ -418,11 +523,29 @@ export async function runProperNounAutoDetection(shortId: string, newActions?: C
 
   let updated = false;
 
+  // Evidence pool (G1/G5 gates, src/inference/proper-nouns.ts): a fresh candidate WAITS here until
+  // it has ≥2 distinct-action mentions — and, for single words, one MID-SENTENCE capitalized
+  // sighting (a capital explained only by sentence/dialogue position is not name evidence) — then
+  // promotes to a real suggestion. Deferred, not dropped: junk that never re-occurs ages out.
+  const pending: Record<string, PendingProperNoun> = adv.properNounPending || {};
+  let pendingChanged = false;
+  // Known-name WORDS: excluded from a multiword candidate's G5 mention credit, so "Smoke Girlfriend"
+  // isn't kept alive by the protagonist's ubiquitous "Smoke".
+  const knownWords = new Set<string>();
+  for (const n of existingNames) for (const w of n.toLowerCase().split(/\s+/)) if (w) knownWords.add(w);
+  const isKnownWord = (w: string) => knownWords.has(w.toLowerCase());
+
   // Ungated decision trail — detection was previously silent, making "X didn't fire" undiagnosable.
   const decisions: string[] = [];
 
   for (const action of actionsToScan) {
     if (!action.text) continue;
+    const now = new Date().toISOString();
+
+    // 1. Accrue evidence for candidates already waiting in the pool.
+    if (updatePendingEvidence(pending, action.id, action.text, now, isKnownWord)) pendingChanged = true;
+
+    // 2. Fresh detection → the pool (never straight to a suggestion).
     const candidates = detectProperNouns(action.text, existingNames, globalLexiconNames);
     if (candidates.length) decisions.push(`[${action.id}] candidates=[${candidates.join(", ")}]`);
 
@@ -433,32 +556,47 @@ export async function runProperNounAutoDetection(shortId: string, newActions?: C
         decisions.push(`  "${noun}": skipped (alias of "${aliasOf}")`);
         continue;
       }
+      registerCandidate(pending, noun, action.id, action.text, now);
+      pendingChanged = true;
+      decisions.push(`  "${noun}": pending (evidence gate)`);
+    }
 
-      decisions.push(`  "${noun}": SUGGESTED`);
-      // Add to suggestions
+    // 3. Promote entries whose evidence is now complete; the promoting action supplies the
+    //    suggestion's context so the UI shows the freshest mention.
+    for (const [key, entry] of Object.entries(pending)) {
+      if (!readyToPromote(entry)) continue;
+      decisions.push(`  "${entry.noun}": SUGGESTED (mentions=${entry.mentionActionIds.length})`);
       suggestions.push({
-        properNoun: noun,
+        properNoun: entry.noun,
         actionId: action.id,
         actionText: action.text,
-        timestamp: new Date().toISOString(),
+        timestamp: now,
         status: "pending"
       });
-      existingNames.push(noun);
+      existingNames.push(entry.noun);
+      for (const w of entry.noun.toLowerCase().split(/\s+/)) if (w) knownWords.add(w);
+      delete pending[key];
+      pendingChanged = true;
       updated = true;
     }
   }
+
+  const beforePrune = Object.keys(pending).length;
+  prunePending(pending);
+  if (Object.keys(pending).length !== beforePrune) pendingChanged = true;
 
   console.info(
     `[AID bg] Proper-noun detection scanned ${actionsToScan.length} action(s): ` +
     (decisions.length ? decisions.join(" ") : "(no candidates)")
   );
 
-  if (updated) {
+  if (updated || pendingChanged) {
     await repo.upsertAdventure({
       shortId,
-      locationSuggestions: suggestions
+      locationSuggestions: suggestions,
+      properNounPending: pending
     });
-    broadcastToTabs({ kind: "stateUpdated", shortId });
+    if (updated) broadcastToTabs({ kind: "stateUpdated", shortId });
   }
 }
 
@@ -487,21 +625,28 @@ async function updateConfigCache(shortId: string) {
       .filter((name) => name.length > 0);
     cachedImportantCharacters.set(shortId, importantNames);
     dlog(`[AID bg] Updated cached important characters for ${shortId}:`, importantNames);
+
+    // Bridge to the ported feature engines (MemorAID, Crystallized, NPC memory bank), which read
+    // their source roster from `adv.memoraidCharacters`. Keep it in sync with the Configure MemorAID
+    // card so those features track the same important-character list the user already maintains.
+    try {
+      const adv = await repo.getAdventure(shortId);
+      if (adv) {
+        const cur = adv.memoraidCharacters || [];
+        const same = cur.length === importantNames.length && cur.every((n, i) => n === importantNames[i]);
+        if (!same) {
+          adv.memoraidCharacters = importantNames;
+          await repo.upsertAdventure(adv);
+        }
+      }
+    } catch (err) {
+      dlog("[AID bg] Failed to mirror important characters to adv.memoraidCharacters:", err);
+    }
   } catch (err) {
     console.error("[AID bg] Failed to update config cache:", err);
   }
 }
 
-async function updateRecentActionsCache(shortId: string, actions?: CanonicalAction[]) {
-  try {
-    const actList = actions || await repo.getActions(shortId);
-    const sliced = actList.slice(-30);
-    cachedRecentActions.set(shortId, sliced);
-    dlog(`[AID bg] Updated cached recent actions count for ${shortId}:`, sliced.length);
-  } catch (err) {
-    console.error("[AID bg] Failed to update actions cache:", err);
-  }
-}
 
 // Debug-gated logging: verbose info traces (action/memory/card text) only print when the user
 // enables "Show debug" in Settings. warn/error stay ungated. `debugEnabled` is refreshed whenever
@@ -592,8 +737,8 @@ const sessionStore = (browser.storage as any).session as
 
 async function rememberAuth(opts: { token?: string; endpoint?: string }): Promise<void> {
   const patch: Record<string, string> = {};
-  if (opts.token) { sessionToken = opts.token; patch.aidToken = opts.token; }
-  if (opts.endpoint) { gqlEndpoint = opts.endpoint; patch.aidEndpoint = opts.endpoint; }
+  if (opts.token) { sessionToken = opts.token; patch.aidToken = opts.token; infraAuth.sessionToken = opts.token; }
+  if (opts.endpoint) { gqlEndpoint = opts.endpoint; patch.aidEndpoint = opts.endpoint; infraAuth.gqlEndpoint = opts.endpoint; }
   // Persist ONLY to storage.session: it is in-memory and session-scoped, so the bearer token is
   // never written to persistent disk. It survives MV3 worker recycling within a browser session;
   // a fresh session re-captures the token from the first authenticated page request the interceptor
@@ -611,6 +756,9 @@ async function ensureAuth(): Promise<void> {
     if (!sessionToken && s?.aidToken) sessionToken = s.aidToken;
     if (!gqlEndpoint && s?.aidEndpoint) gqlEndpoint = s.aidEndpoint;
   } catch {}
+  // Mirror into the shared infra so the ported feature modules see the same session.
+  infraAuth.sessionToken = sessionToken;
+  infraAuth.gqlEndpoint = gqlEndpoint;
 }
 
 function isSafeEndpoint(url: string | null): boolean {
@@ -791,7 +939,14 @@ async function runBackfill(shortId: string): Promise<{ loaded: number } | { erro
     type: "backfill", adventureId: shortId, retriedActionId: null, cachedOutputs: [], actions: ordered,
   });
   await repo.replaceAllActions(shortId, canonical);
-  if (backfillCardIds) await repo.reconcileDeletedCards(shortId, backfillCardIds);
+  if (backfillCardIds) {
+    await repo.reconcileDeletedCards(shortId, backfillCardIds);
+    // Purge stale soft-deleted mirror rows that duplicate a live card under a different id (roster
+    // active-wins Fix 2, phenotype-reroll-and-roster-dedup spec §B.3). Otherwise a dead duplicate row
+    // can mask a live character in the roster or trip title-based lookups.
+    const liveCards = (await repo.getCards(shortId)).filter((c) => !c.deletedAt);
+    await repo.purgeStaleDeletedDuplicates(shortId, liveCards.map((c) => ({ id: c.id, title: c.title, type: c.type })));
+  }
   await seedBaselines(shortId);
   return { loaded: canonical.length };
 }
@@ -1298,6 +1453,24 @@ function resolveTitleToken(template: string, title: string): string {
   return template.replace(/\{\{\s*title\s*\}\}/g, title);
 }
 
+/** Cue text for phenotype extraction: the card value plus recent action texts where the character's
+ *  name or a ≥3-char trigger key appears (the presence-scan pattern from gather.ts). Capped so it
+ *  stays a small grounding snippet. */
+export function gatherCharacterCueText(cardValue: string, actions: { text?: string }[], name: string, keys: string): string {
+  const needles = [name, ...(keys || "").split(/[,;]+/)]
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length >= 3);
+  const recent = (actions || []).slice(-40);
+  const hits: string[] = [];
+  for (const a of recent) {
+    const t = (a?.text || "").trim();
+    if (!t) continue;
+    const lower = t.toLowerCase();
+    if (needles.some((n) => lower.includes(n))) hits.push(t);
+  }
+  return `${String(cardValue || "").trim()}\n${hits.join("\n")}`.trim().slice(0, 2000);
+}
+
 function cleanLlmResponse(text: string): string {
   let cleaned = text.trim();
   const match = cleaned.match(/^```[a-zA-Z]*\n([\s\S]*?)\n```$/) || cleaned.match(/^```[a-zA-Z]*\s*([\s\S]*?)\s*```$/);
@@ -1397,7 +1570,8 @@ function reconstructFields(fields: Record<string, string>, protagonist: string):
  */
 async function runGenerateCard(
   shortId: string,
-  cardId: string
+  cardId: string,
+  templateOverride?: string
 ): Promise<{ id: string; characterName: string; changeSummary: string; entry: string } | { error: string }> {
   const cards = await repo.getCards(shortId);
   const card = cards.find((c) => c.id === cardId);
@@ -1418,7 +1592,11 @@ async function runGenerateCard(
 
   const isMemoraid = (card.title || "").toLowerCase().endsWith(" (memory)");
   const typeKey = isMemoraid ? "memoraid" : normalizeType(card.type);
-  const template = (settings?.cardCommands?.[typeKey] || (isMemoraid ? (settings?.cardCommands?.memoraid || DEFAULT_CARD_COMMANDS.memoraid) : defaultCommandForType(card.type))) || "";
+  // templateOverride (e.g. the panel's Compact button → "backgroundCharacter") forces a single lean
+  // generation with that specific command instead of the multi-pass character schema below.
+  const template = templateOverride
+    ? (settings?.cardCommands?.[templateOverride] || DEFAULT_CARD_COMMANDS[templateOverride] || "")
+    : ((settings?.cardCommands?.[typeKey] || (isMemoraid ? (settings?.cardCommands?.memoraid || DEFAULT_CARD_COMMANDS.memoraid) : defaultCommandForType(card.type))) || "");
   if (!hasTitleToken(template)) {
     return { error: "This card-type command is missing the required {{title}} token (AID needs it). Fix it in Settings → Prompts." };
   }
@@ -1427,6 +1605,16 @@ async function runGenerateCard(
 
   const opts: { storyInformation?: string } = {};
   let baseContext = "";
+  // Core Character (spec §5) generation inputs, computed in the character context block below and
+  // consumed by the folded-generation branch: the phenotype frame, the clobber-resilient source value
+  // the card is regenerated from, and the preserved (reverse-seeded) Appearance prose when we keep it.
+  let coreCharPh: ReturnType<typeof buildPhenotypeInputs> | null = null;
+  let coreCharSourceValue = "";
+  let coreCharPreservedAppearance = "";
+  // Outlook consolidation (scene-aware-crystallized §7): a Crystallize-enabled character's settled
+  // Outlook beliefs are woven into this generated card and cleared+archived after the pending version
+  // is created. Captured in the character context block below when applicable.
+  let coreCharOutlook: { key: string; snapshot: OutlookBelief[] } | null = null;
 
   // 1. Add Global Adventure Memory / Plot Essentials
   if (adv?.memory && adv.memory.trim()) {
@@ -1464,6 +1652,93 @@ async function runGenerateCard(
       if (memBlock.trim()) {
         dlog(`[AID bg] Including ${card.title}'s memories since turn ${lastUpdateTurn} (len ${memBlock.length})`);
         baseContext += `${card.title} has these memories (most recent first):\n${memBlock}\n\n`;
+      }
+    }
+
+    // Crystallized (distilled durable memory) also informs character generation (crystallized-rework §8).
+    // Guarantee the Outlook layer reaches generation: read it from the IndexedDB state and LEAD with it,
+    // then fill with the rendered Knows/Vivid grounding (rendered card's trailing Outlook section stripped
+    // to avoid duplication — the rendered value orders Knows→Vivid→Outlook, so a naive slice truncates it).
+    const cryChKeyGen = (card.title || "").trim().toLowerCase();
+    const cryStateGen = await repo.getCrystallizedState(shortId, cryChKeyGen);
+    const outlookLinesGen = (cryStateGen?.outlook || []).map((b) => `- ${b.text}`).join("\n");
+    const crystCardGen = findCrystallizedCard(cards, card.title || "");
+    const renderedFullGen = crystCardGen?.value?.trim() || "";
+    const outlookMarkerIdxGen = renderedFullGen.search(/(^|\n)\s*Outlook\s*:/i);
+    const groundingGen = (outlookMarkerIdxGen >= 0 ? renderedFullGen.slice(0, outlookMarkerIdxGen) : renderedFullGen).trim();
+    if (outlookLinesGen || groundingGen) {
+      let cblock = `${card.title}'s crystallized memories:\n`;
+      if (outlookLinesGen) cblock += `Current self-beliefs (Outlook):\n${outlookLinesGen}\n\n`;
+      if (groundingGen) cblock += groundingGen.slice(0, 1200);
+      baseContext += `${cblock.trim()}\n\n`;
+    }
+
+    // Core Character (spec §5/§6): resolve a clobber-resilient source value, then sample (or re-inject)
+    // the phenotype body frame. The result grounds the folded Appearance generation and supplies the
+    // local key-pair/quirks splice below; skipped for a compact (templateOverride) Side Character.
+    if (!templateOverride) {
+      try {
+        // Clobber-resilient source: a prior unrestored generation could have left card.value holding
+        // only raw behavioral output (no Name/Appearance). If so, fall back to the newest version row
+        // that DOES have labeled structure, preferring a sane (non-behavioral-echo) Appearance.
+        let sourceValue = card.value || "";
+        if (extractFieldBlock(sourceValue, "Appearance") === null && extractFieldBlock(sourceValue, "Name") === null) {
+          const versions = await repo.getVersions(shortId);
+          const behavioralLabelRe = /(?:^|\n)\s*[-*•]?\s*(Background|Personality|Conversational Style|Voice|Drive)\s*:/i;
+          const candidates = versions
+            .filter((v) => v.cardId === card.id)
+            .sort((a, b) => {
+              const aNonPending = a.status !== "pending" ? 1 : 0;
+              const bNonPending = b.status !== "pending" ? 1 : 0;
+              if (aNonPending !== bNonPending) return bNonPending - aNonPending; // non-pending first
+              return a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0; // newest first
+            });
+          const hasSaneAppearance = (v: any) => {
+            const block = extractFieldBlock(v.entry, "Appearance");
+            return block !== null && !behavioralLabelRe.test(block);
+          };
+          const fallbackVersion = candidates.find(hasSaneAppearance) ?? candidates.find((v: any) => extractFieldBlock(v.entry, "Name") !== null);
+          if (fallbackVersion) sourceValue = fallbackVersion.entry;
+        }
+
+        const characterKey = (card.title || "").trim().toLowerCase();
+        const recentActs = await repo.getActions(shortId);
+        const cueText = gatherCharacterCueText(sourceValue, recentActs, card.title || "", card.keys || "");
+        const gender = resolveGender(sourceValue, cueText, card.title || "");
+        const population: "western" | "global" = settings?.phenotypePopulation === "global" ? "global" : "western";
+        const existingRecord = await repo.getPhenotype(shortId, characterKey);
+        const ph = buildPhenotypeInputs({
+          shortId, characterKey, name: card.title || card.keys || "Unknown",
+          gender, population, cueText, existingRecord: existingRecord ?? null,
+          hasEstablishedAppearance: hasEstablishedAppearance(sourceValue),
+          existingKeyPairLine: existingKeyPairLine(sourceValue),
+        });
+        await repo.putPhenotype(ph.record);
+        coreCharPh = ph;
+        coreCharSourceValue = sourceValue;
+        coreCharPreservedAppearance = ph.rewriteAppearance ? "" : buildAppearanceBlock(sourceValue);
+      } catch (err) {
+        dlog("[AID bg] phenotype appearance step failed (non-fatal):", err);
+      }
+
+      // Outlook consolidation (scene-aware-crystallized §7): for a Crystallize-enabled tracked character,
+      // snapshot the settled Outlook beliefs, inject them + the incorporation instruction so the generated
+      // Personality/Voice weaves them in, and mark them for clear+archive after the pending version lands.
+      try {
+        const cryChKey = (card.title || "").trim().toLowerCase();
+        const importantNamesForGen = (adv?.memoraidCharacters || []).map((n) => n.trim().toLowerCase()).filter(Boolean);
+        if (settings?.enableCrystallized && importantNamesForGen.includes(cryChKey)) {
+          const cryState = await repo.getCrystallizedState(shortId, cryChKey);
+          const snapshot = cryState ? snapshotOutlookForIncorporation(cryState, 2) : [];
+          if (snapshot.length > 0) {
+            // Beliefs are already injected by the Crystallized-context block above ("Current self-beliefs
+            // (Outlook)"); here we only add the instruction to weave them in, and mark them for clear+archive.
+            coreCharOutlook = { key: cryChKey, snapshot };
+            baseContext += `${OUTLOOK_INCORPORATION_INSTRUCTION.trim().replace(/\{\{title\}\}/g, card.title || "this character")}\n\n`;
+          }
+        }
+      } catch (err) {
+        dlog("[AID bg] outlook consolidation snapshot failed (non-fatal):", err);
       }
     }
   }
@@ -1510,110 +1785,61 @@ async function runGenerateCard(
     dlog("[AID bg] Populated storyInformation with length:", opts.storyInformation.length);
   }
 
+  const isCoreCharacter = normalizeType(card.type) === "character" && !isMemoraid && !templateOverride;
   let entry = "";
-  if (normalizeType(card.type) === "character" && !isMemoraid && !settings?.useSinglePassGeneration) {
-    dlog(`[AID bg] Running multi-pass character card generation for ${card.title} using ${providerName}...`);
-    
-    const currentFields = parseFields(card.value || "");
-
-    const passes = [
-      {
-        label: "Pass 1 (Core Identity, Physicality & Psychology)",
-        template: `Generate ONLY the Name, Appearance, Personality, Psychology, and Worldview fields for {{title}} in the third person based on narrative changes, taking into account their current profile:\n{existing}\nFocus strictly on {{title}} as an independent character (their own traits and core identity), rather than their interactions or relationship with {protagonist}. Format exactly as:\nName: {{title}}\nAppearance: [1-2 sentences detailing complete physical features including height, build/body type, body proportions like long legs, and signature style/colors]\nPersonality: [1-2 sentences on their core disposition, dominant traits, and how they project themselves to the world]\nPsychology: [1-2 sentences on their core internal contradiction, repressed vulnerability/shadow self, or psychological defense mechanism]\nWorldview: [1-2 sentences on how they perceive rules, morality, or social order, and their primary bias/filter for reality]\nDo not write or output any other fields.`
-      },
-      {
-        label: "Pass 2 (Behavior, Motives & Dynamics)",
-        template: `Generate ONLY the Quirks, Voice, Goals, and Dynamic ({protagonist}) fields for {{title}} in the third person based on narrative changes and {protagonist}, taking into account their current profile:\n{existing}\nGoals should focus on {{title}}'s independent desires and motivations. Dynamic ({protagonist}) is the only field that should focus on their relationship or attitude toward {protagonist}. Format exactly as:\nQuirks: [1-2 sentences on signature physical tells, nervous habits, and unconscious mannerisms under tension]\nVoice: [1-2 sentences on speech patterns, speed, tone, syntax, and vocabulary choices/dialogue style]\nGoals: [1-2 sentences on their primary desires, motivations, and what they seek or fear in the current situation]\nDynamic ({protagonist}): [1-2 sentences on their specific relationship, psychological friction, or evolving attitude toward {protagonist}]\n\n[CRITICAL RELATIONSHIP PACING DIRECTIVE]\nWhen generating or updating the "Dynamic ({protagonist}):" field, you must enforce realistic psychological inertia and continuity based strictly on the character's pre-existing profile and the immediate context window. \n1. NO SUDDEN ESCALATION: Relationships cannot leap from strangers or casual acquaintances to deep intimacy, unearned trust, or intense codependency—nor to absolute hatred, permanent enmity, or extreme paranoia—within a handful of scene turns, regardless of how high-stakes or dramatic the immediate actions are.\n2. EVALUATE TRANSITIONS: Read the current character profile. If the character's baseline configuration was guarded and defensive, or conversely highly trusting and friendly, the new dynamic text must capture the messy, realistic friction of that transition (e.g., emotional whiplash, cognitive dissonance, lingering caution, or structural shock).\n3. PROGRESSIVE TRACE: Allow behavioral walls to soften or harden organically, but explicitly forbid the character from displaying complete psychological submission, sudden romantic attachment, or instant implacable hatred unless a long, multi-scene chronological history of shared baseline safety or severe betrayal justifies it. Focus the current dynamic update strictly on the immediate realistic increment of their interaction.\n\nDo NOT repeat or output the existing Name, Appearance, Personality, Psychology, or Worldview fields.`
-      }
-    ];
-
-    for (const pass of passes) {
-      dlog(`[AID bg] Executing ${pass.label} using ${providerName}...`);
-      const existingStr = reconstructFields(currentFields, protagonist);
-      const passTemplate = pass.template.replace("{existing}", existingStr || "No existing profile.");
-      const resolvedPassCommand = resolveTitleToken(resolveCommand(passTemplate, protagonist), name);
-      
-      const system =
-        `You are a creative writing assistant updating a character card profile for the target character "${name}". ` +
-        `CRITICAL: Do NOT confuse the target character "${name}" with the protagonist ("${protagonist}") or other characters present in the narrative context. ` +
-        `All fields (Appearance, Personality, Psychology, Worldview, Quirks, Voice, Goals) must describe "${name}" and only "${name}". ` +
-        `The "Dynamic (${protagonist})" field must describe "${name}"'s relationship and attitude towards the protagonist "${protagonist}". ` +
-        `Do not mix them up. Follow the format and instructions exactly. ` +
-        `CRITICAL LENGTH CONSTRAINT: Keep descriptions highly concise, dense, and condensed. Limit each field value strictly to 1-2 short, focused sentences (maximum 30 words per field). Avoid verbose, flowery, or redundant phrasing.` +
-        `\nCRITICAL: The entire generated card entry must be strictly under ${characterCardLimit} characters in length.`;
-      // The narrative context is identical across all passes for this character; cache it so passes
-      // after the first read the shared prefix at ~0.1x instead of re-sending it at full price.
-      const cachePrefix = `Narrative Context:\n${opts.storyInformation || "No narrative context."}\n\n`;
-      const user = `Instructions:\n${resolvedPassCommand}`;
-
-      const rawResponse = await provider.complete(system, user, cachePrefix);
-      let passOutput = cleanLlmResponse(rawResponse).trim();
-      if (passOutput.startsWith("[") && passOutput.endsWith("]")) {
-        passOutput = passOutput.slice(1, -1).trim();
-      }
-      
-      const newFields = parseFields(passOutput);
-      for (const [k, v] of Object.entries(newFields)) {
-        currentFields[k] = v;
-      }
-    }
-    entry = `[\n${reconstructFields(currentFields, protagonist)}\n]`;
-    dlog(`[AID bg] Multi-pass generation complete for ${card.title}. Total length: ${entry.length}`);
+  if (isCoreCharacter) {
+    // Core Character generation (spec §5): phenotype-grounded Appearance + the interior compass
+    // (Background / Personality / Conversational Style / Voice / Drive). BYO providers have no ~900-char
+    // output cap, so the whole profile is produced in ONE folded CORE_CARD_TEMPLATE call; the
+    // local Appearance / key-pair / quirks are then spliced in by assembleCoreCard. `coreCharPh` may be
+    // null only if phenotype sampling threw (logged) — degrade to no guidance, still emitting the format.
+    const ph = coreCharPh;
+    dlog(`[AID bg] Running Core Character generation for ${card.title} (provenance=${ph?.record.provenance ?? "none"}, rewrite=${ph?.rewriteAppearance ?? false}) using ${providerName}...`);
+    const foldedTemplate = buildCoreCardCommand().replace("{appearanceGuidance}", ph?.appearanceGuidance || "");
+    const foldedCommand = resolveTitleToken(resolveCommand(foldedTemplate, protagonist), name);
+    const system =
+      `You are a creative writing assistant generating a character card for the target character "${name}". ` +
+      `Write in third person about "${name}"; never confuse them with the protagonist ("${protagonist}") or other characters in the context. ` +
+      `Follow the field format and instructions EXACTLY, and output only the labeled lines and nothing else.`;
+    const user = `Narrative Context:\n${opts.storyInformation || "No narrative context."}\n\nInstructions:\n${foldedCommand}`;
+    const folded = cleanLlmResponse(await provider.complete(system, user)).trim().replace(/^\[+/, "").replace(/\]+$/, "").trim();
+    // Rewrite path: use the generated Appearance (fallback to the descriptor phrase / preserved prose).
+    // Preserve path: keep the authored appearance and discard the generated one.
+    const appearanceBlock = ph?.rewriteAppearance
+      ? (extractFieldBlock(folded, "Appearance") || ph?.record.descriptorPhrase || coreCharPreservedAppearance || "")
+      : (coreCharPreservedAppearance || extractFieldBlock(folded, "Appearance") || "");
+    const behavioral = extractBehavioralBlock(folded);
+    const carryFields = extractCarriedTopLevelFields(coreCharSourceValue || card.value || "");
+    entry = assembleCoreCard({
+      name, appearanceBlock, behavioral, carryFields,
+      keyPairLine: ph?.keyPairLine, quirks: ph?.quirks,
+    });
+    dlog(`[AID bg] Core Character generation complete for ${card.title}. Total length: ${entry.length}`);
   } else {
-    let finalCommand = command;
-    if (normalizeType(card.type) === "character" && !isMemoraid && settings?.useSinglePassGeneration) {
-      dlog(`[AID bg] Running single-pass character card generation for ${card.title} using ${providerName}...`);
-      const combinedTemplate = `Generate the Name, Appearance, Personality, Psychology, Worldview, Quirks, Voice, Goals, and Dynamic ({protagonist}) fields for {{title}} in the third person based on narrative changes, taking into account their current profile:
-{existing}
-
-Format exactly as:
-Name: {{title}}
-Appearance: [1-2 sentences detailing complete physical features including height, build/body type, body proportions like long legs, and signature style/colors]
-Personality: [1-2 sentences on their core disposition, dominant traits, and how they project themselves to the world]
-Psychology: [1-2 sentences on their core internal contradiction, repressed vulnerability/shadow self, or psychological defense mechanism]
-Worldview: [1-2 sentences on how they perceive rules, morality, or social order, and their primary bias/filter for reality]
-Quirks: [1-2 sentences on signature physical tells, nervous habits, and unconscious mannerisms under tension]
-Voice: [1-2 sentences on speech patterns, speed, tone, syntax, and vocabulary choices/dialogue style]
-Goals: [1-2 sentences on their primary desires, motivations, and what they seek or fear in the current situation]
-Dynamic ({protagonist}): [1-2 sentences on their specific relationship, psychological friction, or evolving attitude toward {protagonist}]
-
-[CRITICAL RELATIONSHIP PACING DIRECTIVE]
-When generating or updating the "Dynamic ({protagonist}):" field, you must enforce realistic psychological inertia and continuity based strictly on the character's pre-existing profile and the immediate context window. 
-1. NO SUDDEN ESCALATION: Relationships cannot leap from strangers or casual acquaintances to deep intimacy, unearned trust, or intense codependency—nor to absolute hatred, permanent enmity, or extreme paranoia—within a handful of scene turns, regardless of how high-stakes or dramatic the immediate actions are.
-2. EVALUATE TRANSITIONS: Read the current character profile. If the character's baseline configuration was guarded and defensive, or conversely highly trusting and friendly, the new dynamic text must capture the messy, realistic friction of that transition (e.g., emotional whiplash, cognitive dissonance, lingering caution, or structural shock).
-3. PROGRESSIVE TRACE: Allow behavioral walls to soften or harden organically, but explicitly forbid the character from displaying complete psychological submission, sudden romantic attachment, or instant implacable hatred unless a long, multi-scene chronological history of shared baseline safety or severe betrayal justifies it. Focus the current dynamic update strictly on the immediate realistic increment of their interaction.`;
-      finalCommand = resolveCommand(combinedTemplate, protagonist);
-      finalCommand = finalCommand.replace("{existing}", card.value || "No existing profile.");
-    }
-
-    finalCommand = resolveTitleToken(finalCommand, name);
-
+    // Side Character (templateOverride), locations, custom/faction, and MemorAID (Memory) cards: a
+    // single templated provider call with the resolved card-type command.
+    const finalCommand = resolveTitleToken(command, name);
     const system = `You are a creative writing assistant updating a card for ${name}. Follow the format and instructions exactly. ` +
       `CRITICAL LENGTH CONSTRAINT: Keep descriptions highly concise, dense, and condensed. Limit each field value strictly to 1-2 short, focused sentences (maximum 30 words per field). Avoid verbose, flowery, or redundant phrasing.` +
       `\nCRITICAL: The entire generated card entry must be strictly under ${characterCardLimit} characters in length.`;
     const user = `Narrative Context:\n${opts.storyInformation || "No narrative context."}\n\nInstructions:\n${finalCommand}`;
-
-    const rawResponse = await provider.complete(system, user);
-    entry = cleanLlmResponse(rawResponse);
-
-    if (normalizeType(card.type) === "character" && !isMemoraid && settings?.useSinglePassGeneration) {
-      let val = entry.trim();
-      if (!val.startsWith("[")) {
-        val = `[\n${val}\n]`;
-      }
-      entry = val;
-    }
+    entry = cleanLlmResponse(await provider.complete(system, user));
   }
 
   if (!isMemoraid) {
     entry = applyFormattingMode(entry, formattingMode);
   }
 
-  if (!isMemoraid && entry.length > characterCardLimit) {
+  // The Core Character card is intentionally rich (spec §4.2, whole card ~2,000 chars); the 600-char
+  // characterCardLimit is the Side-Character/compact budget and would butcher it. Cap Core Characters at
+  // a generous ceiling instead, well under AID's ~4,000-char EditMemory limit.
+  const CORE_CHARACTER_CHAR_CAP = 2400;
+  const effectiveCardLimit = isCoreCharacter ? CORE_CHARACTER_CHAR_CAP : characterCardLimit;
+  if (!isMemoraid && entry.length > effectiveCardLimit) {
     if (entry.startsWith("[") && entry.endsWith("]")) {
-      entry = entry.slice(0, characterCardLimit - 2).trimEnd() + "\n]";
+      entry = entry.slice(0, effectiveCardLimit - 2).trimEnd() + "\n]";
     } else {
-      entry = entry.slice(0, characterCardLimit);
+      entry = entry.slice(0, effectiveCardLimit);
     }
   }
 
@@ -1625,7 +1851,75 @@ When generating or updating the "Dynamic ({protagonist}):" field, you must enfor
     source: "card", status: "pending", createdAt: new Date().toISOString(), actionCount: totalActionsCount,
     cardId: card.id, cardType: card.type || "character",
   } as any);
+
+  // The snapshot beliefs were woven into this generated card — clear them from Crystallized (archived
+  // first, reason "incorporated"; they re-accumulate via distillation). Scene-aware-crystallized §7.
+  if (coreCharOutlook) {
+    await consolidateOutlookState(shortId, coreCharOutlook.key, coreCharOutlook.snapshot, totalActionsCount);
+  }
   return { id, characterName: name, changeSummary: `${providerName.toUpperCase()}-generated update (Action #${totalActionsCount})`, entry };
+}
+
+/** Re-roll a character's sampled body (phenotype), regenerate the Appearance prose from the new frame,
+ *  and re-splice the new BWH/SWH key-pair line + merged Quirks — carrying Scent and the behavioral block
+ *  verbatim — as a pending proposal. `phenotypeRollback` snapshots the prior record so rejecting the
+ *  proposal restores it. */
+async function runRerollAppearance(shortId: string, cardId: string): Promise<{ id?: string; characterName?: string; changeSummary?: string; entry?: string; error?: string }> {
+  const cards = await repo.getCards(shortId);
+  const card = cards.find((c) => c.id === cardId && !c.deletedAt);
+  if (!card) return { error: "Story Card not found locally — try Backfill." };
+  const characterKey = (card.title || "").trim().toLowerCase();
+  const rec = await repo.getPhenotype(shortId, characterKey);
+  if (!rec) return { error: "No sampled body to re-roll — generate this character first." };
+  const rr = rerollPhenotype(rec);
+  if (!rr) return { error: "No sampled body to re-roll — this character is non-human or ungendered." };
+  await repo.putPhenotype(rr.record);
+
+  const providerOrError = await getActiveProvider();
+  if ("error" in providerOrError) return { error: providerOrError.error };
+  const provider = providerOrError;
+  const settings = await repo.getSettings();
+  const adv = await repo.getAdventure(shortId);
+  const protagonist = (adv?.protagonistName && adv.protagonistName.trim()) || parseProtagonistName(adv?.memory) || "the player character";
+  const sourceValue = card.value || "";
+
+  // PASS 1 (physical): regenerate Appearance + Scent from the re-rolled phenotype frame via the
+  // provider seam.
+  const appearanceCommand = resolveTitleToken(resolveCommand(buildCoreAppearanceCommand().replace("{appearanceGuidance}", rr.appearanceGuidance), protagonist), card.title || "");
+  const system = `You are a creative writing assistant generating the physical description for "${card.title}". Write in third person about "${card.title}"; output ONLY the Appearance and Scent labeled lines and nothing else.`;
+  const user = `Instructions:\n${appearanceCommand}`;
+  let physicalRaw = "";
+  try {
+    physicalRaw = cleanLlmResponse(await provider.complete(system, user));
+  } catch (err: any) {
+    return { error: `Provider generation failed: ${err?.message || err}` };
+  }
+  const physical = `[\n${physicalRaw.trim().replace(/^\[+/, "").replace(/\]+$/, "").trim()}\n]`;
+  const appearanceBlock = extractFieldBlock(physical, "Appearance") || rr.record.descriptorPhrase || "";
+  const scentBlock = extractFieldBlock(physical, "Scent");
+
+  // Carry the EXISTING behavioral fields verbatim — a re-roll changes the body, not who they are.
+  const behavioralFields = ["Background", "Personality", "Conversational Style", "Voice", "Drive"]
+    .map((f) => { const b = extractFieldBlock(sourceValue, f); return b ? `${f}: ${b}` : null; })
+    .filter(Boolean).join("\n");
+  const behavioral = scentBlock ? `Scent: ${scentBlock}\n${behavioralFields}` : behavioralFields;
+  const carryFields = extractCarriedTopLevelFields(sourceValue);
+  const entry = assembleCoreCard({
+    name: card.title || card.keys || "Unknown",
+    appearanceBlock, carryFields, keyPairLine: rr.keyPairLine, quirks: rr.quirks, behavioral,
+  });
+
+  const name = card.title || card.keys;
+  const totalActionsCount = await repo.getActionCount(shortId);
+  const id = crypto.randomUUID();
+  await repo.putVersion({
+    id, shortId, characterName: name, entry, changeSummary: `Body re-roll (Action #${totalActionsCount})`,
+    source: "card", status: "pending", createdAt: new Date().toISOString(), actionCount: totalActionsCount,
+    cardId: card.id, cardType: card.type || "character",
+    // The new body was persisted above; snapshot the PRIOR record so rejecting this proposal restores it.
+    phenotypeRollback: rec,
+  } as any);
+  return { id, characterName: name, changeSummary: `Body re-roll (Action #${totalActionsCount})`, entry };
 }
 
 export async function checkLookbackAutoUpdates(
@@ -1633,7 +1927,10 @@ export async function checkLookbackAutoUpdates(
   newActions: any[]
 ): Promise<void> {
   const settings = await repo.getSettings();
-  if (settings?.manualMode) return;
+  // Automatic Story Card update proposals are OPT-IN (the "Enable Automatic Updates" toggle, default
+  // OFF). Previously gated on the legacy negative-polarity `manualMode` (default off → ran anyway),
+  // which ignored the toggle and generated proposals even when the user had left it unchecked.
+  if (!settings?.enableAutomaticUpdates) return;
   const lookbackSize = settings?.analyzeWindow ?? 20;
 
   const allActions = await repo.getActions(shortId);
@@ -1852,498 +2149,8 @@ export function extractThoughtLoop(text: string): string | null {
 }
 
 
-export async function checkMemorAIDUpdates(
-  shortId: string,
-  pendingActionText?: string,
-  pendingActionType?: string,
-  recordTiming = false
-): Promise<string[]> {
-  await ensureAuth();
-  const updatedNames: string[] = [];
-  // Wall-clock start for the intercept-path timing readout. Only recorded (at function exit)
-  // when recordTiming is set AND the run actually invoked the model — short-circuits don't count.
-  const timingStart = Date.now();
-  let didGenerate = false;
-  const cards = await repo.getCards(shortId);
-  dlog(`[MemorAID] checkMemorAIDUpdates called for ${shortId}. Total cards in local DB:`, cards ? cards.length : 0);
-  if (!cards || !cards.length) return updatedNames;
-
-  const settings = ((await repo.getSettings()) || {
-    formattingMode: DEFAULT_FORMATTING_MODE,
-    cardCommands: DEFAULT_CARD_COMMANDS
-  }) as Settings;
-  const thoughtCardLimit = settings?.thoughtCardLimit ?? 2000;
-  dlog(`[MemorAID] Settings loaded:`, (await repo.getSettings()) ? "yes" : "no (using defaults)");
-
-  // 1. Check if Configure MemorAID card exists
-  const configCard = cards.find(
-    (c) =>
-      !c.deletedAt &&
-      (c.title || "").toLowerCase() === "configure memoraid"
-  );
-  if (!configCard) {
-    dlog("[MemorAID] No Configure MemorAID card found. Skipping memory updates.");
-    return updatedNames;
-  }
-  const description = configCard.description || "";
-  dlog(`[MemorAID] Parsing Configure MemorAID card description: "${description}"`);
-  const match = description.match(/IMPORTANT_CHARACTERS\s*:\s*([\s\S]+?)(?=\n\s*[A-Z_]+:|$)/i);
-  if (!match || !match[1]) {
-    dlog("[MemorAID] Configure MemorAID card description is missing IMPORTANT_CHARACTERS list. Skipping memory updates.");
-    return updatedNames;
-  }
-  const importantNames = match[1]
-    .split(/[,\r\n]+/)
-    .map((name) => name.trim().toLowerCase())
-    .filter((name) => name.length > 0);
-  dlog(`[MemorAID] Parsed important characters:`, importantNames);
-  if (importantNames.length === 0) {
-    dlog("[MemorAID] Configure MemorAID card lists 0 important characters. Skipping memory updates.");
-    return updatedNames;
-  }
-
-  const allActions = await repo.getActions(shortId);
-  allActions.sort((a, b) => {
-    if (a.createdAt && b.createdAt) return a.createdAt.localeCompare(b.createdAt);
-    return 0;
-  });
-
-  const isContinue = pendingActionType === "continue";
-  const isRetry = pendingActionType === "retry";
-
-  const checkActions = [...allActions];
-  if (pendingActionText) {
-    checkActions.push({
-      id: "pending",
-      text: pendingActionText,
-      type: pendingActionType || "do",
-      createdAt: new Date().toISOString()
-    } as any);
-  } else if (isRetry && checkActions.length >= 2) {
-    // If it's a retry and there is no pending action text, the last action in the database
-    // is the AI response being retried. Pop it from the check actions so we do not react to it
-    // or detect presence from it.
-    checkActions.pop();
-  }
-
-  const latestAction = checkActions[checkActions.length - 1];
-
-  if (!latestAction || (!latestAction.text && !isContinue)) {
-    dlog("[MemorAID] No actions found or latest action has empty text.");
-    return updatedNames;
-  }
-  if (latestAction) {
-    dlog(`[MemorAID] Latest action text: "${(latestAction.text || "").slice(0, 100)}..."`);
-  }
-
-  const memoraidLookback = settings?.memoraidLookback ?? 8;
-  const memoraidPresenceLookback = settings?.memoraidPresenceLookback ?? 5;
-
-  // Slice to the last N actions to check presence in the active scene
-  const presenceActions = sliceLastActions(checkActions, memoraidPresenceLookback);
-  const presenceText = presenceActions.map((a) => a.text || "").join("\n");
-
-  const triggered: { id: string; title: string; keys: string; baseCard?: CardRow }[] = [];
-
-  for (const impName of importantNames) {
-    // 1. Find if there is an existing character card matching this important name
-    const baseCard = cards.find((c) => {
-      if (c.type.toLowerCase() !== "character") return false;
-      if (c.deletedAt) return false;
-      if ((c.title || "").toLowerCase().endsWith(" (memory)")) return false;
-
-      const titleLower = (c.title || "").toLowerCase();
-      const keysList = (c.keys || "").split(/[,;]+/).map(k => k.trim().toLowerCase()).filter(Boolean);
-
-      if (titleLower === impName || keysList.includes(impName)) return true;
-
-      if (titleLower.includes(" and ") || titleLower.includes(" & ")) {
-        const parts = titleLower.split(/\s+(?:and|&)\s+/);
-        if (parts.includes(impName)) return true;
-      }
-
-      for (const k of keysList) {
-        if (k.includes(" and ") || k.includes(" & ")) {
-          const parts = k.split(/\s+(?:and|&)\s+/);
-          if (parts.includes(impName)) return true;
-        }
-      }
-
-      return false;
-    });
-
-    const title = baseCard ? (baseCard.title || "") : capitalizeWords(impName);
-    const keys = baseCard ? (baseCard.keys || "") : impName;
-    const charId = baseCard ? baseCard.id : `virtual-${impName}`;
-
-    // 2. Check if triggered in the active scene lookback window
-    const isTriggered = isCharacterTriggered(presenceText, title, keys);
-    dlog(`[MemorAID] Character "${title}" (from important list: "${impName}") triggered in scene? ${isTriggered} (keys: "${keys}")`);
-
-    if (isTriggered) {
-      triggered.push({
-        id: charId,
-        title,
-        keys,
-        baseCard
-      } as any);
-    }
-  }
-
-  const seenIds = new Set<string>();
-  const dedupledTriggered: typeof triggered = [];
-  for (const item of triggered) {
-    if (!seenIds.has(item.id)) {
-      seenIds.add(item.id);
-      dedupledTriggered.push(item);
-    }
-  }
-
-  if (dedupledTriggered.length === 0) {
-    dlog("[MemorAID] No important characters were triggered in the active scene lookback window.");
-    return updatedNames;
-  }
-
-
-  const adv = await repo.getAdventure(shortId);
-
-  // 1. Resolve target memory cards (creating them in a batch if missing)
-  const creationsToRun: { character: any; cardRow: CardRow; req: GqlMutationRequest }[] = [];
-  const characterToMemCardMap = new Map<string, CardRow>();
-
-  for (const c of dedupledTriggered) {
-    const titleVal = c.title || "";
-    const memCardTitle = `${titleVal} (Memory)`;
-    const memCardKeys = c.keys || titleVal;
-
-    const existingMemCard = cards.find(
-      (x) =>
-        (x.type.toLowerCase() === "memory" || x.type.toLowerCase() === "character") &&
-        !x.deletedAt &&
-        (x.title || "").toLowerCase() === memCardTitle.toLowerCase()
-    );
-
-    if (existingMemCard) {
-      characterToMemCardMap.set(c.id, existingMemCard);
-    } else {
-      dlog(`[MemorAID] Queueing new memory card creation for ${c.title}...`);
-      const createOp = await repo.getOp("SaveQueueStoryCard");
-      const createQuery = createOp?.query || DEFAULT_GQL_QUERIES.SaveQueueStoryCard;
-      const tempId = Math.floor(Math.random() * 1e9).toString();
-      const initialValue = "[\n - none\n]";
-      const newCardRow: CardRow = {
-        id: tempId,
-        shortId,
-        type: "Memory",
-        title: memCardTitle,
-        keys: memCardKeys,
-        value: initialValue,
-        description: "",
-      };
-      const req = buildCardCreate(gqlEndpoint!, createQuery, sessionToken!, newCardRow, initialValue);
-      creationsToRun.push({ character: c, cardRow: newCardRow, req });
-    }
-  }
-
-  if (creationsToRun.length > 0) {
-    await ensureAuth();
-    if (sessionToken && isSafeEndpoint(gqlEndpoint)) {
-      dlog(`[MemorAID] Batch creating ${creationsToRun.length} memory cards...`);
-      const creationOps: GqlOperation[] = creationsToRun.map(item => JSON.parse(item.req.body)[0]);
-      try {
-        const batchReq = buildGraphQLMutation(gqlEndpoint!, creationOps, sessionToken!);
-        const res = await fetch(batchReq.url, { method: "POST", headers: batchReq.headers, body: batchReq.body });
-        if (!res.ok) {
-          console.error(`[MemorAID] Batch creation push HTTP failure:`, res.status);
-        } else {
-          const jsonArray = await res.json() as any[];
-          for (let i = 0; i < creationsToRun.length; i++) {
-            const item = creationsToRun[i]!;
-            const resJson = jsonArray[i];
-            const returnedCard = resJson?.data?.updateStoryCard?.storyCard ||
-                                 resJson?.data?.saveQueueStoryCard?.storyCard ||
-                                 resJson?.data?.updateStoryCard ||
-                                 resJson?.data?.saveQueueStoryCard;
-            const isSuccess = resJson?.data?.updateStoryCard?.success || resJson?.data?.saveQueueStoryCard?.success || returnedCard;
-            if (!isSuccess) {
-              const msg = resJson?.data?.updateStoryCard?.message || resJson?.errors?.[0]?.message || "Mutation failed";
-              console.error(`[MemorAID] AI Dungeon rejected memory card creation for ${item.character.title}:`, msg);
-              continue;
-            }
-            const actualId = returnedCard?.id || item.cardRow.id;
-            const targetMemCard = {
-              ...item.cardRow,
-              id: actualId,
-            };
-            await repo.putCards(shortId, [targetMemCard]);
-            characterToMemCardMap.set(item.character.id, targetMemCard);
-            dlog(`[MemorAID] Successfully created empty memory card for ${item.character.title} (ID: ${actualId})`);
-
-            // Notify the page so its Apollo cache refetches and the NEW card shows up in
-            // AID's story card list without a reload (the other creation paths already do this).
-            broadcastToTabs({
-              kind: "approvedCardSync",
-              payload: { ok: true, source: "card", cardId: actualId, value: targetMemCard.value || "", description: targetMemCard.description || "" }
-            });
-          }
-        }
-      } catch (err) {
-        console.error(`[MemorAID] Failed to batch create memory cards:`, err);
-      }
-    } else {
-      console.warn("[MemorAID] Missing session token or endpoint. Cannot create memory cards.");
-    }
-  }
-
-  let turnNow = countActions(allActions);
-  if (pendingActionText || isContinue) {
-    turnNow += 1;
-  }
-  const generationResults: { character: any; targetMemCard: CardRow; trimmedMemory: string; newDesc: string }[] = [];
-
-  if (dedupledTriggered.length > 0) {
-    const providerOrError = await getActiveProvider();
-    if ("error" in providerOrError) {
-      console.warn(`[MemorAID] Cannot generate memories: ${providerOrError.error}`);
-    } else {
-      const provider = providerOrError;
-      await Promise.all(dedupledTriggered.map(async (c) => {
-        const targetMemCard = characterToMemCardMap.get(c.id);
-        if (!targetMemCard) return;
-
-        let needsPruneSave = false;
-        const currentDesc = targetMemCard.description || "";
-        const prevNotes = parseMemoNotes(currentDesc);
-        const prunedDesc = buildMemoNotes(prevNotes);
-        
-        if (currentDesc !== prunedDesc) {
-          dlog(`[MemorAID] Description for ${c.title} is oversized or needs pruning (${currentDesc.length} -> ${prunedDesc.length} chars). Queueing self-healing save.`);
-          targetMemCard.description = prunedDesc;
-          needsPruneSave = true;
-        }
-
-        const hadThoughtForThisTurn = prevNotes.thoughtLog.some(e => e.turn === turnNow);
-        if (isRetry) {
-          // Filter out the existing thought for this turn so we can regenerate it
-          prevNotes.thoughtLog = prevNotes.thoughtLog.filter(e => e.turn !== turnNow);
-          needsPruneSave = true;
-        }
-
-        if (prevNotes.thoughtLog.some(e => e.turn === turnNow)) {
-          dlog(`[MemorAID] Already generated thought for turn ${turnNow} for ${c.title}. Skipping generation.`);
-          if (needsPruneSave) {
-            generationResults.push({
-              character: c,
-              targetMemCard,
-              trimmedMemory: targetMemCard.value || "",
-              newDesc: prunedDesc
-            });
-          }
-          return;
-        }
-
-        const existingMemCard = cards.find(
-          (x) =>
-            (x.type.toLowerCase() === "memory" || x.type.toLowerCase() === "character") &&
-            !x.deletedAt &&
-            (x.title || "").toLowerCase() === `${c.title} (Memory)`.toLowerCase()
-        );
-
-        let isMentioned = isCharacterTriggered(latestAction.text || "", c.title || "", c.keys || "");
-        if (!isMentioned && (isContinue || latestAction.type === "continue")) {
-          // If we are continuing, look back through the chain of preceding continuations
-          // to see if the character was mentioned in any action within this continuous sequence.
-          let idx = checkActions.length - 1;
-          while (idx >= 0) {
-            const act = checkActions[idx];
-            if (!act) break;
-            if (isCharacterTriggered(act.text || "", c.title || "", c.keys || "")) {
-              isMentioned = true;
-              break;
-            }
-            if (act.type !== "continue") {
-              break;
-            }
-            idx--;
-          }
-        }
-        const hasRealThoughts = prevNotes.thoughtLog.some(e => e.text && e.text !== "[none]");
-        const shouldGenerate = isMentioned || (isRetry && hadThoughtForThisTurn);
-
-        if (existingMemCard && hasRealThoughts && !shouldGenerate) {
-          dlog(`[MemorAID] Character ${c.title} is not mentioned in the latest action and already has thoughts. Skipping thought generation to prevent repeat triggers.`);
-          return;
-        }
-
-        dlog(`[MemorAID] Generating memory for ${c.title} using 3rd party provider...`);
-        // Universal prompt: pure structured DATA (profile, on-stage roster from trigger matches over
-        // the Scene Presence Lookback window + held action, prior context, and the single latest
-        // action), with all directive wording left to the editable template. The split lets the
-        // template's "react to the latest action / [none] if absent" rule resolve a clear boundary —
-        // without it a strict follower (Claude) can't pick the latest action and bails to [none].
-        const recentActions = sliceLastActions(checkActions, memoraidLookback);
-        const priorActionsText = recentActions.slice(0, -1).map((a) => a.text || "").join("\n").slice(0, 3000);
-        const latestActionText = (latestAction.text || "").slice(0, 1500);
-        const presentEntities = detectPresentCards(presenceText, cards);
-
-        const template = settings?.cardCommands?.memoraid || DEFAULT_CARD_COMMANDS.memoraid || "";
-        const protagonist = (adv?.protagonistName && adv.protagonistName.trim()) || parseProtagonistName(adv?.memory) || "the player character";
-        const title = c.title || "Character";
-        const titleWithKeys = c.keys ? `${title} (also referred to as: ${c.keys})` : title;
-        let resolvedCommand = resolveTitleToken(resolveCommand(template, protagonist), titleWithKeys);
-        if (title.toLowerCase().includes(" and ") || title.toLowerCase().includes(" & ")) {
-          const names = title.split(/\s+(?:and|&)\s+/i).map(n => n.trim());
-          resolvedCommand += `\n\n[JOINT CHARACTER CARD DIRECTIVE]: Since ${title} is a joint character card representing multiple characters, you MUST generate separate, consecutive Intake-Thought-Action loops for each character individually, in this exact order: first a loop for ${names[0]}, and then a loop for ${names[1]}.
-- You must explicitly start each character's Intake line by referencing that character by name as the subject (for example: "- Intake: ${names[0]} perceives..." and "- Intake: ${names[1]} perceives...").
-- Output both loops sequentially within the single outer brackets, with each line starting with a bullet point. Do not combine their thoughts into a single loop.`;
-        }
-
-        const thoughtLookbackVal = settings?.memoraidThoughtLookback ?? 0;
-        const thoughtContext = thoughtLookbackVal > 0
-          ? buildThoughtContext(prevNotes.thoughtLog, thoughtLookbackVal, title, 3000)
-          : "";
-
-        let charProfile = c.baseCard?.value ? `Character Profile for ${title}:\n${stripOuterBrackets(c.baseCard.value)}\n\n` : "";
-        if (thoughtContext) {
-          charProfile = thoughtContext + "\n\n" + charProfile;
-        }
-        const system = `You are a creative writing assistant. Your task is to generate first-person subjective thoughts for a character based on their profile and the narrative context. Follow the instructions and formatting rules exactly.\nCRITICAL: The generated thoughts must be strictly under ${thoughtCardLimit} characters in length.`;
-        const { cachePrefix, user } = buildMemoraidPrompt({ charProfile, priorActionsText, latestActionText, presentEntities, instructions: resolvedCommand });
-        try {
-          didGenerate = true;
-          // Prompt-cache the shared scene prefix only when ≥2 characters react this turn (guaranteed
-          // reuse); for a lone character there is no second read to amortize the cache-write premium,
-          // so fold the prefix into the user content instead.
-          const rawResponse = dedupledTriggered.length >= 2
-            ? await provider.complete(system, user, cachePrefix)
-            : await provider.complete(system, cachePrefix + user);
-          dlog(`[MemorAID] Raw provider response for ${c.title}: ${JSON.stringify(rawResponse).slice(0, 600)}`);
-          let inner = cleanLlmResponse(rawResponse);
-          
-          const lowerRaw = rawResponse.trim().toLowerCase();
-          const lowerInner = inner.trim().toLowerCase();
-          if (lowerRaw === "[none]" || lowerRaw === "none" || lowerInner === "[none]" || lowerInner === "none" || lowerInner === "- none") {
-            dlog(`[MemorAID] LLM returned none for ${c.title}. Skipping value update, but saving thoughtLog check.`);
-            const newDesc = buildMemoNotes({
-              thoughtLog: pushThought(prevNotes.thoughtLog, { turn: turnNow, text: "[none]" }),
-            });
-            generationResults.push({ character: c, targetMemCard, trimmedMemory: targetMemCard.value || "", newDesc });
-            return;
-          }
-
-          const cleanedInner = inner.replace(/^\s*\[?\s*[^\n\]]*\bThoughts:\s*/i, "")
-            .replace(/^[\s[]+/, "").replace(/[\s\]]+$/, "").trim();
-          // If a weak model buried the three lines in Markdown/scaffold, recover just those lines so
-          // the stored card stays clean regardless of how well the model followed the format.
-          const salvaged = extractThoughtLoop(cleanedInner);
-
-          // If the model returned a character profile instead of thoughts (weak model confusing the
-          // task), discard it — keep the prior thought rather than poison the card and AID's context.
-          // BUT do not discard if we successfully salvaged a valid thought loop from the output!
-          if (looksLikeCharacterProfile(rawResponse) && !salvaged) {
-            console.warn(`[MemorAID] Discarded generation for ${c.title}: model returned a character profile, not thoughts. The selected model is too weak for this task — use a more capable model (e.g. gemini-2.5-flash or a Claude model).`);
-            return;
-          }
-
-          if (isPlaceholderOrGarbageResponse(rawResponse) || isPlaceholderOrGarbageResponse(inner)) {
-            console.warn(`[MemorAID] Discarded generation for ${c.title}: model returned template placeholders or example text, not actual thoughts.`);
-            return;
-          }
-
-          if (salvaged) {
-            dlog(`[MemorAID] Salvaged Intake/Thought/Action loop from messy output for ${c.title}.`);
-            inner = salvaged;
-          } else {
-            inner = cleanedInner;
-          }
-          const thoughtsHeader = `${title.trim()}'s Thoughts:`;
-          const newThoughtBlock = `[${thoughtsHeader}\n${inner}\n]`;
-          const newLog = pushThought(prevNotes.thoughtLog, { turn: turnNow, text: newThoughtBlock });
-          const newDesc = buildMemoNotes({ thoughtLog: newLog });
-
-          const thoughtLookbackVal = settings?.memoraidThoughtLookback ?? 1;
-          let trimmedMemory = "";
-          if (thoughtLookbackVal > 1) {
-            trimmedMemory = renderThoughtWindow(newLog, thoughtLookbackVal, title, thoughtCardLimit);
-          }
-          if (!trimmedMemory) {
-            trimmedMemory = newThoughtBlock;
-          }
-
-          const ENTRY_CAP = thoughtCardLimit;
-          if (trimmedMemory.length > ENTRY_CAP) {
-            trimmedMemory = trimmedMemory.slice(0, ENTRY_CAP - 1).trimEnd() + "]";
-          }
-          dlog(`[MemorAID] Successfully generated 3rd-party memories for ${c.title}: "${trimmedMemory}"`);
-
-          generationResults.push({ character: c, targetMemCard, trimmedMemory, newDesc });
-        } catch (err) {
-          console.error(`[MemorAID] 3rd party generation failed for ${c.title}:`, err);
-        }
-      }));
-    }
-  }
-
-  const savesToRun: { character: any; targetMemCard: CardRow; trimmedMemory: string; newDesc: string; req: GqlMutationRequest }[] = [];
-  const updateOp = await repo.getOp("UseAutoSaveStoryCard");
-  const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
-
-  for (const item of generationResults) {
-    const memCardKeys = item.targetMemCard.keys || item.character.title || "";
-    const updatedCard = { ...item.targetMemCard, type: "Memory", keys: memCardKeys, value: item.trimmedMemory, description: item.newDesc };
-    const req = buildCardSave(gqlEndpoint!, updateQuery, sessionToken!, updatedCard, item.trimmedMemory);
-    savesToRun.push({ character: item.character, targetMemCard: item.targetMemCard, trimmedMemory: item.trimmedMemory, newDesc: item.newDesc, req });
-  }
-
-  if (savesToRun.length > 0) {
-    await ensureAuth();
-    if (sessionToken && isSafeEndpoint(gqlEndpoint)) {
-      dlog(`[MemorAID] Batch saving ${savesToRun.length} updated memory cards...`);
-      const saveOps: GqlOperation[] = savesToRun.map(item => JSON.parse(item.req.body)[0]);
-      try {
-        const batchReq = buildGraphQLMutation(gqlEndpoint!, saveOps, sessionToken!);
-        const res = await fetch(batchReq.url, { method: "POST", headers: batchReq.headers, body: batchReq.body });
-        if (!res.ok) {
-          console.error(`[MemorAID] Batch update push HTTP failure:`, res.status);
-        } else {
-          const jsonArray = await res.json() as any[];
-          for (let i = 0; i < savesToRun.length; i++) {
-            const item = savesToRun[i]!;
-            const resJson = jsonArray[i];
-            const returnedCard = resJson?.data?.updateStoryCard?.storyCard || resJson?.data?.updateStoryCard;
-            const isSuccess = resJson?.data?.updateStoryCard?.success || returnedCard;
-            if (!isSuccess) {
-              const msg = resJson?.data?.updateStoryCard?.message || resJson?.errors?.[0]?.message || "Mutation failed";
-              console.error(`[MemorAID] AI Dungeon rejected memory card save for ${item.character.title}:`, msg);
-              continue;
-            }
-            const updatedCard = { ...item.targetMemCard, type: "Memory", keys: item.targetMemCard.keys || item.character.title || "", value: item.trimmedMemory, description: item.newDesc };
-            await repo.putCards(shortId, [updatedCard]);
-            dlog(`[MemorAID] Successfully saved updated memories to memory card for ${item.character.title}`);
-            updatedNames.push(item.character.title || "Character");
-
-            // Broadcast update to active tabs for UI sync
-            broadcastToTabs({
-              kind: "approvedCardSync",
-              payload: { ok: true, source: "card", cardId: item.targetMemCard.id, value: item.trimmedMemory, description: item.newDesc }
-            });
-          }
-        }
-      } catch (err) {
-        console.error(`[MemorAID] Failed to batch save memories:`, err);
-      }
-    } else {
-      console.warn("[MemorAID] Missing session token or endpoint. Cannot save memories.");
-    }
-  }
-
-  if (recordTiming && didGenerate) {
-    recordMemoraidTiming(Date.now() - timingStart);
-  }
-
-  return updatedNames;
-
-}
+// checkMemorAIDUpdates + selfHealMemoraidEntries now live in ./bg-memoraid (the provider-seam
+// MemorAID engine). Imported + re-exported at the top of this file.
 
 async function broadcastToTabs(msg: any) {
   try {
@@ -2372,6 +2179,16 @@ function debouncedGameplayTurnCheck(shortId: string, upserts: any[]) {
       await runProperNounAutoDetection(shortId).catch((err) => {
         console.error("[AID bg] Failed running proper noun auto detection:", err);
       });
+      // Living Characters runs in processInterceptedAction (on the player's action, so its seed
+      // directive can be appended to the outgoing action). It is deliberately NOT run here too — a
+      // second post-turn pass on the AI-response text would double-seed pressures.
+      // Crystallized long-term memory (self-gates on the global enableCrystallized flag — off by default).
+      await checkCrystallizedUpdates(shortId).catch((err) => {
+        console.error("[AID bg] Crystallized update check threw:", err);
+      });
+      await refreshSceneAwareCrystallized(shortId).catch((err) => {
+        console.error("[AID bg] Crystallized scene-aware refresh threw:", err);
+      });
     } catch (e) {
       console.error("[AID bg] debounced gameplay turn checks threw:", e);
     } finally {
@@ -2379,6 +2196,37 @@ function debouncedGameplayTurnCheck(shortId: string, upserts: any[]) {
     }
   }, 1200); // 1.2 second debounce
   gameplayTurnCheckTimers.set(shortId, timer);
+}
+
+/** Active Living-Characters pressure pairs derived from the live Life Cards — used to drop held
+ *  (deferred) injection directives whose pressure has since resolved or whose card was deleted.
+ *  Mirrors bg-life's Life-card identity (type "life", the title prefix, or a chaos-v2: key). */
+function activePressurePairs(cards: CardRow[], adv: AdventureMeta | undefined, settings: Settings | undefined): SeededPair[] {
+  const titlePrefix = settings?.livingCharactersTitlePrefix || "Life - ";
+  const keyPrefix = (settings?.livingCharactersKeyPrefix || "chaos-v2:").toLowerCase();
+  const prefixRe = new RegExp(`^${titlePrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i");
+  const archived = new Set(adv?.lcArchived || []);
+  const out: SeededPair[] = [];
+  for (const c of cards) {
+    if (c.deletedAt || !c.id || archived.has(c.id)) continue;
+    // Canonical Life Card identity (mirror bg-life's findLifeCardForCharacter): type "life", OR the
+    // title prefix, OR a chaos-v2: key — matching title-prefix alone misses cards keyed/typed as Life
+    // but titled differently.
+    const typeLower = (c.type || "").toLowerCase();
+    const titleLower = (c.title || "").toLowerCase();
+    const keysList = (c.keys || "").split(/[,;]+/).map(k => k.trim().toLowerCase()).filter(Boolean);
+    const isLife = typeLower === "life" || titleLower.startsWith(titlePrefix.toLowerCase()) || keysList.some(k => k.startsWith(keyPrefix));
+    if (!isLife) continue;
+    const details = parseLifeCardEntry(c.value);
+    const status = (details.status || "").toLowerCase();
+    if (status === "resolved" || status === "dormant" || status === "concluded") continue;
+    // Owner = title minus prefix, else the value's "<owner> Immediate Life Event:" header.
+    let owner = (c.title || "").replace(prefixRe, "").trim();
+    if (!owner) { const m = /^(.*?) Immediate Life Event:/m.exec(c.value || ""); owner = m ? m[1]!.trim() : ""; }
+    if (!owner || !details.target || !details.pressure) continue;
+    out.push({ owner, target: details.target, pressure: details.pressure, momentum: details.momentum || "low" });
+  }
+  return out;
 }
 
 // AID's EditMemory mutation hard-rejects memory text over 4,000 chars. A native memory targets
@@ -2392,6 +2240,24 @@ function capMemoryBankEntry(text: string): string {
   const brk = Math.max(t.lastIndexOf(". "), t.lastIndexOf("; "), t.lastIndexOf(", "));
   if (brk > NATIVE_MEMORY_CHAR_CAP * 0.5) t = t.slice(0, brk + 1);
   return t.trim();
+}
+
+/** Parse the delimited combined memory-block response into the block summary and each NPC's POV.
+ *  Sections look like `===SUMMARY===\n...` and `===POV:Name===\n...`. Tolerant of missing sections
+ *  (callers fall back per section). POVs are keyed by lowercased character name. */
+function parseCombinedBlockResponse(raw: string, names: string[]): { summary: string; povs: Map<string, string> } {
+  const povs = new Map<string, string>();
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const summaryMatch = raw.match(/===\s*SUMMARY\s*===\s*([\s\S]*?)(?====\s*POV\s*:|===\s*SUMMARY\s*===|$)/i);
+  let summary = summaryMatch && summaryMatch[1] ? summaryMatch[1].trim() : "";
+  for (const name of names) {
+    const re = new RegExp(`===\\s*POV\\s*:\\s*${esc(name)}\\s*===\\s*([\\s\\S]*?)(?====\\s*POV\\s*:|===\\s*SUMMARY\\s*===|$)`, "i");
+    const m = raw.match(re);
+    if (m && m[1] && m[1].trim()) povs.set(name.trim().toLowerCase(), m[1].trim());
+  }
+  // No section markers at all → the model returned a plain summary; use the whole thing.
+  if (!summary && povs.size === 0) summary = raw.trim();
+  return { summary, povs };
 }
 
 export async function regenerateMemoryBlock(shortId: string, index: number): Promise<{ ok: boolean; error?: string; memories?: any[] }> {
@@ -2463,15 +2329,45 @@ export async function regenerateMemoryBlock(shortId: string, index: number): Pro
     `and limit it to 4-5 key clauses to prevent exceeding 120 tokens. Under no circumstances should the output exceed 120 tokens. ` +
     `Do not use code blocks or quotes.`;
 
-  const user = `Actions to summarize:\n${targetActions.map(a => a.text || "").join("\n")}`;
+  const blockText = targetActions.map(a => a.text || "").join("\n");
+  const user = `Actions to summarize:\n${blockText}`;
+
+  // Combined pass: when Crystallized (which owns the NPC Memory Bank) is enabled and tracked NPCs are
+  // present in this block, produce the block summary AND each NPC's first-person POV recollection in
+  // ONE provider call — the block context is identical for all of them, so a separate call per NPC
+  // would re-send the same context for a different output. Per-NPC fallback below covers any section
+  // the model drops.
+  const settingsForNpc = await repo.getSettings();
+  const npcSources = (settingsForNpc?.enableCrystallized && settingsForNpc?.crystallizedNpcMemoryEnabled !== false)
+    ? await presentNpcSourcesForBlock(shortId, blockText).catch(() => [] as Array<{ title: string; keys: string }>)
+    : [];
+  const npcPovs = new Map<string, string>();
 
   let generatedMemory = "";
   try {
-    dlog(`[AID bg] Generating memory summary using 3rd party provider...`);
-    const rawResponse = await provider.complete(system, user);
-    generatedMemory = cleanLlmResponse(rawResponse);
+    if (npcSources.length > 0) {
+      const names = npcSources.map(s => s.title);
+      const combinedSystem = system +
+        `\n\nAFTER the summary, also produce one first-person, past-tense recollection (1-2 sentences, ` +
+        `feeling over fact) for EACH listed character, from their point of view. Output EXACTLY these ` +
+        `delimited sections and nothing else:\n===SUMMARY===\n<the summary described above>\n` +
+        names.map(n => `===POV:${n}===\n<${n}'s recollection>`).join("\n");
+      const combinedUser = `${user}\n\nCharacters for POV sections: ${names.join(", ")}`;
+      dlog(`[AID bg] Combined memory-block + NPC-POV generation for ${names.length} NPC(s)...`);
+      const raw = cleanLlmResponse(await provider.complete(combinedSystem, combinedUser));
+      const parsed = parseCombinedBlockResponse(raw, names);
+      generatedMemory = parsed.summary;
+      for (const [k, v] of parsed.povs) npcPovs.set(k, v);
+    } else {
+      dlog(`[AID bg] Generating memory summary using 3rd party provider...`);
+      generatedMemory = cleanLlmResponse(await provider.complete(system, user));
+    }
   } catch (err: any) {
     return { ok: false, error: `3rd party memory generation exception: ${err?.message || err}` };
+  }
+  // Summary fallback: if the combined call didn't yield a usable summary, do a dedicated summary call.
+  if (!generatedMemory.trim() && npcSources.length > 0) {
+    try { generatedMemory = cleanLlmResponse(await provider.complete(system, user)); } catch { /* handled below */ }
   }
 
   let cleaned = generatedMemory.trim();
@@ -2503,6 +2399,24 @@ export async function regenerateMemoryBlock(shortId: string, index: number): Pro
   };
 
   await repo.upsertAdventure({ shortId, memoryBankEntries: updatedMemories });
+
+  // Persist the per-NPC POV blocks distilled in the same combined call. Any NPC the model omitted
+  // falls back to its own generation so no memory is silently lost.
+  if (npcSources.length > 0) {
+    const anchor = { actionId: lastActId, actionIds: newActionIds };
+    for (const s of npcSources) {
+      try {
+        const pov = npcPovs.get(s.title.trim().toLowerCase());
+        if (pov && pov.trim()) {
+          await storeNpcBlockFromPov(shortId, s.title, anchor, pov, npcSources);
+        } else {
+          await generateNpcBlock(shortId, s.title, { actionIds: newActionIds, lastRelevantActionId: lastActId }, npcSources);
+        }
+      } catch (err) {
+        dlog(`[AID bg] combined NPC block persistence failed for ${s.title}:`, err);
+      }
+    }
+  }
 
   // 5. Replay EditMemory GQL mutation to AI Dungeon to update it on the server
   const editOp = await repo.getOp("EditMemory");
@@ -2557,6 +2471,71 @@ browser.runtime.onMessage.addListener((msg: BgMessage, sender, sendResponse) => 
   }
 });
 
+const authorsNoteCaptured = new Set<string>();
+
+
+async function consolidateOutlookForCharacter(shortId: string, characterTitle: string): Promise<{ ok?: boolean; error?: string; incorporated?: number }> {
+  await ensureAuth();
+  if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) return { error: "Not authenticated with AI Dungeon yet." };
+  const settings = await repo.getSettings();
+  if (!settings?.enableCrystallized) return { error: "Crystallized is disabled." };
+  const adv = await repo.getAdventure(shortId);
+  const characterKey = characterTitle.trim().toLowerCase();
+  const importantNames = (adv?.memoraidCharacters || []).map((n) => n.trim().toLowerCase()).filter(Boolean);
+  if (!importantNames.includes(characterKey)) return { error: `${characterTitle} is not a Crystallized character.` };
+
+  const state = await repo.getCrystallizedState(shortId, characterKey);
+  const snapshot = state ? snapshotOutlookForIncorporation(state, 2) : [];
+  if (!state || snapshot.length === 0) return { ok: true, incorporated: 0 };
+
+  const cards = await repo.getCards(shortId);
+  const card = cards.find((c) => !c.deletedAt && (c.title || "").trim().toLowerCase() === characterKey
+    && (c.type || "").toLowerCase() !== "memory" && !(c.title || "").toLowerCase().endsWith(" (memory)"));
+  if (!card) return { error: `No character card found for ${characterTitle}.` };
+  const versions = await repo.getVersions(shortId);
+  if (versions.some((v) => (v.cardId === card.id || v.characterName === characterTitle) && v.status === "pending")) {
+    return { error: "A pending proposal already exists for this character — resolve it first." };
+  }
+
+  const field = "Personality";
+  const currentFieldText = extractFieldBlock(card.value || "", field) || "";
+  const formattingMode = settings?.formattingMode || DEFAULT_FORMATTING_MODE;
+  const protagonist = (adv?.protagonistName && adv.protagonistName.trim()) || parseProtagonistName(adv?.memory) || "the player character";
+  const command = resolveCommand(buildBoundedRevisionCommand(field, currentFieldText) + OUTLOOK_INCORPORATION_INSTRUCTION, protagonist);
+  const evidence = `${characterTitle}'s settled self-beliefs (Outlook) to incorporate:\n${snapshot.map((b) => `- ${b.text}`).join("\n")}`;
+
+  const r = await generateCard(card, command, formattingMode, { storyInformation: evidence.slice(0, 4000) });
+  if (!r.ok) return { error: r.message || "Generation failed." };
+  const newFieldText = r.value.trim().replace(/^\[+/, "").replace(/\]+$/, "").trim();
+  if (!newFieldText) return { error: "Generation returned empty text." };
+  const entry = spliceField(card.value || "", field, newFieldText);
+  if (entry === card.value) return { error: `Card has no ${field} field to revise.` };
+
+  const totalActionsCount = await repo.getActionCount(shortId);
+  await repo.putVersion({
+    id: crypto.randomUUID(), shortId, characterName: card.title || card.keys, entry,
+    changeSummary: `Outlook consolidated into ${field} (${snapshot.length} belief${snapshot.length === 1 ? "" : "s"})`,
+    source: "card", status: "pending", createdAt: new Date().toISOString(),
+    actionCount: totalActionsCount, cardId: card.id, cardType: card.type || "character",
+  } as any);
+  await consolidateOutlookState(shortId, characterKey, snapshot, totalActionsCount);
+  return { ok: true, incorporated: snapshot.length };
+}
+
+async function consolidateOutlookState(shortId: string, characterKey: string, snapshot: OutlookBelief[], turn: number): Promise<void> {
+  if (!snapshot.length) return;
+  const state = await repo.getCrystallizedState(shortId, characterKey);
+  if (!state) return;
+  const now = new Date().toISOString();
+  await repo.appendCrystallizedArchive(snapshot.map((b) => ({
+    id: crypto.randomUUID(), shortId, characterKey, kind: "outlook" as const,
+    text: b.text, turn, archivedAt: now, reason: "incorporated" as const,
+  })));
+  await repo.putCrystallizedState(shortId, characterKey, clearIncorporatedOutlook(state, snapshot));
+  dlog(`[AID bg] Consolidated ${snapshot.length} Outlook belief(s) into ${characterKey}'s card.`);
+}
+
+
 async function handleMessage(msg: BgMessage): Promise<any> {
   try {
     switch (msg.kind) {
@@ -2571,23 +2550,29 @@ async function handleMessage(msg: BgMessage): Promise<any> {
       }
       case "processInterceptedAction": {
         try {
+          const settings = await repo.getSettings();
+          const enableLc = settings?.enableLivingCharacters !== false;
+
+          // MemorAID presence short-circuit (unchanged): only run the NPC-thought pass when a tracked
+          // character is actually present this turn. This must NOT gate Living Characters below — LC has
+          // its own roster and fires independently — so it only flips runMemorAID, never returns early.
+          let runMemorAID = true;
           const importantNames = cachedImportantCharacters.get(msg.shortId);
           if (importantNames && importantNames.length > 0) {
-            const settings = await repo.getSettings();
             const presenceLookback = settings?.memoraidPresenceLookback ?? 5;
-            
+
             let recent = cachedRecentActions.get(msg.shortId);
             if (!recent) {
               await updateRecentActionsCache(msg.shortId);
               recent = cachedRecentActions.get(msg.shortId) || [];
             }
-            
+
             const isRetry = msg.type === "retry";
             const sliced = isRetry && recent.length >= 2
               ? recent.slice(0, -1).slice(-presenceLookback)
               : recent.slice(-presenceLookback);
             const combinedText = (sliced.map(a => a.text || "").join("\n") + "\n" + (msg.text || "")).toLowerCase();
-            
+
             const cards = await repo.getCards(msg.shortId) || [];
             const charactersToCheck: { title: string; keys: string }[] = [];
             const seenTitles = new Set<string>();
@@ -2598,14 +2583,14 @@ async function handleMessage(msg: BgMessage): Promise<any> {
                 if ((c.title || "").toLowerCase().endsWith(" (memory)")) return false;
                 const titleLower = (c.title || "").toLowerCase();
                 const keysList = (c.keys || "").split(/[,;]+/).map(k => k.trim().toLowerCase()).filter(Boolean);
-                
+
                 if (titleLower === impName || keysList.includes(impName)) return true;
-                
+
                 if (titleLower.includes(" and ") || titleLower.includes(" & ")) {
                   const parts = titleLower.split(/\s+(?:and|&)\s+/);
                   if (parts.includes(impName)) return true;
                 }
-                
+
                 for (const k of keysList) {
                   if (k.includes(" and ") || k.includes(" & ")) {
                     const parts = k.split(/\s+(?:and|&)\s+/);
@@ -2614,28 +2599,80 @@ async function handleMessage(msg: BgMessage): Promise<any> {
                 }
                 return false;
               });
-              
+
               const title = baseCard ? baseCard.title || "" : capitalizeWords(impName);
               const keys = baseCard ? baseCard.keys || "" : impName;
               const titleLower = title.toLowerCase();
-              
+
               if (!seenTitles.has(titleLower)) {
                 seenTitles.add(titleLower);
                 charactersToCheck.push({ title, keys });
               }
             }
-            
-            const triggered = charactersToCheck.filter(c => 
+
+            const triggered = charactersToCheck.filter(c =>
               isCharacterTriggered(combinedText, c.title, c.keys)
             );
-            
+
             if (triggered.length === 0) {
               dlog("[AID bg] Short-circuit: No tracked characters triggered in caching presence check.");
-              return { ok: true, updatedNames: [] };
+              runMemorAID = false;
+            }
+          } else {
+            runMemorAID = false;
+          }
+
+          let updatedNames: string[] = [];
+          if (runMemorAID) {
+            updatedNames = await checkMemorAIDUpdates(msg.shortId, msg.text);
+          }
+
+          // ── Living Characters prompt-injection pipeline ────────────────────────────────────────
+          // The extension can't touch AID's AI context, so LC seed directives are appended to the
+          // outgoing player action — returned here as injectText; the injected MAIN-world script does
+          // the actual append before the action is sent. Continue/retry actions carry no player text,
+          // so per the per-adventure mode "defer" (default) HOLDS the directive for the next
+          // do/say/story and "skip" doesn't run LC there at all; planInjection flushes held directives
+          // on the next injectable action. This is the ONLY LC trigger — the post-turn
+          // debouncedGameplayTurnCheck deliberately no longer runs it, which would double-seed.
+          // Directives are appended to the action; there is no Author's Note injection mode.
+          const advInj = await repo.getAdventure(msg.shortId);
+          const injMode = advInj?.livingConfig?.continueInjectionMode || "defer";
+          const fresh: PendingInjection[] = [];
+          let injMeta: Record<string, unknown> | undefined;
+          if (enableLc && shouldFireLcOnAction(msg.type, injMode)) {
+            const lcResult = await checkLifeCardUpdates(msg.shortId, msg.text);
+            if (lcResult.seededPair) {
+              fresh.push({ ...lcResult.seededPair, text: formatLivingCharactersDirective(lcResult.seededPair) });
+              injMeta = { ...lcResult.seededPair };
             }
           }
-          const updatedNames = await checkMemorAIDUpdates(msg.shortId, msg.text, msg.type, true);
-          return { ok: true, updatedNames };
+
+          // Drop held directives whose pressure is no longer active (resolved/deleted) before flushing.
+          const cardsForGuard = await repo.getCards(msg.shortId);
+          const activeKeys = new Set(activePressurePairs(cardsForGuard, advInj, settings).map(p => pressureKey(p.owner, p.pressure)));
+          const heldLive = filterLiveDirectives(coercePending(advInj?.pendingInjections), activeKeys);
+          const { injectText, nextPending } = planInjection(msg.type, fresh, heldLive);
+          const prevPending = advInj?.pendingInjections || [];
+          if (advInj && (nextPending.length !== prevPending.length || nextPending.some((d, i) => d.text !== prevPending[i]?.text))) {
+            advInj.pendingInjections = nextPending;
+            await repo.upsertAdventure(advInj);
+          }
+          if (injectText) {
+            const turnCount = await repo.getActionCount(msg.shortId);
+            await repo.appendInjectionLog([{
+              id: crypto.randomUUID(),
+              shortId: msg.shortId,
+              turn: turnCount,
+              provider: "living-characters",
+              directiveText: injectText,
+              meta: injMeta,
+              createdAt: new Date().toISOString(),
+            }]);
+            dlog(`[Injection] Appending directive to action: ${injectText}`);
+          }
+
+          return { ok: true, updatedNames, injectText };
         } catch (e: any) {
           console.error("[AID bg] processInterceptedAction failed:", e);
           return { error: e?.message || String(e) };
@@ -3556,7 +3593,7 @@ async function handleMessage(msg: BgMessage): Promise<any> {
       case "setSettings": {
         const cur = await repo.getSettings();
         await repo.setSettings({ ...cur, ...msg.settings, apiKeys: { ...(cur?.apiKeys ?? {}), ...(msg.settings.apiKeys ?? {}) } } as any);
-        if (msg.settings.showDebug !== undefined) debugEnabled = !!msg.settings.showDebug;
+        if (msg.settings.showDebug !== undefined) { debugEnabled = !!msg.settings.showDebug; setInfraDebug(debugEnabled); }
         return;
       }
       case "setProtagonist":
@@ -3567,6 +3604,14 @@ async function handleMessage(msg: BgMessage): Promise<any> {
       case "generateCard":
         return runGenerateCard(msg.shortId, msg.cardId);
       case "setVersionStatus":
+        if (msg.status === "rejected") {
+          // Rejecting a body re-roll restores the phenotype record snapshotted when the proposal was
+          // made, so the stored body doesn't stay diverged from the (kept) card. No-op for any other
+          // version (only re-roll proposals carry a phenotypeRollback). Reroll spec §A.6.
+          const rejectedVer = await repo.getVersion(msg.id);
+          const rollback = (rejectedVer as any)?.phenotypeRollback;
+          if (rollback) await repo.putPhenotype(rollback);
+        }
         await repo.setVersionStatus(msg.id, msg.status);
         if (msg.status === "applied") {
           await applyVersionLocally(msg.id);
@@ -3605,10 +3650,404 @@ async function handleMessage(msg: BgMessage): Promise<any> {
           return { models: [] };
         }
       }
+      case "adventureMemories": {
+        const adv = await repo.getAdventure(msg.shortId);
+        const oldMemories = adv?.memoryBankEntries || [];
+        const normalized = (msg.memories || []).map((m: any) => {
+          const text = typeof m === "string" ? m : (m?.text || "");
+          const old = oldMemories.find((o) => o.text === text);
+          if (old) {
+            return old;
+          }
+          return typeof m === "string" ? { actionIds: [], text: m } : m;
+        });
+
+        // Defense-in-depth: never let an empty update wipe a populated Memory Bank. Beta emits small/
+        // partial WS frames mid-turn (the full window comes via fetch), so an empty frame here is a
+        // transient, not a real clear — persisting it blanked the panel during turn processing.
+        if (normalized.length === 0 && oldMemories.length > 0) {
+          return;
+        }
+
+        const update: any = { shortId: msg.shortId, memoryBankEntries: normalized };
+        await repo.upsertAdventure(update);
+
+        const settings = await repo.getSettings();
+
+        // Forward-auto NPC memory bank (§Q): when genuinely NEW native blocks form (not the initial
+        // backfill of a page load), distill each into per-present-NPC POV recollections. Fire-and-forget.
+        if (settings?.enableCrystallized && settings?.crystallizedNpcMemoryEnabled !== false && normalized.length > oldMemories.length && oldMemories.length > 0) {
+          const newBlocks = normalized.slice(oldMemories.length).filter((b: any) => b && b.actionIds && b.actionIds.length);
+          // When Auto-Update is on, regenerateLatestMemory (below) runs the COMBINED block+NPC-POV pass
+          // for the latest memory entry in a single provider call — so exclude that entry here, or its
+          // NPCs would be generated twice per turn (once combined, once as a redundant separate call),
+          // defeating the whole point of the combined pass. Earlier new blocks (multi-block updates,
+          // which the combined pass doesn't touch — it only regenerates the latest) still go through
+          // forward-auto. Reference-compare against the latest entry so the exclusion is exact even if
+          // that entry lacks actionIds (in which case it isn't in newBlocks anyway).
+          const latestEntry = normalized[normalized.length - 1];
+          const forwardAutoBlocks = settings.autoRegenerateMemoryBankEntry
+            ? newBlocks.filter((b: any) => b !== latestEntry)
+            : newBlocks;
+          for (const block of forwardAutoBlocks) {
+            generateNpcBlocksForNewNativeBlock(msg.shortId, block).catch(err => {
+              console.error("[AID bg] NPC memory bank auto-generation failed:", err);
+            });
+          }
+        }
+
+        if (settings?.autoRegenerateMemoryBankEntry) {
+          let shouldTrigger = false;
+          if (normalized.length > oldMemories.length) {
+            const isInitialLoad = oldMemories.length === 0;
+            if (!isInitialLoad || normalized.length === 1) {
+              shouldTrigger = true;
+            }
+          } else if (normalized.length > 0 && oldMemories.length > 0) {
+            const lastIdx = normalized.length - 1;
+            const normIds = normalized[lastIdx]?.actionIds || [];
+            // oldMemories may be shorter than normalized — guard rather than crash on a fresh block.
+            const oldIds = oldMemories[lastIdx]?.actionIds || [];
+            if (normIds.length !== oldIds.length || !normIds.every((id: string, idx: number) => id === oldIds[idx])) {
+              shouldTrigger = true;
+            }
+          }
+
+          if (shouldTrigger) {
+            dlog(`[AID bg] Auto-regenerating latest memory natively for shortId: ${msg.shortId}`);
+            regenerateLatestMemory(msg.shortId).catch(err => {
+              console.error("[AID bg] Auto-regeneration of latest memory failed:", err);
+            });
+          }
+        }
+        return;
+      }
+      case "updateAidMemories": {
+        const normalized = msg.memories.map((m: any) => typeof m === "string" ? { actionIds: [], text: m } : m);
+        const adv = await repo.getAdventure(msg.shortId);
+        const oldMemories = adv?.memoryBankEntries || [];
+        
+        await repo.upsertAdventure({ shortId: msg.shortId, memoryBankEntries: normalized });
+        
+        // Find which memory was edited by diffing by index
+        let editedMemory: any = null;
+        for (let i = 0; i < normalized.length; i++) {
+          const newMem = normalized[i];
+          const oldMem = oldMemories[i];
+          if (oldMem && newMem.text !== oldMem.text) {
+            editedMemory = newMem;
+            break;
+          }
+        }
+
+        if (editedMemory) {
+          const actionId = (editedMemory.actionIds && editedMemory.actionIds.length > 0)
+            ? editedMemory.actionIds[editedMemory.actionIds.length - 1]
+            : editedMemory.lastRelevantActionId;
+          if (!actionId) {
+            console.warn("[AID bg] Cannot edit memory: no lastRelevantActionId or actionId found for memory text:", editedMemory.text);
+            return;
+          }
+          
+          await ensureAuth();
+          if (sessionToken && gqlEndpoint) {
+            const op = await repo.getOp("EditMemory");
+            const query = op?.query || DEFAULT_GQL_QUERIES.EditMemory;
+
+            try {
+              dlog("[AID bg] Replaying EditMemory mutation to AI Dungeon...");
+              const req = buildEditMemory(gqlEndpoint, query, sessionToken, msg.shortId, actionId, editedMemory.text);
+              const res = await fetch(req.url, { method: "POST", headers: req.headers, body: req.body });
+              const json = await res.json() as any;
+              dlog("[AID bg] EditMemory response status:", res.status, JSON.stringify(json));
+            } catch (err) {
+              console.error("[AID bg] Failed to push memory edit to AI Dungeon:", err);
+            }
+          }
+        } else if (normalized.length < oldMemories.length) {
+          console.warn("[AID bg] Memory was deleted. AI Dungeon does not support discrete memory deletion mutations natively; skipping push.");
+        }
+        return;
+      }
+      case "setMemoraidCharacters": {
+        // Per-adventure MemorAID config (replaces the Configure MemorAID card).
+        try {
+          const characters = (msg.characters || []).map((c) => String(c || "").trim()).filter(Boolean);
+          const advMc = await repo.getAdventure(msg.shortId);
+          // Re-enable hook: re-ADDING a character to the MemorAID list (absent before, present now) clears
+          // any user-delete tombstone for its auto-cards, so MemorAID/Crystallized regenerate them again.
+          const prev = new Set((advMc?.memoraidCharacters || []).map((c) => c.trim().toLowerCase()));
+          const added = characters.filter((c) => !prev.has(c.trim().toLowerCase()));
+          const patch: AdventureMeta = { shortId: msg.shortId, memoraidCharacters: characters };
+          if (added.length && advMc?.userDeletedCards?.length) {
+            const titles = added.flatMap((n) => [`${n} (Memory)`, `${n} - Crystallized`]);
+            patch.userDeletedCards = removeUserDeletedTitles(advMc.userDeletedCards, titles);
+          }
+          await repo.upsertAdventure(patch);
+          await updateConfigCache(msg.shortId);
+          broadcastToTabs({ kind: "stateUpdated", shortId: msg.shortId });
+          return { ok: true };
+        } catch (err: any) {
+          return { error: err?.message || String(err) };
+        }
+      }
+      case "setLivingConfig": {
+        // Per-adventure Living Characters simulation config (replaces global livingCharacters* settings).
+        try {
+          await repo.upsertAdventure({ shortId: msg.shortId, livingConfig: msg.config || {} });
+          broadcastToTabs({ kind: "stateUpdated", shortId: msg.shortId });
+          return { ok: true };
+        } catch (err: any) {
+          return { error: err?.message || String(err) };
+        }
+      }
+      case "saveCrystallizedSchema": {
+        try {
+          const cards = await repo.getCards(msg.shortId);
+          const card = cards.find((c) => c.id === msg.cardId && !c.deletedAt);
+          if (!card) return { error: "Crystallized card not found." };
+          const characterKey = (card.title || "").replace(/\s*-\s*crystallized$/i, "").trim().toLowerCase();
+          const state = (await repo.getCrystallizedState(msg.shortId, characterKey)) || parseCrystallized(card.description);
+          state.schema = dedupeSchema(msg.schema);
+          return await saveCrystallizedState(msg.shortId, card, state);
+        } catch (e: any) {
+          return { error: e?.message || String(e) };
+        }
+      }
+      case "savePreferences": {
+        try {
+          const cards = await repo.getCards(msg.shortId);
+          const card = cards.find((c) => c.id === msg.cardId && !c.deletedAt);
+          if (!card) return { error: "Crystallized card not found." };
+          const characterKey = (card.title || "").replace(/\s*-\s*crystallized$/i, "").trim().toLowerCase();
+          const state = (await repo.getCrystallizedState(msg.shortId, characterKey)) || parseCrystallized(card.description);
+          // Authoritative full replace (honors deletions + additions; preserves strength for unchanged
+          // lines). Preferences never decay, so the editor is the only place one can be removed.
+          state.preferences = applyManualPreferences(state.preferences || [], msg.prefs);
+          return await saveCrystallizedState(msg.shortId, card, state);
+        } catch (e: any) {
+          return { error: e?.message || String(e) };
+        }
+      }
+      case "consolidateCrystallizedSchema": {
+        try {
+          const cards = await repo.getCards(msg.shortId);
+          const card = cards.find((c) => c.id === msg.cardId && !c.deletedAt);
+          if (!card) return { error: "Crystallized card not found." };
+          const characterKey = (card.title || "").replace(/\s*-\s*crystallized$/i, "").trim().toLowerCase();
+          const state = (await repo.getCrystallizedState(msg.shortId, characterKey)) || parseCrystallized(card.description);
+          if (!state.schema.length) return { ok: true };
+          await ensureAuth();
+          const settings = await repo.getSettings();
+          const formattingMode = settings?.formattingMode || DEFAULT_FORMATTING_MODE;
+          const current = state.schema.map((s) => `- [${formatSubjectLabel(s)}] ${s.text}`).join("\n");
+          const command = buildConsolidateCommand(current);
+          const r = await generateCard({ ...card, value: "" }, command, formattingMode, {});
+          if (!r.ok) return { error: r.message || "Consolidation generation failed." };
+          const parsed = parseLlmOutput(r.value);
+          if (parsed.schema.length) state.schema = dedupeSchema(parsed.schema as any);
+          return await saveCrystallizedState(msg.shortId, card, state);
+        } catch (e: any) {
+          return { error: e?.message || String(e) };
+        }
+      }
+      case "getCrystallizedState": {
+        try {
+          const cards = await repo.getCards(msg.shortId);
+          const card = cards.find((c) => c.id === msg.cardId && !c.deletedAt);
+          if (!card) return { error: "Crystallized card not found." };
+          const characterKey = (card.title || "").replace(/\s*-\s*crystallized$/i, "").trim().toLowerCase();
+          const state = (await repo.getCrystallizedState(msg.shortId, characterKey)) || parseCrystallized(card.description);
+          return { ok: true, state };
+        } catch (e: any) {
+          return { error: e?.message || String(e) };
+        }
+      }
+      case "deleteStoryCard": {
+        await ensureAuth();
+        if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) {
+          return { error: "No session token yet — interact with the page once, then retry." };
+        }
+        try {
+          const cards = await repo.getCards(msg.shortId);
+          const card = cards.find(c => c.id === msg.cardId);
+          if (!card) {
+            return { error: "Card not found in local database." };
+          }
+          const del = await tryNativeCardDelete(msg.shortId, msg.cardId);
+          if (!del.ok) {
+            return { error: `AI Dungeon rejected delete: ${del.error || "unknown error"}` };
+          }
+          const delLifePrefix = (await repo.getSettings())?.livingCharactersTitlePrefix || "Life - ";
+          const deletedAtStr = new Date().toISOString();
+          // Preserve value + description so the Archived copy keeps the card's content (recoverable),
+          // matching archiveLifeCard. The card is already gone from AID via tryNativeCardDelete above.
+          const updatedCard = { ...card, deletedAt: deletedAtStr };
+          await repo.putCards(msg.shortId, [updatedCard]);
+          // Tombstone the user's delete so the per-turn savestate can't resurrect it and the auto-card
+          // creators won't mint a fresh one (suppressed by title).
+          const advDel = await repo.getAdventure(msg.shortId);
+          if (advDel) {
+            advDel.userDeletedCards = addUserDeletedCards(advDel.userDeletedCards, [{ id: msg.cardId, title: card.title || "" }]);
+            await repo.upsertAdventure(advDel);
+          }
+          broadcastToTabs({
+            kind: "approvedCardSync",
+            // Only auto-cards (Life/MemorAID/Crystallized) get the AID-autosave block — they're the
+            // ones AID's editor resurrects. Regular cards keep their restore-by-reappearance flow.
+            payload: { ok: true, source: "card", cardId: msg.cardId, value: updatedCard.value, description: updatedCard.description || "", keys: updatedCard.keys, deletedAt: deletedAtStr, blockAutosave: isAutoCardTitle(card.title, delLifePrefix) }
+          });
+          return { ok: true };
+        } catch (err: any) {
+          return { error: err?.message || String(err) };
+        }
+      }
+      case "setLifeCardStatus": {
+        await ensureAuth();
+        if (!sessionToken || !isSafeEndpoint(gqlEndpoint)) {
+          return { error: "No session token yet — interact with the page once, then retry." };
+        }
+        try {
+          const cards = await repo.getCards(msg.shortId);
+          const card = cards.find(c => c.id === msg.cardId);
+          if (!card) return { error: "Card not found in local database." };
+
+          if (msg.status === "resolved") {
+            const arch = await archiveLifeCard(msg.shortId, card);
+            if (!arch.ok) return { error: `AI Dungeon rejected the resolve/delete: ${arch.error || "unknown error"}` };
+            const advRes = await repo.getAdventure(msg.shortId);
+            if (advRes?.lcDormantSince && advRes.lcDormantSince[msg.cardId] != null) {
+              delete advRes.lcDormantSince[msg.cardId];
+              await repo.upsertAdventure(advRes);
+            }
+            return { ok: true };
+          }
+
+          // active | dormant → rewrite the engine-owned Status line, replay UseAutoSaveStoryCard.
+          const newValue = setLifeCardStatusValue(card.value, msg.status);
+          const updateOp = await repo.getOp("UseAutoSaveStoryCard");
+          const updateQuery = updateOp?.query || DEFAULT_GQL_QUERIES.UseAutoSaveStoryCard;
+          const updatedCard = { ...card, value: newValue };
+          const saveReq = buildCardSave(gqlEndpoint!, updateQuery, sessionToken!, updatedCard, newValue);
+          const saveRes = await fetch(saveReq.url, { method: "POST", headers: saveReq.headers, body: saveReq.body });
+          if (!saveRes.ok) return { error: `Status update failed with HTTP ${saveRes.status}` };
+          await repo.putCards(msg.shortId, [updatedCard]);
+
+          const adv = await repo.getAdventure(msg.shortId);
+          if (adv) {
+            adv.lcDormantSince = adv.lcDormantSince || {};
+            if (msg.status === "dormant") adv.lcDormantSince[msg.cardId] = (await repo.getActions(msg.shortId)).length;
+            else delete adv.lcDormantSince[msg.cardId];
+            await repo.upsertAdventure(adv);
+          }
+          broadcastToTabs({ kind: "approvedCardSync", payload: { ok: true, source: "card", cardId: msg.cardId, value: newValue, description: updatedCard.description || "" } });
+          return { ok: true };
+        } catch (err: any) {
+          return { error: err?.message || String(err) };
+        }
+      }
+      case "enqueueLifeInjection": {
+        // A manually-seeded custom Life Card creates the card via createStoryCard but — unlike an
+        // auto-seeded pressure — never enqueues the one-shot prompt-injection directive, so its pressure
+        // never surfaces via the injection lever. The panel calls this right after a successful custom
+        // seed to enqueue that directive; it flushes on the next do/say/story action like any auto seed.
+        try {
+          const adv = await repo.getAdventure(msg.shortId);
+          if (!adv) return { error: "Adventure not found." };
+          const pair: SeededPair = { owner: msg.owner, target: msg.target, pressure: msg.pressure, momentum: msg.momentum || "low" };
+          const pending = coercePending(adv.pendingInjections);
+          pending.push({ ...pair, text: formatLivingCharactersDirective(pair) });
+          adv.pendingInjections = pending;
+          await repo.upsertAdventure(adv);
+          const settings = await repo.getSettings();
+          return { ok: true };
+        } catch (err: any) {
+          return { error: err?.message || String(err) };
+        }
+      }
+      case "cardsDeleted": {
+        // A native card deletion (UseDeleteStoryCard) was observed on the page. Mirror it locally so
+        // the card drops out of the roster/Living Characters tab immediately (history preserved),
+        // freeing its owner for a fresh Life-card seed — without waiting for a page reload.
+        if (Array.isArray(msg.cardIds) && msg.cardIds.length) {
+          const before = await repo.getCards(msg.shortId);
+          await repo.markCardsDeleted(msg.shortId, msg.cardIds);
+          // Stamp the reseed cooldown for any deleted Life card's owner so a manual native delete
+          // doesn't instantly respawn the relationship either.
+          const s = await repo.getSettings();
+          const titlePrefix = s?.livingCharactersTitlePrefix || "Life - ";
+          const adv = await repo.getAdventure(msg.shortId);
+          if (adv) {
+            const turn = (await repo.getActions(msg.shortId)).length;
+            adv.lcResolvedAt = adv.lcResolvedAt || {};
+            for (const id of msg.cardIds) {
+              const c = before.find(x => x.id === id);
+              const titleLower = (c?.title || "").toLowerCase();
+              if (titleLower.startsWith(titlePrefix.toLowerCase())) {
+                const owner = (c!.title || "").replace(new RegExp(`^${titlePrefix}`, "i"), "").trim().toLowerCase();
+                if (owner) { adv.lcResolvedAt[owner] = turn; }
+              }
+            }
+            // Tombstone every native delete so the per-turn savestate can't resurrect it (the
+            // repropagation conflict) and the auto-card creators won't recreate it by title.
+            adv.userDeletedCards = addUserDeletedCards(
+              adv.userDeletedCards,
+              msg.cardIds.map((id) => ({ id, title: before.find((x) => x.id === id)?.title || "" }))
+            );
+            await repo.upsertAdventure(adv);
+          }
+          for (const id of msg.cardIds) {
+            broadcastToTabs({ kind: "approvedCardSync", payload: { ok: true, source: "card", cardId: id, deletedAt: new Date().toISOString() } });
+          }
+          await updateConfigCache(msg.shortId);
+        }
+        return { ok: true };
+      }
+      case "generateCompactCard":
+        return runGenerateCard(msg.shortId, msg.cardId, "backgroundCharacter");
+      case "rerollAppearance":
+        return runRerollAppearance(msg.shortId, msg.cardId);
+      case "distillCrystallized":
+        return runCrystallizedDistillationManual(msg.shortId, msg.cardId, msg.name);
+      case "backfillNpcMemories":
+        return backfillNpcMemories(msg.shortId, msg.characterTitle);
+      case "getNpcMemoryBank": {
+        const key = msg.characterTitle.trim().toLowerCase();
+        const blocks = (await repo.getNpcMemoryBlocks(msg.shortId, key)).sort((a, b) => b.turnEnd - a.turnEnd);
+        const s = await repo.getSettings();
+        const advM = await repo.getAdventure(msg.shortId);
+        return { blocks, cap: advM?.crystallizedNpcMemoryCap ?? s?.crystallizedNpcMemoryCap ?? 400 };
+      }
+      case "deleteNpcMemoryBlock":
+        await repo.deleteNpcMemoryBlock(msg.shortId, msg.characterTitle.trim().toLowerCase(), msg.blockId);
+        return { ok: true };
+      case "regenerateNpcMemoryBlock":
+        return regenerateNpcMemoryBlock(msg.shortId, msg.characterTitle, msg.blockId);
+      case "setAuthorsNote":
+        // Listener: the user edited their Author's Note in AID. Store it verbatim (even "") so our
+        // cache never goes stale, and mark it captured so the load-time fetch won't re-run.
+        authorsNoteCaptured.add(msg.shortId);
+        await repo.upsertAdventure({ shortId: msg.shortId, authorsNote: msg.authorsNote });
+        return { ok: true };
+      case "saveNpcMemoryBlock": {
+        const key = msg.characterTitle.trim().toLowerCase();
+        const existing = (await repo.getNpcMemoryBlocks(msg.shortId, key)).find(b => b.blockId === msg.blockId);
+        if (!existing) return { error: "Memory block not found." };
+        const cards = await repo.getCards(msg.shortId);
+        const known = new Set(
+          cards.flatMap(c => [c.title, ...String(c.keys || "").split(/[,;]+/)])
+            .map(t => String(t || "").trim().toLowerCase()).filter(Boolean)
+        );
+        const { entities, keywords } = extractBlockTags(msg.povText, known);
+        await repo.putNpcMemoryBlock({ ...existing, povText: msg.povText, entities, keywords });
+        return { ok: true };
+      }
+      case "consolidateOutlook":
+        return consolidateOutlookForCharacter(msg.shortId, msg.characterTitle);
       case "getState": {
         // Load each store ONCE and reuse (seedBaselines used to re-read all of these).
         const settings = await repo.getSettings();
-        debugEnabled = !!settings?.showDebug; // keep verbose logging in sync with the user's setting
+        debugEnabled = !!settings?.showDebug; setInfraDebug(debugEnabled); // keep verbose logging in sync with the user's setting
         const adv = await repo.getAdventure(msg.shortId);
         // Lazy, best-effort: rewrite a legacy "custom"-typed Configure MemorAID card to the
         // dedicated MemorAID type (write-back to AID + local) on this load. No-op once migrated.
@@ -3771,10 +4210,40 @@ async function handleMessage(msg: BgMessage): Promise<any> {
             memoraidBannerDismissed: !!settings.memoraidBannerDismissed,
             characterCardLimit: settings.characterCardLimit ?? 600,
             thoughtCardLimit: settings.thoughtCardLimit ?? 2000,
+            // Feature-enable flags + per-feature config the panel reads back to hydrate its toggles.
+            // Omitting any of these makes the corresponding checkbox render unchecked (or reset to
+            // default) on every getState refresh — the "Crystallized missing entirely" bug class.
+            enableAutomaticUpdates: !!settings.enableAutomaticUpdates,
+            enableMemorAID: settings.enableMemorAID !== false,
+            enableLivingCharacters: settings.enableLivingCharacters !== false,
+            livingCharactersTitlePrefix: settings.livingCharactersTitlePrefix ?? "Life - ",
+            livingCharactersKeyPrefix: settings.livingCharactersKeyPrefix ?? "chaos-v2:",
+            groupThoughtsInRoster: !!settings.groupThoughtsInRoster,
+            enableCrystallized: !!settings.enableCrystallized,
+            crystallizedInterval: settings.crystallizedInterval ?? 20,
+            crystallizedEntryMaxChars: settings.crystallizedEntryMaxChars ?? 900,
+            crystallizedNodeCap: settings.crystallizedNodeCap ?? 12,
+            crystallizedKnowsCap: settings.crystallizedKnowsCap ?? 2,
+            crystallizedRecallsCap: settings.crystallizedRecallsCap ?? 2,
+            crystallizedVividCap: settings.crystallizedVividCap ?? 4,
+            crystallizedOutlookCap: settings.crystallizedOutlookCap ?? 2,
+            crystallizedPreferencesCap: settings.crystallizedPreferencesCap ?? 4,
+            crystallizedNpcMemoryCap: settings.crystallizedNpcMemoryCap ?? 400,
+            // Per-pass LLM enable flags (default on / opt-out).
+            crystallizedKnowsEnabled: settings.crystallizedKnowsEnabled !== false,
+            crystallizedNodesEnabled: settings.crystallizedNodesEnabled !== false,
+            crystallizedOutlookEnabled: settings.crystallizedOutlookEnabled !== false,
+            crystallizedPreferencesEnabled: settings.crystallizedPreferencesEnabled !== false,
+            crystallizedNpcMemoryEnabled: settings.crystallizedNpcMemoryEnabled !== false,
           } : null,
           protagonist: adv?.protagonistName ?? null,
           scenario: adv?.title ?? null,
           memory: adv?.memory ?? null,
+          // Per-adventure MemorAID roster + Living Characters sim config (incl. pairing pressure pools):
+          // the panel repopulates its editors from these, so getState must return them or a saved config
+          // silently fails to reload ("pairing pressure pools isn't saving").
+          memoraidCharacters: adv?.memoraidCharacters ?? [],
+          livingConfig: adv?.livingConfig ?? {},
           actionsCount,
           actionCount: actionsCount,
           actions: referencedActions.map(a => ({ id: a.id, text: a.text, type: a.type })),

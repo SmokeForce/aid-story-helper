@@ -161,6 +161,51 @@ export function buildEditMemory(
   });
 }
 
+/** AID adventure AI-Instructions (AIN) state. `type` selects which text is in effect:
+ *  "model" (built-in default), "scenario" (scenario author's default), or "custom" (user text). */
+export interface AdventureInstructions {
+  type?: string;
+  scenario?: string;
+  custom?: string;
+  model?: string;
+}
+
+/**
+ * The AIN text currently IN EFFECT for the adventure, given its `type`. When the adventure is on a
+ * default (Model/Scenario) rather than Custom, the active text lives in `scenario`/`model`, NOT
+ * `custom` (which is empty/stale). Callers converting the adventure to Custom (e.g. an OffMeta AIN
+ * import) must seed the new custom value with THIS text so the previously-effective default isn't
+ * silently dropped. Unknown/missing type falls back to `custom`.
+ */
+export function effectiveAIN(instructions: AdventureInstructions | null | undefined): string {
+  const i = instructions || {};
+  const type = String(i.type || "").toLowerCase();
+  if (type === "scenario") return i.scenario || "";
+  if (type === "model") return i.model || "";
+  return i.custom || "";
+}
+
+/**
+ * Build a batched mutation request for UseDeleteStoryCard.
+ */
+export function buildCardDelete(
+  endpoint: string,
+  query: string,
+  token: string,
+  cardId: string,
+  shortId: string
+): GqlMutationRequest {
+  // AID's DeleteStoryCardInput requires `id`, `shortId` AND `contentType` (all String!); omitting any
+  // is rejected server-side ("Field \"<x>\" of required type \"String!\" was not provided.").
+  return buildGraphQLMutation(endpoint, query, token, "UseDeleteStoryCard", {
+    input: {
+      id: cardId,
+      shortId,
+      contentType: "adventure"
+    }
+  });
+}
+
 export const DEFAULT_GQL_QUERIES = {
   SaveQueueStoryCard: `
     mutation SaveQueueStoryCard($input: UpdateStoryCardInput!) {
@@ -243,6 +288,20 @@ export const DEFAULT_GQL_QUERIES = {
         }
         message
         success
+        __typename
+      }
+    }
+  `,
+  UseDeleteStoryCard: `
+    mutation UseDeleteStoryCard($input: DeleteStoryCardInput!) {
+      deleteStoryCard(input: $input) {
+        success
+        message
+        storyCard {
+          id
+          deletedAt
+          __typename
+        }
         __typename
       }
     }

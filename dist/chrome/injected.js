@@ -66,6 +66,76 @@
     })).filter((o) => o.operationName !== "GenerateStoryCard");
   }
 
+  // src/shared/native-generate.ts
+  var GENERATE_OP = "GenerateStoryCard";
+  function normalizeBatch(body) {
+    let parsed = body;
+    if (typeof body === "string") {
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        return [];
+      }
+    }
+    if (parsed == null) return [];
+    return Array.isArray(parsed) ? parsed : [parsed];
+  }
+  function forEachStoryCard(node, cb) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const el of node) forEachStoryCard(el, cb);
+      return;
+    }
+    const obj = node;
+    if (obj.id && (obj.__typename === "StoryCard" || typeof obj.value === "string")) {
+      cb(obj);
+    }
+    for (const key of Object.keys(obj)) {
+      const v = obj[key];
+      if (v && typeof v === "object") forEachStoryCard(v, cb);
+    }
+  }
+  function requestHasNativeCardGeneration(requestBody) {
+    return normalizeBatch(requestBody).some((op) => op?.operationName === GENERATE_OP);
+  }
+  function generatedCardIdsFromRequest(requestBody) {
+    const ids = [];
+    for (const op of normalizeBatch(requestBody)) {
+      if (op?.operationName !== GENERATE_OP) continue;
+      const v = op.variables || {};
+      const input = v.input || {};
+      const cand = v.id ?? v.storyCardId ?? v.cardId ?? input.id ?? input.storyCardId ?? input.cardId ?? input.storyCard?.id;
+      if (typeof cand === "string" && cand && !ids.includes(cand)) ids.push(cand);
+    }
+    return ids;
+  }
+  function collectGeneratedCardUpdates(requestBody, responseJson) {
+    const reqBatch = normalizeBatch(requestBody);
+    if (!reqBatch.some((op) => op?.operationName === GENERATE_OP)) return [];
+    const resBatch = normalizeBatch(responseJson);
+    const updates = [];
+    const seen = /* @__PURE__ */ new Set();
+    const collectFrom = (node) => {
+      forEachStoryCard(node, (card) => {
+        if (typeof card.id === "string" && card.id && typeof card.value === "string" && !seen.has(card.id)) {
+          seen.add(card.id);
+          const upd = { id: card.id, value: card.value };
+          if (typeof card.description === "string") upd.description = card.description;
+          updates.push(upd);
+        }
+      });
+    };
+    const onlyGenerate = reqBatch.length === 1 && reqBatch[0]?.operationName === GENERATE_OP;
+    if (onlyGenerate) {
+      collectFrom(resBatch);
+    } else {
+      for (let i = 0; i < reqBatch.length; i++) {
+        if (reqBatch[i]?.operationName === GENERATE_OP) collectFrom(resBatch[i]);
+      }
+    }
+    return updates;
+  }
+
   // src/interceptor/gui-edit.ts
   function isTextField(el) {
     return !!el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT");
@@ -260,6 +330,8 @@
     }
     const pendingActionResolvers = /* @__PURE__ */ new Map();
     const adventureIdMap = /* @__PURE__ */ new Map();
+    let overridesSuppressedUntil = 0;
+    const GENERATE_SUPPRESS_MS = 6e3;
     function getShortIdFromAdventureId(advId) {
       if (!advId) return "";
       const cleanAdvId = String(advId).replace(/^Adventure:/, "");
@@ -1093,6 +1165,19 @@
             const r = await maybeInterceptAction(batch);
             actionInjected = r.injected;
           }
+          if (requestHasNativeCardGeneration(batch)) {
+            const genIds = generatedCardIdsFromRequest(batch);
+            if (genIds.length) {
+              for (const gid of genIds) {
+                approvedCards.delete(gid);
+                approvedCardKeys.delete(gid);
+              }
+              dlog("[AID injected] Native card generation \u2014 released stale-value guard for:", genIds.join(", "));
+            } else {
+              overridesSuppressedUntil = Date.now() + GENERATE_SUPPRESS_MS;
+              dlog("[AID injected] Native card generation (target id not in request) \u2014 suspending response overrides briefly.");
+            }
+          }
           if (lastSentWrites.size > 200) {
             const threshold = Date.now() - WRITE_DEBOUNCE_MS * 2;
             for (const [id, record] of lastSentWrites.entries()) {
@@ -1291,7 +1376,15 @@
           try {
             const clone = res.clone();
             const responseJson = await clone.json();
-            const modified = applyResponseOverrides(responseJson);
+            try {
+              for (const u of collectGeneratedCardUpdates(init?.body, responseJson)) {
+                approvedCards.set(u.id, { value: u.value, description: u.description ?? approvedCards.get(u.id)?.description });
+                dlog("[AID injected] Adopted natively-generated value for card:", u.id);
+              }
+            } catch {
+            }
+            const overridesSuppressed = Date.now() < overridesSuppressedUntil;
+            const modified = overridesSuppressed ? false : applyResponseOverrides(responseJson);
             postAdventureLoaded(responseJson, init?.body);
             if (modified) {
               const resHeaders = new Headers();

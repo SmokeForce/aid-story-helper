@@ -1,5 +1,6 @@
 import { WsTracker } from "../shared/ws-tracker";
 import { extractOps } from "../shared/gql-detect";
+import { requestHasNativeCardGeneration, generatedCardIdsFromRequest, collectGeneratedCardUpdates } from "../shared/native-generate";
 import { pickActiveField } from "./gui-edit";
 
 // Runs in the PAGE (MAIN) world. No extension APIs here — only postMessage.
@@ -251,6 +252,14 @@ import { pickActiveField } from "./gui-edit";
 
   const pendingActionResolvers = new Map<string, (val: { updatedNames: string[]; injectText: string }) => void>();
   const adventureIdMap = new Map<string, string>();
+
+  // When AI Dungeon natively (re)generates a Story Card, its fresh value must not be reverted by the
+  // stale-value guard (approvedCards is seeded with the pre-generation snapshot on page load). If we
+  // can read the target card id from the request we release just that card; otherwise we briefly
+  // suspend the response-override entirely so the generation can't be clobbered. Deadline is a
+  // page-clock ms timestamp; 0 = inactive.
+  let overridesSuppressedUntil = 0;
+  const GENERATE_SUPPRESS_MS = 6000;
 
   function getShortIdFromAdventureId(advId: string): string {
     if (!advId) return "";
@@ -1211,6 +1220,21 @@ import { pickActiveField } from "./gui-edit";
           actionInjected = r.injected;
         }
 
+        // 1b. Native card generation: AID's own "Generate" issues a card-generation mutation whose
+        // fresh value the stale-value guard would otherwise revert. Release the guard for the target
+        // card(s) if we can read their id; else briefly suspend the response-override so the generated
+        // value can't be clobbered. The generated value is adopted from the response below.
+        if (requestHasNativeCardGeneration(batch)) {
+          const genIds = generatedCardIdsFromRequest(batch);
+          if (genIds.length) {
+            for (const gid of genIds) { approvedCards.delete(gid); approvedCardKeys.delete(gid); }
+            dlog("[AID injected] Native card generation — released stale-value guard for:", genIds.join(", "));
+          } else {
+            overridesSuppressedUntil = Date.now() + GENERATE_SUPPRESS_MS;
+            dlog("[AID injected] Native card generation (target id not in request) — suspending response overrides briefly.");
+          }
+        }
+
         // 2. Perform client-side GraphQL Deduplication & Debouncing
         // Clean up old entries from lastSentWrites map to prevent memory growth
         if (lastSentWrites.size > 200) {
@@ -1473,7 +1497,21 @@ import { pickActiveField } from "./gui-edit";
         try {
           const clone = res.clone();
           const responseJson = await clone.json();
-          const modified = applyResponseOverrides(responseJson);
+
+          // Native card generation: adopt the freshly generated value(s) as the new authoritative
+          // value BEFORE the stale-value override runs, so the generation is not reverted (and any
+          // later autosave is protected at the new value, not the pre-generation snapshot).
+          try {
+            for (const u of collectGeneratedCardUpdates(init?.body, responseJson)) {
+              approvedCards.set(u.id, { value: u.value, description: u.description ?? approvedCards.get(u.id)?.description });
+              dlog("[AID injected] Adopted natively-generated value for card:", u.id);
+            }
+          } catch { /* ignore adoption errors, fall through to override */ }
+
+          // Skip the stale-value override entirely while a native generation is in flight whose target
+          // id we couldn't read from the request (the generated value may arrive in a later fetch).
+          const overridesSuppressed = Date.now() < overridesSuppressedUntil;
+          const modified = overridesSuppressed ? false : applyResponseOverrides(responseJson);
           postAdventureLoaded(responseJson, init?.body);
 
           if (modified) {

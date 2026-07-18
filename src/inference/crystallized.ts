@@ -403,6 +403,26 @@ export function effectiveCrystallizedCaps(adv: CapSource | undefined | null, set
   };
 }
 
+/** Remove empty/malformed entries from a Crystallized state so nothing hollow is stored, fed back into
+ *  the next distillation's "current state" context, or rendered. Safe + idempotent: only drops entries
+ *  with no usable content (empty subject/text/snapshot) and normalizes missing arrays. Returns the
+ *  (possibly new) state plus whether anything changed — used by the one-time DB heal that runs when an
+ *  older database is imported or upgraded into v1.2. */
+export function sanitizeCrystallizedState(state: CrystallizedState): { state: CrystallizedState; changed: boolean } {
+  if (!state || typeof state !== "object") return { state, changed: false };
+  const schema = (state.schema || []).filter((i) => String(i?.subject || "").trim() && String(i?.text || "").trim());
+  const nodes = (state.nodes || []).filter((n) => String(n?.snapshot || "").trim());
+  const outlook = (state.outlook || []).filter((b) => String(b?.text || "").trim());
+  const preferences = (state.preferences || []).filter((b) => String(b?.text || "").trim());
+  const changed =
+    schema.length !== (state.schema || []).length ||
+    nodes.length !== (state.nodes || []).length ||
+    outlook.length !== (state.outlook || []).length ||
+    preferences.length !== (state.preferences || []).length;
+  if (!changed) return { state, changed: false };
+  return { state: { ...state, schema, nodes, outlook, preferences }, changed: true };
+}
+
 export function renderCrystallizedEntry(state: CrystallizedState, name: string, maxChars: number): string {
   // Drop retired subjects and the card's OWN character (self-knowledge belongs in their character
   // card, not their Crystallized "Knows"). The self-filter here also self-heals cards distilled

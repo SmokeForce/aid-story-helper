@@ -1,6 +1,7 @@
 import { openAidDb, type AdventureMeta, type ActionRow, type VividMemoryLogEntry, type InjectionLogEntry, type CrystallizedArchiveEntry, type NpcMemoryBlock } from "./db";
 import type { CanonicalAction, OpRecord, CardRow, Version, Settings, GlobalAsset } from "../shared/types";
 import type { CrystallizedState } from "../inference/crystallized";
+import { sanitizeCrystallizedState } from "../inference/crystallized";
 import type { PhenotypeRecord } from "../inference/phenotype/types";
 
 export type { CrystallizedArchiveEntry, NpcMemoryBlock };
@@ -359,6 +360,9 @@ export class Repo {
       await tx.done;
       counts[s] = n;
     }
+    // A restored backup may carry old-format / stale per-adventure state; sanitize it so nothing hollow
+    // was just merged in. Unconditional (independent of this device's dbHealVersion stamp).
+    try { counts.crystallizedHealed = await this.healAllCrystallizedState(); } catch { /* non-fatal */ }
     return { ok: true, counts };
   }
 
@@ -463,6 +467,25 @@ export class Repo {
   async putCrystallizedState(shortId: string, characterKey: string, state: CrystallizedState): Promise<void> {
     const db = await openAidDb();
     await db.put("crystallizedState", { shortId, characterKey, state });
+  }
+
+  /** One-time DB heal: sanitize every stored Crystallized state (drop empty/malformed Knows/nodes/
+   *  outlook/preferences) so an imported or upgraded older database can't inject hollow entries (e.g.
+   *  the empty `""` a stale Knows produced) or feed them back into distillation context. Idempotent —
+   *  re-runs are cheap no-ops. Returns the number of states rewritten. */
+  async healAllCrystallizedState(): Promise<number> {
+    const db = await openAidDb();
+    const rows = await db.getAll("crystallizedState");
+    let healed = 0;
+    for (const row of rows) {
+      if (!row?.state) continue;
+      const { state, changed } = sanitizeCrystallizedState(row.state);
+      if (changed) {
+        await db.put("crystallizedState", { ...row, state });
+        healed++;
+      }
+    }
+    return healed;
   }
 
   async appendCrystallizedArchive(entries: CrystallizedArchiveEntry[]): Promise<void> {

@@ -20117,6 +20117,1005 @@ Output only the SCHEMA section.`,
     return _dbPromise;
   }
 
+  // src/shared/types.ts
+  function countActions(actions) {
+    return actions.length;
+  }
+  function sliceLastActions(actions, n3) {
+    if (n3 <= 0) return [];
+    return actions.slice(-n3);
+  }
+  function isCharacterTriggered(text, title, keys) {
+    const escapeRegex = (s3) => s3.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+    const rawCandidates = [title, ...keys.split(/[,;]+/)].map((s3) => stripPossessive(s3.trim())).filter(Boolean);
+    const candidates = [];
+    for (const c2 of rawCandidates) {
+      candidates.push(c2);
+      if (c2.includes(" and ") || c2.includes(" & ")) {
+        const parts = c2.split(/\s+(?:and|&)\s+/i);
+        for (const p5 of parts) {
+          const trimmed = p5.trim();
+          if (trimmed) candidates.push(trimmed);
+        }
+      }
+    }
+    const textLower = text.toLowerCase();
+    for (const cand of candidates) {
+      const r2 = new RegExp(`\\b${escapeRegex(cand.toLowerCase())}\\b`);
+      if (r2.test(textLower)) return true;
+    }
+    return false;
+  }
+  function stripPossessive(s3) {
+    return s3.replace(/['’]s?$/i, "").trim();
+  }
+  function determineFellOutCards(lookbackSize, allActions, newActionsCount, cards) {
+    const currentActions = sliceLastActions(allActions, lookbackSize);
+    const currentText = currentActions.map((a2) => a2.text || "").join(" ").toLowerCase();
+    const oldActions = allActions.slice(0, -newActionsCount);
+    const previousActions = sliceLastActions(oldActions, lookbackSize);
+    const previousText = previousActions.map((a2) => a2.text || "").join(" ").toLowerCase();
+    const activeCharacters = cards.filter(
+      (c2) => !c2.deletedAt && ((c2.type || "").toLowerCase() === "character" || (c2.type || "").toLowerCase() === "custom") && !(c2.title || "").toLowerCase().endsWith(" (memory)")
+    );
+    const fellOut = [];
+    for (const card of activeCharacters) {
+      const name = card.title || "";
+      const keys = card.keys || "";
+      if (!name.trim() && !keys.trim()) continue;
+      const wasActive = isCharacterTriggered(previousText, name, keys);
+      const isActive = isCharacterTriggered(currentText, name, keys);
+      if (wasActive && !isActive) {
+        fellOut.push(card);
+      }
+    }
+    return fellOut;
+  }
+
+  // src/inference/crystallized.ts
+  function parseSubjectLabel(raw) {
+    const s3 = String(raw || "");
+    const bar = s3.indexOf("|");
+    if (bar === -1) return { subject: s3.trim(), aliases: [] };
+    const subject = s3.slice(0, bar).trim();
+    const aliases3 = s3.slice(bar + 1).split(",").map((a2) => a2.trim()).filter(Boolean);
+    return { subject, aliases: aliases3 };
+  }
+  function formatSubjectLabel(item) {
+    const aliases3 = (item.aliases || []).filter(Boolean);
+    return aliases3.length ? `${item.subject} | ${aliases3.join(", ")}` : item.subject;
+  }
+  function subjectTokens(name) {
+    return String(name || "").split(/[\/,]/).map((t3) => t3.trim().toLowerCase()).filter(Boolean);
+  }
+  function schemaItemTokens(item) {
+    const out2 = /* @__PURE__ */ new Set();
+    for (const t3 of subjectTokens(item.subject)) out2.add(t3);
+    for (const a2 of item.aliases || []) for (const t3 of subjectTokens(a2)) out2.add(t3);
+    return out2;
+  }
+  var KINSHIP_NOUNS = /* @__PURE__ */ new Set([
+    "father",
+    "mother",
+    "mom",
+    "mum",
+    "dad",
+    "papa",
+    "daddy",
+    "mommy",
+    "parent",
+    "parents",
+    "brother",
+    "sister",
+    "sibling",
+    "son",
+    "daughter",
+    "child",
+    "children",
+    "kid",
+    "husband",
+    "wife",
+    "spouse",
+    "partner",
+    "uncle",
+    "aunt",
+    "auntie",
+    "cousin",
+    "nephew",
+    "niece",
+    "grandfather",
+    "grandmother",
+    "grandpa",
+    "grandma",
+    "granddad",
+    "grandmom",
+    "granddaughter",
+    "grandson"
+  ]);
+  var SUBJECT_LEADING_STRIP = /* @__PURE__ */ new Set(["the", "a", "an", "my", "your", "his", "her", "their", "our", "its"]);
+  var SYNONYM_CLUSTERS = [
+    ["relationship", "connection", "bond"],
+    ["home", "house", "apartment", "flat"],
+    ["job", "work", "career"],
+    ["past", "history", "backstory"]
+  ];
+  var SYNONYM_CANON = /* @__PURE__ */ new Map();
+  for (const cluster of SYNONYM_CLUSTERS) for (const w of cluster) SYNONYM_CANON.set(w, cluster[0]);
+  var OWN_POSSESSIVES = /* @__PURE__ */ new Set(["the", "a", "an", "my", "your", "our", "its"]);
+  function subjectAliasKeys(name) {
+    const out2 = /* @__PURE__ */ new Set();
+    let s3 = String(name || "").toLowerCase().replace(/[’]/g, "'");
+    s3 = s3.replace(/[^a-z0-9'\s]/g, " ").replace(/\s+/g, " ").trim();
+    if (!s3) return out2;
+    const words = s3.split(" ");
+    let i3 = 0;
+    let ownerSlot = "own";
+    while (i3 < words.length - 1) {
+      const w = words[i3];
+      if (SUBJECT_LEADING_STRIP.has(w)) {
+        ownerSlot = OWN_POSSESSIVES.has(w) ? ownerSlot : w;
+        i3++;
+        continue;
+      }
+      if (/'s?$/.test(w)) {
+        ownerSlot = w.replace(/'s?$/, "");
+        i3++;
+        continue;
+      }
+      break;
+    }
+    const cleaned = words.slice(i3).map((w) => w.replace(/'/g, ""));
+    const phrase = cleaned.join(" ").trim();
+    if (phrase) out2.add(phrase);
+    const head = cleaned[cleaned.length - 1] || "";
+    if (KINSHIP_NOUNS.has(head)) out2.add("kin:" + head);
+    if (cleaned.length === 1) {
+      const canon = SYNONYM_CANON.get(head) || SYNONYM_CANON.get(head.replace(/s$/, ""));
+      if (canon) out2.add(`syn:${ownerSlot}:${canon}`);
+    }
+    return out2;
+  }
+  function schemaItemMatchKeys(item) {
+    const out2 = schemaItemTokens(item);
+    for (const k2 of subjectAliasKeys(item.subject)) out2.add(k2);
+    for (const a2 of item.aliases || []) for (const k2 of subjectAliasKeys(a2)) out2.add(k2);
+    return out2;
+  }
+  function nameWords(s3) {
+    return String(s3 || "").toLowerCase().replace(/["'’.,]/g, "").split(/\s+/).filter(Boolean);
+  }
+  function isSelfSubject(item, ownerName) {
+    const owner = nameWords(ownerName || "");
+    if (!owner.length) return false;
+    for (const cand of [item.subject, ...item.aliases || []]) {
+      const w = nameWords(cand);
+      if (!w.length) continue;
+      const [short, long] = w.length <= owner.length ? [w, owner] : [owner, w];
+      if (short.every((x) => long.includes(x))) return true;
+    }
+    return false;
+  }
+  function looksTruncated(text) {
+    const t3 = String(text || "").trim();
+    if (!t3) return true;
+    return !/[.!?…][)"'’\]]?$/.test(t3);
+  }
+  function unionAliases(...lists) {
+    const seen = /* @__PURE__ */ new Set();
+    const out2 = [];
+    for (const list4 of lists) for (const a2 of list4 || []) {
+      const key = a2.trim().toLowerCase();
+      if (a2.trim() && !seen.has(key)) {
+        seen.add(key);
+        out2.push(a2.trim());
+      }
+    }
+    return out2;
+  }
+  function dedupeSchema(schema) {
+    const result = [];
+    const sets = [];
+    for (const item of schema) {
+      const tokens = schemaItemMatchKeys(item);
+      let idx = -1;
+      for (let i3 = 0; i3 < result.length; i3++) {
+        for (const t3 of tokens) {
+          if (sets[i3]?.has(t3)) {
+            idx = i3;
+            break;
+          }
+        }
+        if (idx !== -1) break;
+      }
+      if (idx === -1) {
+        const copy2 = { ...item, aliases: unionAliases(item.aliases) };
+        result.push(copy2);
+        sets.push(schemaItemMatchKeys(copy2));
+      } else {
+        const s3 = result[idx];
+        s3.text = item.text;
+        const extra = [item.subject, ...item.aliases || []].flatMap((label2) => label2.split(/[\/,]/)).map((sub) => sub.trim()).filter((sub) => sub && sub.toLowerCase() !== s3.subject.toLowerCase());
+        s3.aliases = unionAliases(s3.aliases, extra);
+        s3.retired = (s3.retired ?? false) && (item.retired ?? false);
+        sets[idx] = schemaItemMatchKeys(s3);
+      }
+    }
+    return result;
+  }
+  function extractThoughtInner(text) {
+    let inner = (text || "").trim();
+    inner = inner.replace(/^\[?\s*[^\n\]]*\bThoughts:\s*/i, "");
+    inner = inner.replace(/^[\s[]+/, "").replace(/[\s\]]+$/, "").trim();
+    return inner;
+  }
+  function parseCrystallized(notes) {
+    const state = {
+      schema: [],
+      nodes: [],
+      unreferencedPasses: {},
+      outlook: [],
+      preferences: []
+    };
+    if (!notes) return state;
+    const header = "[CRYSTALLIZED MEMORY]";
+    const idx = notes.indexOf(header);
+    const block = idx !== -1 ? notes.slice(idx + header.length) : notes;
+    const sections = block.split(/\n###\s+/);
+    for (const sec of sections) {
+      const lines = sec.split("\n");
+      const firstLine = lines[0];
+      const titleLine = firstLine ? firstLine.trim().toLowerCase() : "";
+      if (titleLine.includes("i. schema")) {
+        for (let i3 = 1; i3 < lines.length; i3++) {
+          const rawLine = lines[i3];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (!line.startsWith("- ")) continue;
+          const match2 = line.match(/^-\s*\[([^\]]+)\]\s*(.*)$/);
+          if (match2 && match2[1] !== void 0 && match2[2] !== void 0) {
+            const { subject, aliases: aliases3 } = parseSubjectLabel(match2[1]);
+            let text = match2[2].trim();
+            const retired = text.endsWith("(retired)");
+            if (retired) {
+              text = text.slice(0, -9).trim();
+              if (text.endsWith(";")) text = text.slice(0, -1).trim();
+              if (text.endsWith("-")) text = text.slice(0, -1).trim();
+              text = text.trim();
+            }
+            state.schema.push({ subject, text, retired, aliases: aliases3 });
+          }
+        }
+      } else if (titleLine.includes("ii. nodes")) {
+        let currentNode = null;
+        for (let i3 = 1; i3 < lines.length; i3++) {
+          const rawLine = lines[i3];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (line.startsWith("- Node_ID:")) {
+            if (currentNode && currentNode.id) {
+              state.nodes.push(currentNode);
+            }
+            currentNode = {
+              id: line.slice(10).trim(),
+              vibrancy: 3,
+              snapshot: "",
+              links: []
+            };
+          } else if (currentNode) {
+            if (line.startsWith("Vibrancy:")) {
+              const vMatch = line.match(/Vibrancy:\s*(\d+)\/3/);
+              if (vMatch && vMatch[1] !== void 0) {
+                currentNode.vibrancy = parseInt(vMatch[1]);
+              }
+            } else if (line.startsWith("Snapshot:")) {
+              let snap = line.slice(9).trim();
+              if (snap.endsWith("]")) snap = snap.slice(0, -1).trim();
+              currentNode.snapshot = snap;
+            } else if (line.startsWith("Links:")) {
+              const linksStr = line.slice(6).trim();
+              currentNode.links = linksStr ? linksStr.split(/[,;\s]+/).map((s3) => s3.trim()).filter(Boolean) : [];
+            } else if (line.startsWith("  ") || line.startsWith("	")) {
+              if (currentNode.snapshot) {
+                currentNode.snapshot += " " + line.trim();
+              }
+            }
+          }
+        }
+        if (currentNode && currentNode.id) {
+          state.nodes.push(currentNode);
+        }
+      } else if (titleLine.includes("iii. bookkeeping") || titleLine.includes("bookkeeping")) {
+        for (let i3 = 1; i3 < lines.length; i3++) {
+          const rawLine = lines[i3];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (line.startsWith("- SubjectUnreferencedPasses:")) {
+            const val = line.slice(28).trim();
+            const pairs3 = val.split(/[,;]+/);
+            for (const p5 of pairs3) {
+              const parts = p5.split("=");
+              if (parts.length === 2) {
+                const p0 = parts[0];
+                const p1 = parts[1];
+                if (p0 && p1) {
+                  state.unreferencedPasses[p0.trim()] = parseInt(p1.trim()) || 0;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return state;
+  }
+  function effectiveCrystallizedCaps(adv, settings) {
+    const pick2 = (k2, d2) => adv?.[k2] ?? settings?.[k2] ?? d2;
+    return {
+      knows: pick2("crystallizedKnowsCap", 2),
+      recalls: pick2("crystallizedRecallsCap", 2),
+      vivid: pick2("crystallizedVividCap", 4),
+      outlook: pick2("crystallizedOutlookCap", 2),
+      preferences: pick2("crystallizedPreferencesCap", 4)
+    };
+  }
+  function sanitizeCrystallizedState(state) {
+    if (!state || typeof state !== "object") return { state, changed: false };
+    const schema = (state.schema || []).filter((i3) => String(i3?.subject || "").trim() && String(i3?.text || "").trim());
+    const nodes = (state.nodes || []).filter((n3) => String(n3?.snapshot || "").trim());
+    const outlook = (state.outlook || []).filter((b) => String(b?.text || "").trim());
+    const preferences = (state.preferences || []).filter((b) => String(b?.text || "").trim());
+    const changed = schema.length !== (state.schema || []).length || nodes.length !== (state.nodes || []).length || outlook.length !== (state.outlook || []).length || preferences.length !== (state.preferences || []).length;
+    if (!changed) return { state, changed: false };
+    return { state: { ...state, schema, nodes, outlook, preferences }, changed: true };
+  }
+  function renderCrystallizedEntry(state, name, maxChars) {
+    const activeSchema = state.schema.filter((item) => !item.retired && !isSelfSubject(item, name));
+    let schemaItems = activeSchema.slice();
+    const highVibrancyNodes = state.nodes.map((node, index3) => ({ node, index: index3 })).filter((item) => item.node.vibrancy >= 2).sort((a2, b) => {
+      if (b.node.vibrancy !== a2.node.vibrancy) {
+        return b.node.vibrancy - a2.node.vibrancy;
+      }
+      return b.index - a2.index;
+    });
+    let nodesToRender = [...highVibrancyNodes];
+    let outlookLines = (state.outlook || []).filter((b) => b.strength >= 2).sort((a2, b) => b.strength - a2.strength).map((b) => b.text);
+    let preferenceLines = (state.preferences || []).slice().sort((a2, b) => b.strength - a2.strength).map((b) => b.text);
+    while (true) {
+      const value = buildRenderedString(name, schemaItems, nodesToRender.map((n3) => n3.node.snapshot), outlookLines, [], preferenceLines);
+      if (value.length <= maxChars) return value;
+      if (outlookLines.length > 0) {
+        outlookLines.pop();
+        continue;
+      }
+      if (preferenceLines.length > 0) {
+        preferenceLines.pop();
+        continue;
+      }
+      if (nodesToRender.length > 0) {
+        nodesToRender.pop();
+        continue;
+      }
+      if (schemaItems.length === 0) {
+        return value;
+      }
+      schemaItems.pop();
+    }
+  }
+  function renderCrystallizedEntryScene(state, name, opts2) {
+    const sceneToks = opts2.sceneTokens || /* @__PURE__ */ new Set();
+    const active = state.schema.filter((i3) => !i3.retired && !isSelfSubject(i3, name));
+    const isPresent = (i3) => {
+      for (const t3 of schemaItemTokens(i3)) if (opts2.presentSubjectTokens.has(t3)) return true;
+      return false;
+    };
+    const knowsRelevance = (i3) => {
+      const kt = snapshotTokens(`${i3.subject} ${i3.text}`);
+      let rel = 0;
+      for (const t3 of kt) if (sceneToks.has(t3)) rel++;
+      return rel;
+    };
+    const byRelevance = (a2, b) => knowsRelevance(b) - knowsRelevance(a2);
+    const presentChars = active.filter((i3) => isPresent(i3) && opts2.isCharacterSubject(i3)).sort(byRelevance);
+    const presentOther = active.filter((i3) => isPresent(i3) && !opts2.isCharacterSubject(i3)).sort(byRelevance);
+    const absentChars = active.filter((i3) => !isPresent(i3) && opts2.isCharacterSubject(i3)).sort(byRelevance);
+    const absentOther = active.filter((i3) => !isPresent(i3) && !opts2.isCharacterSubject(i3)).sort(byRelevance);
+    let schemaItems = [...presentChars, ...presentOther, ...absentChars, ...absentOther].slice(0, Math.max(0, opts2.caps.knows));
+    let vivid = state.nodes.map((node, index3) => ({ node, index: index3 })).filter((x) => x.node.vibrancy >= 2).sort((a2, b) => b.node.vibrancy - a2.node.vibrancy || b.index - a2.index).slice(0, Math.max(0, opts2.caps.vivid)).map((x) => x.node.snapshot);
+    let recalls = opts2.recalls.slice(0, Math.max(0, opts2.caps.recalls));
+    let outlook = (state.outlook || []).filter((b) => b.strength >= 2).sort((a2, b) => b.strength - a2.strength).map((b) => b.text).slice(0, Math.max(0, opts2.caps.outlook));
+    let preferences = (state.preferences || []).map((b) => {
+      const pt = snapshotTokens(b.text);
+      let rel = 0;
+      for (const t3 of pt) if (sceneToks.has(t3)) rel++;
+      return { text: b.text, rel, strength: b.strength };
+    }).sort((a2, b) => b.rel - a2.rel || b.strength - a2.strength).slice(0, Math.max(0, opts2.caps.preferences)).map((p5) => p5.text);
+    while (true) {
+      const value = buildRenderedString(name, schemaItems, vivid, outlook, recalls, preferences);
+      if (value.length <= opts2.maxChars) return value;
+      if (recalls.length > 0) {
+        recalls.pop();
+        continue;
+      }
+      if (vivid.length > 0) {
+        vivid.pop();
+        continue;
+      }
+      if (schemaItems.length > 1) {
+        schemaItems.pop();
+        continue;
+      }
+      if (outlook.length > 1) {
+        outlook.pop();
+        continue;
+      }
+      if (preferences.length > 1) {
+        preferences.pop();
+        continue;
+      }
+      return value;
+    }
+  }
+  function jsonEscape(s3) {
+    return String(s3 || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  }
+  var KNOWS_ENTRY_MAXCHARS = 240;
+  function capKnowsText(text) {
+    return text.length > KNOWS_ENTRY_MAXCHARS ? text.slice(0, KNOWS_ENTRY_MAXCHARS - 1).trimEnd() + "\u2026" : text;
+  }
+  function buildRenderedString(name, schema, snapshots, outlookLines = [], recallLines = [], preferenceLines = []) {
+    const lines = [`[${name}'s Crystallized Memory`];
+    const knows = schema.map((item) => ({
+      label: [item.subject, ...item.aliases || []].map((s3) => String(s3 || "").trim()).filter(Boolean).join(" | "),
+      text: capKnowsText(String(item.text || "").trim())
+    })).filter((k2) => k2.label && k2.text);
+    if (knows.length > 0) {
+      lines.push("Knows:");
+      knows.forEach((k2, i3) => {
+        const comma = i3 < knows.length - 1 ? "," : "";
+        lines.push(`{"${jsonEscape(k2.label)}": "${jsonEscape(k2.text)}"}${comma}`);
+      });
+    }
+    const recalls = recallLines.map((t3) => String(t3 || "").trim()).filter(Boolean);
+    if (recalls.length > 0) {
+      lines.push("Recalls:");
+      recalls.forEach((t3, i3) => {
+        const comma = i3 < recalls.length - 1 ? "," : "";
+        lines.push(`{${jsonEscape(t3)}}${comma}`);
+      });
+    }
+    const vivid = snapshots.map((s3) => String(s3 || "").trim()).filter(Boolean);
+    if (vivid.length > 0) {
+      lines.push("Vivid Memories:");
+      vivid.forEach((snap, i3) => {
+        const comma = i3 < vivid.length - 1 ? "," : "";
+        lines.push(`{${snap}}${comma}`);
+      });
+    }
+    const prefs = preferenceLines.map((t3) => String(t3 || "").trim()).filter(Boolean);
+    if (prefs.length > 0) {
+      lines.push("Preferences:");
+      prefs.forEach((t3, i3) => {
+        const comma = i3 < prefs.length - 1 ? "," : "";
+        lines.push(`{${jsonEscape(t3)}}${comma}`);
+      });
+    }
+    const outlook = outlookLines.map((t3) => String(t3 || "").trim()).filter(Boolean);
+    if (outlook.length > 0) {
+      lines.push("Outlook:");
+      outlook.forEach((t3, i3) => {
+        const comma = i3 < outlook.length - 1 ? "," : "";
+        lines.push(`{${jsonEscape(t3)}}${comma}`);
+      });
+    }
+    lines.push("]");
+    return lines.join("\n");
+  }
+  function reinforceAndDecay(state, buffer) {
+    const combinedText = buffer.map((item) => `${item.actionText} ${item.thoughtText || ""}`).join("\n");
+    const dyingNodeIds = [];
+    const nextNodes = state.nodes.map((node) => {
+      const suffix = node.id.replace(/^\d+_(.*)$/, "$1");
+      const isTriggered = isCharacterTriggered(combinedText, suffix, node.id);
+      let nextVibrancy = node.vibrancy;
+      if (isTriggered) {
+        nextVibrancy = 3;
+      } else {
+        nextVibrancy = Math.max(0, node.vibrancy - 1);
+      }
+      if (nextVibrancy === 0 && node.vibrancy > 0) {
+        dyingNodeIds.push(node.id);
+      }
+      return {
+        ...node,
+        vibrancy: nextVibrancy
+      };
+    });
+    const nextUnreferenced = { ...state.unreferencedPasses };
+    const nextSchema = state.schema.map((item) => {
+      const isSubjTriggered = isCharacterTriggered(combinedText, item.subject, "");
+      let retired = item.retired;
+      if (isSubjTriggered) {
+        nextUnreferenced[item.subject] = 0;
+        retired = false;
+      } else {
+        nextUnreferenced[item.subject] = (nextUnreferenced[item.subject] || 0) + 1;
+      }
+      return {
+        ...item,
+        retired
+      };
+    });
+    return {
+      state: {
+        ...state,
+        schema: nextSchema,
+        nodes: nextNodes,
+        unreferencedPasses: nextUnreferenced
+      },
+      dyingNodeIds
+    };
+  }
+  function parseLlmOutput(output) {
+    let cleaned = output.trim();
+    if (cleaned.startsWith("[")) cleaned = cleaned.slice(1);
+    if (cleaned.endsWith("]")) cleaned = cleaned.slice(0, -1);
+    if (cleaned.startsWith("{")) cleaned = cleaned.slice(1);
+    if (cleaned.endsWith("}")) cleaned = cleaned.slice(0, -1);
+    cleaned = cleaned.trim();
+    const result = {
+      schema: [],
+      newSnapshots: []
+    };
+    const sections = cleaned.split(/\n###\s+/);
+    for (const sec of sections) {
+      const lines = sec.split("\n");
+      const firstLine = lines[0];
+      const titleLine = firstLine ? firstLine.trim().toLowerCase() : "";
+      if (titleLine.includes("i. schema") || titleLine.includes("schema")) {
+        for (let i3 = 1; i3 < lines.length; i3++) {
+          const rawLine = lines[i3];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (!line.startsWith("- ")) continue;
+          const match2 = line.match(/^-\s*\[([^\]]+)\]\s*(.*)$/);
+          if (match2 && match2[1] !== void 0 && match2[2] !== void 0) {
+            const { subject, aliases: aliases3 } = parseSubjectLabel(match2[1]);
+            result.schema.push({
+              subject,
+              text: match2[2].trim(),
+              aliases: aliases3
+            });
+          }
+        }
+      } else if (titleLine.includes("ii. new nodes") || titleLine.includes("new nodes") || titleLine.includes("nodes")) {
+        for (let i3 = 1; i3 < lines.length; i3++) {
+          const rawLine = lines[i3];
+          if (!rawLine) continue;
+          const line = rawLine.trim();
+          if (!line.startsWith("- ")) continue;
+          let text = line.slice(2).trim();
+          if (text.startsWith("Snapshot:")) {
+            text = text.slice(9).trim();
+          }
+          if (text.endsWith("]")) {
+            text = text.slice(0, -1).trim();
+          }
+          if (text) {
+            result.newSnapshots.push(text);
+          }
+        }
+      }
+    }
+    if (result.schema.length === 0 && result.newSnapshots.length === 0) {
+      const lines = output.split("\n");
+      let inSchema = false;
+      let inNodes = false;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        const lower = trimmed.toLowerCase();
+        if (lower.includes("schema")) {
+          inSchema = true;
+          inNodes = false;
+          continue;
+        }
+        if (lower.includes("new nodes") || lower.includes("nodes")) {
+          inNodes = true;
+          inSchema = false;
+          continue;
+        }
+        if (trimmed.startsWith("- ")) {
+          if (inSchema) {
+            const match2 = trimmed.match(/^-\s*\[([^\]]+)\]\s*(.*)$/);
+            if (match2 && match2[1] !== void 0 && match2[2] !== void 0) {
+              const { subject, aliases: aliases3 } = parseSubjectLabel(match2[1]);
+              result.schema.push({
+                subject,
+                text: match2[2].trim(),
+                aliases: aliases3
+              });
+            }
+          } else if (inNodes) {
+            let text = trimmed.slice(2).trim();
+            if (text.startsWith("Snapshot:")) {
+              text = text.slice(9).trim();
+            }
+            if (text.endsWith("]")) {
+              text = text.slice(0, -1).trim();
+            }
+            if (text) {
+              result.newSnapshots.push(text);
+            }
+          }
+        }
+      }
+    }
+    const haveSubjects = new Set(result.schema.map((s3) => s3.subject.toLowerCase()));
+    for (const rawLine of cleaned.split("\n")) {
+      const m3 = rawLine.trim().match(/^-\s*\[([^\]]+)\]\s*(.+)$/);
+      if (!m3 || m3[1] === void 0 || m3[2] === void 0) continue;
+      const { subject, aliases: aliases3 } = parseSubjectLabel(m3[1]);
+      if (!subject || haveSubjects.has(subject.toLowerCase())) continue;
+      result.schema.push({ subject, text: m3[2].trim(), aliases: aliases3 });
+      haveSubjects.add(subject.toLowerCase());
+    }
+    return result;
+  }
+  function extractKeyword(snapshot) {
+    const clean2 = snapshot.replace(/[^\w\s]/g, "");
+    const words = clean2.split(/\s+/).filter(Boolean);
+    const stops = /* @__PURE__ */ new Set([
+      "the",
+      "a",
+      "an",
+      "he",
+      "she",
+      "it",
+      "they",
+      "we",
+      "i",
+      "you",
+      "in",
+      "on",
+      "at",
+      "to",
+      "for",
+      "with",
+      "of",
+      "and",
+      "but",
+      "or",
+      "is",
+      "was",
+      "were",
+      "am",
+      "are",
+      "have",
+      "has",
+      "had",
+      "do",
+      "does",
+      "did",
+      "his",
+      "her",
+      "their",
+      "my",
+      "your",
+      "our",
+      "him",
+      "them",
+      "us",
+      "me",
+      "this",
+      "that",
+      "these",
+      "those",
+      "then",
+      "there",
+      "here",
+      "when",
+      "where",
+      "why",
+      "how",
+      "so",
+      "no",
+      "not",
+      "yes",
+      "up",
+      "out",
+      "about",
+      "into"
+    ]);
+    for (const word of words) {
+      const lower = word.toLowerCase();
+      if (!stops.has(lower) && word.length > 2) {
+        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+      }
+    }
+    return "Memory";
+  }
+  var SNAPSHOT_STOPWORDS = /* @__PURE__ */ new Set([
+    "the",
+    "and",
+    "that",
+    "with",
+    "from",
+    "this",
+    "have",
+    "were",
+    "was",
+    "for",
+    "his",
+    "her",
+    "him",
+    "she",
+    "they",
+    "into",
+    "onto",
+    "over",
+    "under",
+    "then",
+    "than",
+    "them",
+    "their",
+    "been",
+    "being",
+    "would",
+    "could",
+    "first",
+    "time",
+    "when",
+    "what",
+    "which",
+    "while",
+    "about",
+    "against",
+    "still",
+    "just",
+    "like",
+    "some",
+    "only",
+    "more"
+  ]);
+  function snapshotTokens(s3) {
+    return new Set(
+      String(s3 || "").toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/).filter((w) => w.length >= 4 && !SNAPSHOT_STOPWORDS.has(w))
+    );
+  }
+  var OUTLOOK_CAP = 5;
+  function isEntitySpecific(line) {
+    const body = line.replace(/^\s*[-*•]\s*/, "").trim();
+    const words = body.split(/\s+/).slice(1);
+    return words.some((w) => /^[A-Z][a-z]{2,}/.test(w));
+  }
+  function parseOutlook(nodesOutput) {
+    const lines = String(nodesOutput || "").replace(/\r/g, "").split("\n");
+    const start2 = lines.findIndex((l2) => /^\s*beliefs\s*:/i.test(l2));
+    if (start2 === -1) return [];
+    const out2 = [];
+    for (let i3 = start2 + 1; i3 < lines.length; i3++) {
+      const raw = lines[i3].trim();
+      if (!raw) continue;
+      if (/^[A-Za-z .]+:\s*$/.test(raw)) break;
+      const text = raw.replace(/^\s*[-*•]\s*/, "").trim();
+      if (!text || !/[a-z]/i.test(text)) continue;
+      if (!isEntitySpecific(text)) out2.push(text);
+    }
+    return out2;
+  }
+  var PREFERENCES_STORE_CAP = 200;
+  var MANUAL_PREFERENCE_STRENGTH = 4;
+  function parsePreferences(prefsOutput) {
+    const lines = String(prefsOutput || "").replace(/\r/g, "").split("\n");
+    const start2 = lines.findIndex((l2) => /^\s*preferences\s*:/i.test(l2));
+    if (start2 === -1) return [];
+    const out2 = [];
+    for (let i3 = start2 + 1; i3 < lines.length; i3++) {
+      const raw = lines[i3].trim();
+      if (!raw) continue;
+      if (/^[A-Za-z .]+:\s*$/.test(raw)) break;
+      const text = raw.replace(/^\s*[-*•]\s*/, "").trim();
+      if (!text || !/[a-z]/i.test(text)) continue;
+      out2.push(text);
+    }
+    return out2;
+  }
+  function reconcilePreferences(existing, fresh) {
+    const kept = existing.map((b) => ({ text: b.text, strength: b.strength }));
+    const keptTokens = kept.map((k2) => snapshotTokens(k2.text));
+    for (const line of fresh) {
+      const ft = snapshotTokens(line);
+      let matched = -1;
+      for (let i3 = 0; i3 < kept.length; i3++) {
+        const kt = keptTokens[i3];
+        let inter = 0;
+        for (const t3 of kt) if (ft.has(t3)) inter++;
+        if (kt.size > 0 && inter / kt.size >= 0.6) {
+          matched = i3;
+          break;
+        }
+      }
+      if (matched >= 0) {
+        kept[matched] = { text: line, strength: Math.min(kept[matched].strength + 1, 5) };
+        keptTokens[matched] = ft;
+      } else {
+        kept.push({ text: line, strength: 3 });
+        keptTokens.push(ft);
+      }
+    }
+    return kept.slice(0, PREFERENCES_STORE_CAP);
+  }
+  function applyManualPreferences(existing, texts) {
+    const byText = new Map((existing || []).map((b) => [b.text.trim().toLowerCase(), b.strength]));
+    const out2 = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const raw of texts || []) {
+      const text = String(raw || "").trim();
+      if (!text) continue;
+      const key = text.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out2.push({ text, strength: byText.get(key) ?? MANUAL_PREFERENCE_STRENGTH });
+    }
+    return out2;
+  }
+  function reconcileOutlook(existing, fresh) {
+    const freshTokenSets = fresh.map(snapshotTokens);
+    const kept = [];
+    for (const b of existing) {
+      const bt = snapshotTokens(b.text);
+      const reinforced = freshTokenSets.some((ft) => {
+        let inter = 0;
+        for (const t3 of bt) if (ft.has(t3)) inter++;
+        return bt.size > 0 && inter / bt.size >= 0.6;
+      });
+      const strength = reinforced ? 3 : b.strength - 1;
+      if (strength > 0) kept.push({ text: b.text, strength });
+    }
+    for (let i3 = 0; i3 < fresh.length; i3++) {
+      const ft = freshTokenSets[i3];
+      const already = kept.some((k2) => {
+        const kt = snapshotTokens(k2.text);
+        let inter = 0;
+        for (const t3 of kt) if (ft.has(t3)) inter++;
+        return kt.size > 0 && inter / kt.size >= 0.6;
+      });
+      if (!already) kept.push({ text: fresh[i3], strength: 3 });
+    }
+    return kept.sort((a2, b) => b.strength - a2.strength).slice(0, OUTLOOK_CAP);
+  }
+  function reconcile(state, llmOutput, nodeCap = 12, retirementThreshold = 3, ownerName, allowNewSubject) {
+    const parsedLlm = parseLlmOutput(llmOutput);
+    const genSchema = parsedLlm.schema.slice();
+    if (genSchema.length >= 2 && looksTruncated(genSchema[genSchema.length - 1].text) && genSchema.slice(0, -1).some((p5) => !looksTruncated(p5.text))) {
+      genSchema.pop();
+    }
+    const cleanGenSchema = genSchema.filter((p5) => !isSelfSubject({ subject: p5.subject, text: p5.text, retired: false, aliases: p5.aliases }, ownerName));
+    const newSchema = state.schema.map((e2) => ({ ...e2, aliases: (e2.aliases || []).slice() }));
+    const sets = newSchema.map(schemaItemMatchKeys);
+    for (const parsed of cleanGenSchema) {
+      const pkeys = schemaItemMatchKeys({ subject: parsed.subject, text: parsed.text, retired: false, aliases: parsed.aliases });
+      let idx = -1;
+      for (let i3 = 0; i3 < newSchema.length; i3++) {
+        for (const t3 of pkeys) {
+          if (sets[i3]?.has(t3)) {
+            idx = i3;
+            break;
+          }
+        }
+        if (idx !== -1) break;
+      }
+      if (idx >= 0) {
+        newSchema[idx].text = parsed.text;
+      } else {
+        if (allowNewSubject && !allowNewSubject(parsed.subject, parsed.aliases || [])) continue;
+        const item = { subject: parsed.subject, text: parsed.text, retired: false, aliases: (parsed.aliases || []).slice() };
+        newSchema.push(item);
+        sets.push(schemaItemMatchKeys(item));
+        state.unreferencedPasses[parsed.subject] = 0;
+      }
+    }
+    state.schema = dedupeSchema(newSchema).filter((item) => !isSelfSubject(item, ownerName));
+    let activeNodes = state.nodes.filter((n3) => n3.vibrancy > 0);
+    const newSnapshots = parsedLlm.newSnapshots.slice();
+    if (newSnapshots.length >= 2 && looksTruncated(newSnapshots[newSnapshots.length - 1]) && newSnapshots.slice(0, -1).some((s3) => !looksTruncated(s3))) {
+      newSnapshots.pop();
+    }
+    if (newSnapshots.length > 0) {
+      let nextSeq = Math.max(0, ...activeNodes.map((n3) => {
+        const match2 = n3.id.match(/^(\d+)_/);
+        return match2 && match2[1] !== void 0 ? parseInt(match2[1]) : 0;
+      })) + 1;
+      const norm = (s3) => s3.replace(/\s+/g, " ").trim().toLowerCase();
+      const seen = /* @__PURE__ */ new Set();
+      const replaced = [];
+      for (const snap of newSnapshots) {
+        const line = snap.replace(/\s+/g, " ").trim();
+        if (!line || seen.has(norm(line))) continue;
+        seen.add(norm(line));
+        const existing = activeNodes.find((n3) => norm(n3.snapshot) === norm(line));
+        if (existing) {
+          replaced.push({ ...existing, vibrancy: 3, snapshot: line });
+        } else {
+          const keyword = extractKeyword(line);
+          replaced.push({ id: `${String(nextSeq).padStart(2, "0")}_${keyword}`, vibrancy: 3, snapshot: line, links: [] });
+          nextSeq++;
+        }
+      }
+      activeNodes = replaced;
+    }
+    if (activeNodes.length > nodeCap) {
+      const sortedForPruning = activeNodes.map((node, index3) => ({ node, index: index3 })).sort((a2, b) => {
+        if (a2.node.vibrancy !== b.node.vibrancy) {
+          return a2.node.vibrancy - b.node.vibrancy;
+        }
+        return a2.index - b.index;
+      });
+      const keepIndices = new Set(
+        sortedForPruning.slice(activeNodes.length - nodeCap).map((item) => item.index)
+      );
+      activeNodes = activeNodes.filter((_2, index3) => keepIndices.has(index3));
+    }
+    state.nodes = activeNodes;
+    for (const item of state.schema) {
+      if (item.retired) continue;
+      const passes = state.unreferencedPasses[item.subject] ?? 0;
+      if (passes >= retirementThreshold) {
+        const subjectNameLower = item.subject.toLowerCase();
+        const hasActiveNodes = state.nodes.some((node) => {
+          return node.snapshot.toLowerCase().includes(subjectNameLower) || node.id.toLowerCase().includes(subjectNameLower);
+        });
+        if (!hasActiveNodes) {
+          item.retired = true;
+        }
+      }
+    }
+    return state;
+  }
+  function isWindowDue(totalActions, lastThrough, K) {
+    return totalActions >= lastThrough + 2 * K;
+  }
+  function distillationWindow(lastThrough, K) {
+    return { start: lastThrough, end: lastThrough + K };
+  }
+  function isManualWindowReady(totalActions, lastThrough, K) {
+    return totalActions >= lastThrough + K;
+  }
+  function buildConsolidateCommand(knowledgeBlock) {
+    return "Consolidate {{title}}'s knowledge list. Merge subjects that refer to the SAME entity or the SAME concept into ONE line, keeping the existing canonical name and PRESERVING any aliases after a '|' (never split an aliased group). Output ONLY lines in the exact form '- [Canonical | alias1, alias2] facts' (omit the '| ...' when there are no aliases). Do not invent new subjects.\n\nKNOWLEDGE:\n" + knowledgeBlock;
+  }
+  function isDistillationSourceCard(card, importantNames) {
+    if (card.deletedAt) return false;
+    const type = (card.type || "").toLowerCase();
+    if (type !== "character" && type !== "custom") return false;
+    const title = (card.title || "").toLowerCase();
+    if (title.endsWith(" (memory)")) return false;
+    if (title.endsWith(" - crystallized")) return false;
+    const keysList = (card.keys || "").split(/[,;]+/).map((k2) => k2.trim().toLowerCase()).filter(Boolean);
+    return importantNames.some((name) => title === name || keysList.includes(name));
+  }
+  function buildDistillationBuffer(actions, thoughtLog, window2) {
+    const buffer = [];
+    for (let i3 = window2.start; i3 < window2.end; i3++) {
+      if (i3 < 0 || i3 >= actions.length) continue;
+      const act = actions[i3];
+      const turnNum = i3 + 1;
+      const thought = thoughtLog.find((e2) => e2.turn === turnNum);
+      const cleanThought = thought ? extractThoughtInner(thought.text) : void 0;
+      buffer.push({
+        actionText: act.text || "",
+        thoughtText: cleanThought,
+        turn: turnNum
+      });
+    }
+    return buffer;
+  }
+  function findCrystallizedCard(cards, name) {
+    const targetTitle = `${name} - Crystallized`.toLowerCase();
+    return cards.find(
+      (c2) => !c2.deletedAt && ((c2.type || "").toLowerCase() === "crystallized" || (c2.type || "").toLowerCase() === "memory" || (c2.type || "").toLowerCase() === "character" || (c2.type || "").toLowerCase() === "custom") && (c2.title || "").toLowerCase() === targetTitle
+    );
+  }
+
   // src/storage/repo.ts
   var BACKUP_STORES = ["adventures", "actions", "operations", "cards", "versions", "settings", "globalAssets", "crystallizedLog", "injectionLog", "crystallizedState", "crystallizedArchive", "phenotype", "npcMemoryBank"];
   function byCreatedAt(a2, b) {
@@ -20499,6 +21498,10 @@ Notable Items: specific permanent contents. You must preserve the literal names 
         await tx.done;
         counts[s3] = n3;
       }
+      try {
+        counts.crystallizedHealed = await this.healAllCrystallizedState();
+      } catch {
+      }
       return { ok: true, counts };
     }
     async getGlobalAssets() {
@@ -20594,6 +21597,24 @@ Notable Items: specific permanent contents. You must preserve the literal names 
     async putCrystallizedState(shortId, characterKey, state) {
       const db = await openAidDb();
       await db.put("crystallizedState", { shortId, characterKey, state });
+    }
+    /** One-time DB heal: sanitize every stored Crystallized state (drop empty/malformed Knows/nodes/
+     *  outlook/preferences) so an imported or upgraded older database can't inject hollow entries (e.g.
+     *  the empty `""` a stale Knows produced) or feed them back into distillation context. Idempotent —
+     *  re-runs are cheap no-ops. Returns the number of states rewritten. */
+    async healAllCrystallizedState() {
+      const db = await openAidDb();
+      const rows = await db.getAll("crystallizedState");
+      let healed = 0;
+      for (const row of rows) {
+        if (!row?.state) continue;
+        const { state, changed } = sanitizeCrystallizedState(row.state);
+        if (changed) {
+          await db.put("crystallizedState", { ...row, state });
+          healed++;
+        }
+      }
+      return healed;
     }
     async appendCrystallizedArchive(entries) {
       if (!entries.length) return;
@@ -20765,61 +21786,6 @@ Notable Items: specific permanent contents. You must preserve the literal names 
       }
     }
     return result;
-  }
-
-  // src/shared/types.ts
-  function countActions(actions) {
-    return actions.length;
-  }
-  function sliceLastActions(actions, n3) {
-    if (n3 <= 0) return [];
-    return actions.slice(-n3);
-  }
-  function isCharacterTriggered(text, title, keys) {
-    const escapeRegex = (s3) => s3.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
-    const rawCandidates = [title, ...keys.split(/[,;]+/)].map((s3) => stripPossessive(s3.trim())).filter(Boolean);
-    const candidates = [];
-    for (const c2 of rawCandidates) {
-      candidates.push(c2);
-      if (c2.includes(" and ") || c2.includes(" & ")) {
-        const parts = c2.split(/\s+(?:and|&)\s+/i);
-        for (const p5 of parts) {
-          const trimmed = p5.trim();
-          if (trimmed) candidates.push(trimmed);
-        }
-      }
-    }
-    const textLower = text.toLowerCase();
-    for (const cand of candidates) {
-      const r2 = new RegExp(`\\b${escapeRegex(cand.toLowerCase())}\\b`);
-      if (r2.test(textLower)) return true;
-    }
-    return false;
-  }
-  function stripPossessive(s3) {
-    return s3.replace(/['’]s?$/i, "").trim();
-  }
-  function determineFellOutCards(lookbackSize, allActions, newActionsCount, cards) {
-    const currentActions = sliceLastActions(allActions, lookbackSize);
-    const currentText = currentActions.map((a2) => a2.text || "").join(" ").toLowerCase();
-    const oldActions = allActions.slice(0, -newActionsCount);
-    const previousActions = sliceLastActions(oldActions, lookbackSize);
-    const previousText = previousActions.map((a2) => a2.text || "").join(" ").toLowerCase();
-    const activeCharacters = cards.filter(
-      (c2) => !c2.deletedAt && ((c2.type || "").toLowerCase() === "character" || (c2.type || "").toLowerCase() === "custom") && !(c2.title || "").toLowerCase().endsWith(" (memory)")
-    );
-    const fellOut = [];
-    for (const card of activeCharacters) {
-      const name = card.title || "";
-      const keys = card.keys || "";
-      if (!name.trim() && !keys.trim()) continue;
-      const wasActive = isCharacterTriggered(previousText, name, keys);
-      const isActive = isCharacterTriggered(currentText, name, keys);
-      if (wasActive && !isActive) {
-        fellOut.push(card);
-      }
-    }
-    return fellOut;
   }
 
   // src/inference/plot.ts
@@ -21868,7 +22834,7 @@ ${e2.text}` : e2.text;
     }
     return parts.join("\n\n");
   }
-  function extractThoughtInner(text) {
+  function extractThoughtInner2(text) {
     let inner = (text || "").trim();
     inner = inner.replace(/^\[?\s*[^\n\]]*\bThoughts:\s*/i, "");
     inner = inner.replace(/^[\s[]+/, "").replace(/[\s\]]+$/, "").trim();
@@ -21878,7 +22844,7 @@ ${e2.text}` : e2.text;
     if (!Array.isArray(log3) || n3 <= 0) return "";
     let selected = log3.slice(0, n3);
     while (selected.length > 0) {
-      const inners = selected.map((e2) => extractThoughtInner(e2.text)).filter((s3) => s3.length > 0);
+      const inners = selected.map((e2) => extractThoughtInner2(e2.text)).filter((s3) => s3.length > 0);
       if (inners.length === 0) return "";
       const ordered = order === "oldest-first" ? [...inners].reverse() : inners;
       const body = ordered.map((t3) => `{${t3}}`).join("\n\n");
@@ -22482,940 +23448,6 @@ ${resolvedCommand}`;
     } catch (err) {
       return { ok: false, value: "", message: err?.message || String(err) };
     }
-  }
-
-  // src/inference/crystallized.ts
-  function parseSubjectLabel(raw) {
-    const s3 = String(raw || "");
-    const bar = s3.indexOf("|");
-    if (bar === -1) return { subject: s3.trim(), aliases: [] };
-    const subject = s3.slice(0, bar).trim();
-    const aliases3 = s3.slice(bar + 1).split(",").map((a2) => a2.trim()).filter(Boolean);
-    return { subject, aliases: aliases3 };
-  }
-  function formatSubjectLabel(item) {
-    const aliases3 = (item.aliases || []).filter(Boolean);
-    return aliases3.length ? `${item.subject} | ${aliases3.join(", ")}` : item.subject;
-  }
-  function subjectTokens(name) {
-    return String(name || "").split(/[\/,]/).map((t3) => t3.trim().toLowerCase()).filter(Boolean);
-  }
-  function schemaItemTokens(item) {
-    const out2 = /* @__PURE__ */ new Set();
-    for (const t3 of subjectTokens(item.subject)) out2.add(t3);
-    for (const a2 of item.aliases || []) for (const t3 of subjectTokens(a2)) out2.add(t3);
-    return out2;
-  }
-  var KINSHIP_NOUNS = /* @__PURE__ */ new Set([
-    "father",
-    "mother",
-    "mom",
-    "mum",
-    "dad",
-    "papa",
-    "daddy",
-    "mommy",
-    "parent",
-    "parents",
-    "brother",
-    "sister",
-    "sibling",
-    "son",
-    "daughter",
-    "child",
-    "children",
-    "kid",
-    "husband",
-    "wife",
-    "spouse",
-    "partner",
-    "uncle",
-    "aunt",
-    "auntie",
-    "cousin",
-    "nephew",
-    "niece",
-    "grandfather",
-    "grandmother",
-    "grandpa",
-    "grandma",
-    "granddad",
-    "grandmom",
-    "granddaughter",
-    "grandson"
-  ]);
-  var SUBJECT_LEADING_STRIP = /* @__PURE__ */ new Set(["the", "a", "an", "my", "your", "his", "her", "their", "our", "its"]);
-  var SYNONYM_CLUSTERS = [
-    ["relationship", "connection", "bond"],
-    ["home", "house", "apartment", "flat"],
-    ["job", "work", "career"],
-    ["past", "history", "backstory"]
-  ];
-  var SYNONYM_CANON = /* @__PURE__ */ new Map();
-  for (const cluster of SYNONYM_CLUSTERS) for (const w of cluster) SYNONYM_CANON.set(w, cluster[0]);
-  var OWN_POSSESSIVES = /* @__PURE__ */ new Set(["the", "a", "an", "my", "your", "our", "its"]);
-  function subjectAliasKeys(name) {
-    const out2 = /* @__PURE__ */ new Set();
-    let s3 = String(name || "").toLowerCase().replace(/[’]/g, "'");
-    s3 = s3.replace(/[^a-z0-9'\s]/g, " ").replace(/\s+/g, " ").trim();
-    if (!s3) return out2;
-    const words = s3.split(" ");
-    let i3 = 0;
-    let ownerSlot = "own";
-    while (i3 < words.length - 1) {
-      const w = words[i3];
-      if (SUBJECT_LEADING_STRIP.has(w)) {
-        ownerSlot = OWN_POSSESSIVES.has(w) ? ownerSlot : w;
-        i3++;
-        continue;
-      }
-      if (/'s?$/.test(w)) {
-        ownerSlot = w.replace(/'s?$/, "");
-        i3++;
-        continue;
-      }
-      break;
-    }
-    const cleaned = words.slice(i3).map((w) => w.replace(/'/g, ""));
-    const phrase = cleaned.join(" ").trim();
-    if (phrase) out2.add(phrase);
-    const head = cleaned[cleaned.length - 1] || "";
-    if (KINSHIP_NOUNS.has(head)) out2.add("kin:" + head);
-    if (cleaned.length === 1) {
-      const canon = SYNONYM_CANON.get(head) || SYNONYM_CANON.get(head.replace(/s$/, ""));
-      if (canon) out2.add(`syn:${ownerSlot}:${canon}`);
-    }
-    return out2;
-  }
-  function schemaItemMatchKeys(item) {
-    const out2 = schemaItemTokens(item);
-    for (const k2 of subjectAliasKeys(item.subject)) out2.add(k2);
-    for (const a2 of item.aliases || []) for (const k2 of subjectAliasKeys(a2)) out2.add(k2);
-    return out2;
-  }
-  function nameWords(s3) {
-    return String(s3 || "").toLowerCase().replace(/["'’.,]/g, "").split(/\s+/).filter(Boolean);
-  }
-  function isSelfSubject(item, ownerName) {
-    const owner = nameWords(ownerName || "");
-    if (!owner.length) return false;
-    for (const cand of [item.subject, ...item.aliases || []]) {
-      const w = nameWords(cand);
-      if (!w.length) continue;
-      const [short, long] = w.length <= owner.length ? [w, owner] : [owner, w];
-      if (short.every((x) => long.includes(x))) return true;
-    }
-    return false;
-  }
-  function looksTruncated(text) {
-    const t3 = String(text || "").trim();
-    if (!t3) return true;
-    return !/[.!?…][)"'’\]]?$/.test(t3);
-  }
-  function unionAliases(...lists) {
-    const seen = /* @__PURE__ */ new Set();
-    const out2 = [];
-    for (const list4 of lists) for (const a2 of list4 || []) {
-      const key = a2.trim().toLowerCase();
-      if (a2.trim() && !seen.has(key)) {
-        seen.add(key);
-        out2.push(a2.trim());
-      }
-    }
-    return out2;
-  }
-  function dedupeSchema(schema) {
-    const result = [];
-    const sets = [];
-    for (const item of schema) {
-      const tokens = schemaItemMatchKeys(item);
-      let idx = -1;
-      for (let i3 = 0; i3 < result.length; i3++) {
-        for (const t3 of tokens) {
-          if (sets[i3]?.has(t3)) {
-            idx = i3;
-            break;
-          }
-        }
-        if (idx !== -1) break;
-      }
-      if (idx === -1) {
-        const copy2 = { ...item, aliases: unionAliases(item.aliases) };
-        result.push(copy2);
-        sets.push(schemaItemMatchKeys(copy2));
-      } else {
-        const s3 = result[idx];
-        s3.text = item.text;
-        const extra = [item.subject, ...item.aliases || []].flatMap((label2) => label2.split(/[\/,]/)).map((sub) => sub.trim()).filter((sub) => sub && sub.toLowerCase() !== s3.subject.toLowerCase());
-        s3.aliases = unionAliases(s3.aliases, extra);
-        s3.retired = (s3.retired ?? false) && (item.retired ?? false);
-        sets[idx] = schemaItemMatchKeys(s3);
-      }
-    }
-    return result;
-  }
-  function extractThoughtInner2(text) {
-    let inner = (text || "").trim();
-    inner = inner.replace(/^\[?\s*[^\n\]]*\bThoughts:\s*/i, "");
-    inner = inner.replace(/^[\s[]+/, "").replace(/[\s\]]+$/, "").trim();
-    return inner;
-  }
-  function parseCrystallized(notes) {
-    const state = {
-      schema: [],
-      nodes: [],
-      unreferencedPasses: {},
-      outlook: [],
-      preferences: []
-    };
-    if (!notes) return state;
-    const header = "[CRYSTALLIZED MEMORY]";
-    const idx = notes.indexOf(header);
-    const block = idx !== -1 ? notes.slice(idx + header.length) : notes;
-    const sections = block.split(/\n###\s+/);
-    for (const sec of sections) {
-      const lines = sec.split("\n");
-      const firstLine = lines[0];
-      const titleLine = firstLine ? firstLine.trim().toLowerCase() : "";
-      if (titleLine.includes("i. schema")) {
-        for (let i3 = 1; i3 < lines.length; i3++) {
-          const rawLine = lines[i3];
-          if (!rawLine) continue;
-          const line = rawLine.trim();
-          if (!line.startsWith("- ")) continue;
-          const match2 = line.match(/^-\s*\[([^\]]+)\]\s*(.*)$/);
-          if (match2 && match2[1] !== void 0 && match2[2] !== void 0) {
-            const { subject, aliases: aliases3 } = parseSubjectLabel(match2[1]);
-            let text = match2[2].trim();
-            const retired = text.endsWith("(retired)");
-            if (retired) {
-              text = text.slice(0, -9).trim();
-              if (text.endsWith(";")) text = text.slice(0, -1).trim();
-              if (text.endsWith("-")) text = text.slice(0, -1).trim();
-              text = text.trim();
-            }
-            state.schema.push({ subject, text, retired, aliases: aliases3 });
-          }
-        }
-      } else if (titleLine.includes("ii. nodes")) {
-        let currentNode = null;
-        for (let i3 = 1; i3 < lines.length; i3++) {
-          const rawLine = lines[i3];
-          if (!rawLine) continue;
-          const line = rawLine.trim();
-          if (line.startsWith("- Node_ID:")) {
-            if (currentNode && currentNode.id) {
-              state.nodes.push(currentNode);
-            }
-            currentNode = {
-              id: line.slice(10).trim(),
-              vibrancy: 3,
-              snapshot: "",
-              links: []
-            };
-          } else if (currentNode) {
-            if (line.startsWith("Vibrancy:")) {
-              const vMatch = line.match(/Vibrancy:\s*(\d+)\/3/);
-              if (vMatch && vMatch[1] !== void 0) {
-                currentNode.vibrancy = parseInt(vMatch[1]);
-              }
-            } else if (line.startsWith("Snapshot:")) {
-              let snap = line.slice(9).trim();
-              if (snap.endsWith("]")) snap = snap.slice(0, -1).trim();
-              currentNode.snapshot = snap;
-            } else if (line.startsWith("Links:")) {
-              const linksStr = line.slice(6).trim();
-              currentNode.links = linksStr ? linksStr.split(/[,;\s]+/).map((s3) => s3.trim()).filter(Boolean) : [];
-            } else if (line.startsWith("  ") || line.startsWith("	")) {
-              if (currentNode.snapshot) {
-                currentNode.snapshot += " " + line.trim();
-              }
-            }
-          }
-        }
-        if (currentNode && currentNode.id) {
-          state.nodes.push(currentNode);
-        }
-      } else if (titleLine.includes("iii. bookkeeping") || titleLine.includes("bookkeeping")) {
-        for (let i3 = 1; i3 < lines.length; i3++) {
-          const rawLine = lines[i3];
-          if (!rawLine) continue;
-          const line = rawLine.trim();
-          if (line.startsWith("- SubjectUnreferencedPasses:")) {
-            const val = line.slice(28).trim();
-            const pairs3 = val.split(/[,;]+/);
-            for (const p5 of pairs3) {
-              const parts = p5.split("=");
-              if (parts.length === 2) {
-                const p0 = parts[0];
-                const p1 = parts[1];
-                if (p0 && p1) {
-                  state.unreferencedPasses[p0.trim()] = parseInt(p1.trim()) || 0;
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    return state;
-  }
-  function effectiveCrystallizedCaps(adv, settings) {
-    const pick2 = (k2, d2) => adv?.[k2] ?? settings?.[k2] ?? d2;
-    return {
-      knows: pick2("crystallizedKnowsCap", 2),
-      recalls: pick2("crystallizedRecallsCap", 2),
-      vivid: pick2("crystallizedVividCap", 4),
-      outlook: pick2("crystallizedOutlookCap", 2),
-      preferences: pick2("crystallizedPreferencesCap", 4)
-    };
-  }
-  function renderCrystallizedEntry(state, name, maxChars) {
-    const activeSchema = state.schema.filter((item) => !item.retired && !isSelfSubject(item, name));
-    let schemaItems = activeSchema.slice();
-    const highVibrancyNodes = state.nodes.map((node, index3) => ({ node, index: index3 })).filter((item) => item.node.vibrancy >= 2).sort((a2, b) => {
-      if (b.node.vibrancy !== a2.node.vibrancy) {
-        return b.node.vibrancy - a2.node.vibrancy;
-      }
-      return b.index - a2.index;
-    });
-    let nodesToRender = [...highVibrancyNodes];
-    let outlookLines = (state.outlook || []).filter((b) => b.strength >= 2).sort((a2, b) => b.strength - a2.strength).map((b) => b.text);
-    let preferenceLines = (state.preferences || []).slice().sort((a2, b) => b.strength - a2.strength).map((b) => b.text);
-    while (true) {
-      const value = buildRenderedString(name, schemaItems, nodesToRender.map((n3) => n3.node.snapshot), outlookLines, [], preferenceLines);
-      if (value.length <= maxChars) return value;
-      if (outlookLines.length > 0) {
-        outlookLines.pop();
-        continue;
-      }
-      if (preferenceLines.length > 0) {
-        preferenceLines.pop();
-        continue;
-      }
-      if (nodesToRender.length > 0) {
-        nodesToRender.pop();
-        continue;
-      }
-      if (schemaItems.length === 0) {
-        return value;
-      }
-      schemaItems.pop();
-    }
-  }
-  function renderCrystallizedEntryScene(state, name, opts2) {
-    const sceneToks = opts2.sceneTokens || /* @__PURE__ */ new Set();
-    const active = state.schema.filter((i3) => !i3.retired && !isSelfSubject(i3, name));
-    const isPresent = (i3) => {
-      for (const t3 of schemaItemTokens(i3)) if (opts2.presentSubjectTokens.has(t3)) return true;
-      return false;
-    };
-    const knowsRelevance = (i3) => {
-      const kt = snapshotTokens(`${i3.subject} ${i3.text}`);
-      let rel = 0;
-      for (const t3 of kt) if (sceneToks.has(t3)) rel++;
-      return rel;
-    };
-    const byRelevance = (a2, b) => knowsRelevance(b) - knowsRelevance(a2);
-    const presentChars = active.filter((i3) => isPresent(i3) && opts2.isCharacterSubject(i3)).sort(byRelevance);
-    const presentOther = active.filter((i3) => isPresent(i3) && !opts2.isCharacterSubject(i3)).sort(byRelevance);
-    const absentChars = active.filter((i3) => !isPresent(i3) && opts2.isCharacterSubject(i3)).sort(byRelevance);
-    const absentOther = active.filter((i3) => !isPresent(i3) && !opts2.isCharacterSubject(i3)).sort(byRelevance);
-    let schemaItems = [...presentChars, ...presentOther, ...absentChars, ...absentOther].slice(0, Math.max(0, opts2.caps.knows));
-    let vivid = state.nodes.map((node, index3) => ({ node, index: index3 })).filter((x) => x.node.vibrancy >= 2).sort((a2, b) => b.node.vibrancy - a2.node.vibrancy || b.index - a2.index).slice(0, Math.max(0, opts2.caps.vivid)).map((x) => x.node.snapshot);
-    let recalls = opts2.recalls.slice(0, Math.max(0, opts2.caps.recalls));
-    let outlook = (state.outlook || []).filter((b) => b.strength >= 2).sort((a2, b) => b.strength - a2.strength).map((b) => b.text).slice(0, Math.max(0, opts2.caps.outlook));
-    let preferences = (state.preferences || []).map((b) => {
-      const pt = snapshotTokens(b.text);
-      let rel = 0;
-      for (const t3 of pt) if (sceneToks.has(t3)) rel++;
-      return { text: b.text, rel, strength: b.strength };
-    }).sort((a2, b) => b.rel - a2.rel || b.strength - a2.strength).slice(0, Math.max(0, opts2.caps.preferences)).map((p5) => p5.text);
-    while (true) {
-      const value = buildRenderedString(name, schemaItems, vivid, outlook, recalls, preferences);
-      if (value.length <= opts2.maxChars) return value;
-      if (recalls.length > 0) {
-        recalls.pop();
-        continue;
-      }
-      if (vivid.length > 0) {
-        vivid.pop();
-        continue;
-      }
-      if (schemaItems.length > 1) {
-        schemaItems.pop();
-        continue;
-      }
-      if (outlook.length > 1) {
-        outlook.pop();
-        continue;
-      }
-      if (preferences.length > 1) {
-        preferences.pop();
-        continue;
-      }
-      return value;
-    }
-  }
-  function jsonEscape(s3) {
-    return String(s3 || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  }
-  var KNOWS_ENTRY_MAXCHARS = 240;
-  function capKnowsText(text) {
-    return text.length > KNOWS_ENTRY_MAXCHARS ? text.slice(0, KNOWS_ENTRY_MAXCHARS - 1).trimEnd() + "\u2026" : text;
-  }
-  function buildRenderedString(name, schema, snapshots, outlookLines = [], recallLines = [], preferenceLines = []) {
-    const lines = [`[${name}'s Crystallized Memory`];
-    const knows = schema.map((item) => ({
-      label: [item.subject, ...item.aliases || []].map((s3) => String(s3 || "").trim()).filter(Boolean).join(" | "),
-      text: capKnowsText(String(item.text || "").trim())
-    })).filter((k2) => k2.label && k2.text);
-    if (knows.length > 0) {
-      lines.push("Knows:");
-      knows.forEach((k2, i3) => {
-        const comma = i3 < knows.length - 1 ? "," : "";
-        lines.push(`{"${jsonEscape(k2.label)}": "${jsonEscape(k2.text)}"}${comma}`);
-      });
-    }
-    const recalls = recallLines.map((t3) => String(t3 || "").trim()).filter(Boolean);
-    if (recalls.length > 0) {
-      lines.push("Recalls:");
-      recalls.forEach((t3, i3) => {
-        const comma = i3 < recalls.length - 1 ? "," : "";
-        lines.push(`{${jsonEscape(t3)}}${comma}`);
-      });
-    }
-    const vivid = snapshots.map((s3) => String(s3 || "").trim()).filter(Boolean);
-    if (vivid.length > 0) {
-      lines.push("Vivid Memories:");
-      vivid.forEach((snap, i3) => {
-        const comma = i3 < vivid.length - 1 ? "," : "";
-        lines.push(`{${snap}}${comma}`);
-      });
-    }
-    const prefs = preferenceLines.map((t3) => String(t3 || "").trim()).filter(Boolean);
-    if (prefs.length > 0) {
-      lines.push("Preferences:");
-      prefs.forEach((t3, i3) => {
-        const comma = i3 < prefs.length - 1 ? "," : "";
-        lines.push(`{${jsonEscape(t3)}}${comma}`);
-      });
-    }
-    const outlook = outlookLines.map((t3) => String(t3 || "").trim()).filter(Boolean);
-    if (outlook.length > 0) {
-      lines.push("Outlook:");
-      outlook.forEach((t3, i3) => {
-        const comma = i3 < outlook.length - 1 ? "," : "";
-        lines.push(`{${jsonEscape(t3)}}${comma}`);
-      });
-    }
-    lines.push("]");
-    return lines.join("\n");
-  }
-  function reinforceAndDecay(state, buffer) {
-    const combinedText = buffer.map((item) => `${item.actionText} ${item.thoughtText || ""}`).join("\n");
-    const dyingNodeIds = [];
-    const nextNodes = state.nodes.map((node) => {
-      const suffix = node.id.replace(/^\d+_(.*)$/, "$1");
-      const isTriggered = isCharacterTriggered(combinedText, suffix, node.id);
-      let nextVibrancy = node.vibrancy;
-      if (isTriggered) {
-        nextVibrancy = 3;
-      } else {
-        nextVibrancy = Math.max(0, node.vibrancy - 1);
-      }
-      if (nextVibrancy === 0 && node.vibrancy > 0) {
-        dyingNodeIds.push(node.id);
-      }
-      return {
-        ...node,
-        vibrancy: nextVibrancy
-      };
-    });
-    const nextUnreferenced = { ...state.unreferencedPasses };
-    const nextSchema = state.schema.map((item) => {
-      const isSubjTriggered = isCharacterTriggered(combinedText, item.subject, "");
-      let retired = item.retired;
-      if (isSubjTriggered) {
-        nextUnreferenced[item.subject] = 0;
-        retired = false;
-      } else {
-        nextUnreferenced[item.subject] = (nextUnreferenced[item.subject] || 0) + 1;
-      }
-      return {
-        ...item,
-        retired
-      };
-    });
-    return {
-      state: {
-        ...state,
-        schema: nextSchema,
-        nodes: nextNodes,
-        unreferencedPasses: nextUnreferenced
-      },
-      dyingNodeIds
-    };
-  }
-  function parseLlmOutput(output) {
-    let cleaned = output.trim();
-    if (cleaned.startsWith("[")) cleaned = cleaned.slice(1);
-    if (cleaned.endsWith("]")) cleaned = cleaned.slice(0, -1);
-    if (cleaned.startsWith("{")) cleaned = cleaned.slice(1);
-    if (cleaned.endsWith("}")) cleaned = cleaned.slice(0, -1);
-    cleaned = cleaned.trim();
-    const result = {
-      schema: [],
-      newSnapshots: []
-    };
-    const sections = cleaned.split(/\n###\s+/);
-    for (const sec of sections) {
-      const lines = sec.split("\n");
-      const firstLine = lines[0];
-      const titleLine = firstLine ? firstLine.trim().toLowerCase() : "";
-      if (titleLine.includes("i. schema") || titleLine.includes("schema")) {
-        for (let i3 = 1; i3 < lines.length; i3++) {
-          const rawLine = lines[i3];
-          if (!rawLine) continue;
-          const line = rawLine.trim();
-          if (!line.startsWith("- ")) continue;
-          const match2 = line.match(/^-\s*\[([^\]]+)\]\s*(.*)$/);
-          if (match2 && match2[1] !== void 0 && match2[2] !== void 0) {
-            const { subject, aliases: aliases3 } = parseSubjectLabel(match2[1]);
-            result.schema.push({
-              subject,
-              text: match2[2].trim(),
-              aliases: aliases3
-            });
-          }
-        }
-      } else if (titleLine.includes("ii. new nodes") || titleLine.includes("new nodes") || titleLine.includes("nodes")) {
-        for (let i3 = 1; i3 < lines.length; i3++) {
-          const rawLine = lines[i3];
-          if (!rawLine) continue;
-          const line = rawLine.trim();
-          if (!line.startsWith("- ")) continue;
-          let text = line.slice(2).trim();
-          if (text.startsWith("Snapshot:")) {
-            text = text.slice(9).trim();
-          }
-          if (text.endsWith("]")) {
-            text = text.slice(0, -1).trim();
-          }
-          if (text) {
-            result.newSnapshots.push(text);
-          }
-        }
-      }
-    }
-    if (result.schema.length === 0 && result.newSnapshots.length === 0) {
-      const lines = output.split("\n");
-      let inSchema = false;
-      let inNodes = false;
-      for (const line of lines) {
-        const trimmed = line.trim();
-        const lower = trimmed.toLowerCase();
-        if (lower.includes("schema")) {
-          inSchema = true;
-          inNodes = false;
-          continue;
-        }
-        if (lower.includes("new nodes") || lower.includes("nodes")) {
-          inNodes = true;
-          inSchema = false;
-          continue;
-        }
-        if (trimmed.startsWith("- ")) {
-          if (inSchema) {
-            const match2 = trimmed.match(/^-\s*\[([^\]]+)\]\s*(.*)$/);
-            if (match2 && match2[1] !== void 0 && match2[2] !== void 0) {
-              const { subject, aliases: aliases3 } = parseSubjectLabel(match2[1]);
-              result.schema.push({
-                subject,
-                text: match2[2].trim(),
-                aliases: aliases3
-              });
-            }
-          } else if (inNodes) {
-            let text = trimmed.slice(2).trim();
-            if (text.startsWith("Snapshot:")) {
-              text = text.slice(9).trim();
-            }
-            if (text.endsWith("]")) {
-              text = text.slice(0, -1).trim();
-            }
-            if (text) {
-              result.newSnapshots.push(text);
-            }
-          }
-        }
-      }
-    }
-    const haveSubjects = new Set(result.schema.map((s3) => s3.subject.toLowerCase()));
-    for (const rawLine of cleaned.split("\n")) {
-      const m3 = rawLine.trim().match(/^-\s*\[([^\]]+)\]\s*(.+)$/);
-      if (!m3 || m3[1] === void 0 || m3[2] === void 0) continue;
-      const { subject, aliases: aliases3 } = parseSubjectLabel(m3[1]);
-      if (!subject || haveSubjects.has(subject.toLowerCase())) continue;
-      result.schema.push({ subject, text: m3[2].trim(), aliases: aliases3 });
-      haveSubjects.add(subject.toLowerCase());
-    }
-    return result;
-  }
-  function extractKeyword(snapshot) {
-    const clean2 = snapshot.replace(/[^\w\s]/g, "");
-    const words = clean2.split(/\s+/).filter(Boolean);
-    const stops = /* @__PURE__ */ new Set([
-      "the",
-      "a",
-      "an",
-      "he",
-      "she",
-      "it",
-      "they",
-      "we",
-      "i",
-      "you",
-      "in",
-      "on",
-      "at",
-      "to",
-      "for",
-      "with",
-      "of",
-      "and",
-      "but",
-      "or",
-      "is",
-      "was",
-      "were",
-      "am",
-      "are",
-      "have",
-      "has",
-      "had",
-      "do",
-      "does",
-      "did",
-      "his",
-      "her",
-      "their",
-      "my",
-      "your",
-      "our",
-      "him",
-      "them",
-      "us",
-      "me",
-      "this",
-      "that",
-      "these",
-      "those",
-      "then",
-      "there",
-      "here",
-      "when",
-      "where",
-      "why",
-      "how",
-      "so",
-      "no",
-      "not",
-      "yes",
-      "up",
-      "out",
-      "about",
-      "into"
-    ]);
-    for (const word of words) {
-      const lower = word.toLowerCase();
-      if (!stops.has(lower) && word.length > 2) {
-        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-      }
-    }
-    return "Memory";
-  }
-  var SNAPSHOT_STOPWORDS = /* @__PURE__ */ new Set([
-    "the",
-    "and",
-    "that",
-    "with",
-    "from",
-    "this",
-    "have",
-    "were",
-    "was",
-    "for",
-    "his",
-    "her",
-    "him",
-    "she",
-    "they",
-    "into",
-    "onto",
-    "over",
-    "under",
-    "then",
-    "than",
-    "them",
-    "their",
-    "been",
-    "being",
-    "would",
-    "could",
-    "first",
-    "time",
-    "when",
-    "what",
-    "which",
-    "while",
-    "about",
-    "against",
-    "still",
-    "just",
-    "like",
-    "some",
-    "only",
-    "more"
-  ]);
-  function snapshotTokens(s3) {
-    return new Set(
-      String(s3 || "").toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/).filter((w) => w.length >= 4 && !SNAPSHOT_STOPWORDS.has(w))
-    );
-  }
-  var OUTLOOK_CAP = 5;
-  function isEntitySpecific(line) {
-    const body = line.replace(/^\s*[-*•]\s*/, "").trim();
-    const words = body.split(/\s+/).slice(1);
-    return words.some((w) => /^[A-Z][a-z]{2,}/.test(w));
-  }
-  function parseOutlook(nodesOutput) {
-    const lines = String(nodesOutput || "").replace(/\r/g, "").split("\n");
-    const start2 = lines.findIndex((l2) => /^\s*beliefs\s*:/i.test(l2));
-    if (start2 === -1) return [];
-    const out2 = [];
-    for (let i3 = start2 + 1; i3 < lines.length; i3++) {
-      const raw = lines[i3].trim();
-      if (!raw) continue;
-      if (/^[A-Za-z .]+:\s*$/.test(raw)) break;
-      const text = raw.replace(/^\s*[-*•]\s*/, "").trim();
-      if (!text || !/[a-z]/i.test(text)) continue;
-      if (!isEntitySpecific(text)) out2.push(text);
-    }
-    return out2;
-  }
-  var PREFERENCES_STORE_CAP = 200;
-  var MANUAL_PREFERENCE_STRENGTH = 4;
-  function parsePreferences(prefsOutput) {
-    const lines = String(prefsOutput || "").replace(/\r/g, "").split("\n");
-    const start2 = lines.findIndex((l2) => /^\s*preferences\s*:/i.test(l2));
-    if (start2 === -1) return [];
-    const out2 = [];
-    for (let i3 = start2 + 1; i3 < lines.length; i3++) {
-      const raw = lines[i3].trim();
-      if (!raw) continue;
-      if (/^[A-Za-z .]+:\s*$/.test(raw)) break;
-      const text = raw.replace(/^\s*[-*•]\s*/, "").trim();
-      if (!text || !/[a-z]/i.test(text)) continue;
-      out2.push(text);
-    }
-    return out2;
-  }
-  function reconcilePreferences(existing, fresh) {
-    const kept = existing.map((b) => ({ text: b.text, strength: b.strength }));
-    const keptTokens = kept.map((k2) => snapshotTokens(k2.text));
-    for (const line of fresh) {
-      const ft = snapshotTokens(line);
-      let matched = -1;
-      for (let i3 = 0; i3 < kept.length; i3++) {
-        const kt = keptTokens[i3];
-        let inter = 0;
-        for (const t3 of kt) if (ft.has(t3)) inter++;
-        if (kt.size > 0 && inter / kt.size >= 0.6) {
-          matched = i3;
-          break;
-        }
-      }
-      if (matched >= 0) {
-        kept[matched] = { text: line, strength: Math.min(kept[matched].strength + 1, 5) };
-        keptTokens[matched] = ft;
-      } else {
-        kept.push({ text: line, strength: 3 });
-        keptTokens.push(ft);
-      }
-    }
-    return kept.slice(0, PREFERENCES_STORE_CAP);
-  }
-  function applyManualPreferences(existing, texts) {
-    const byText = new Map((existing || []).map((b) => [b.text.trim().toLowerCase(), b.strength]));
-    const out2 = [];
-    const seen = /* @__PURE__ */ new Set();
-    for (const raw of texts || []) {
-      const text = String(raw || "").trim();
-      if (!text) continue;
-      const key = text.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out2.push({ text, strength: byText.get(key) ?? MANUAL_PREFERENCE_STRENGTH });
-    }
-    return out2;
-  }
-  function reconcileOutlook(existing, fresh) {
-    const freshTokenSets = fresh.map(snapshotTokens);
-    const kept = [];
-    for (const b of existing) {
-      const bt = snapshotTokens(b.text);
-      const reinforced = freshTokenSets.some((ft) => {
-        let inter = 0;
-        for (const t3 of bt) if (ft.has(t3)) inter++;
-        return bt.size > 0 && inter / bt.size >= 0.6;
-      });
-      const strength = reinforced ? 3 : b.strength - 1;
-      if (strength > 0) kept.push({ text: b.text, strength });
-    }
-    for (let i3 = 0; i3 < fresh.length; i3++) {
-      const ft = freshTokenSets[i3];
-      const already = kept.some((k2) => {
-        const kt = snapshotTokens(k2.text);
-        let inter = 0;
-        for (const t3 of kt) if (ft.has(t3)) inter++;
-        return kt.size > 0 && inter / kt.size >= 0.6;
-      });
-      if (!already) kept.push({ text: fresh[i3], strength: 3 });
-    }
-    return kept.sort((a2, b) => b.strength - a2.strength).slice(0, OUTLOOK_CAP);
-  }
-  function reconcile(state, llmOutput, nodeCap = 12, retirementThreshold = 3, ownerName, allowNewSubject) {
-    const parsedLlm = parseLlmOutput(llmOutput);
-    const genSchema = parsedLlm.schema.slice();
-    if (genSchema.length >= 2 && looksTruncated(genSchema[genSchema.length - 1].text) && genSchema.slice(0, -1).some((p5) => !looksTruncated(p5.text))) {
-      genSchema.pop();
-    }
-    const cleanGenSchema = genSchema.filter((p5) => !isSelfSubject({ subject: p5.subject, text: p5.text, retired: false, aliases: p5.aliases }, ownerName));
-    const newSchema = state.schema.map((e2) => ({ ...e2, aliases: (e2.aliases || []).slice() }));
-    const sets = newSchema.map(schemaItemMatchKeys);
-    for (const parsed of cleanGenSchema) {
-      const pkeys = schemaItemMatchKeys({ subject: parsed.subject, text: parsed.text, retired: false, aliases: parsed.aliases });
-      let idx = -1;
-      for (let i3 = 0; i3 < newSchema.length; i3++) {
-        for (const t3 of pkeys) {
-          if (sets[i3]?.has(t3)) {
-            idx = i3;
-            break;
-          }
-        }
-        if (idx !== -1) break;
-      }
-      if (idx >= 0) {
-        newSchema[idx].text = parsed.text;
-      } else {
-        if (allowNewSubject && !allowNewSubject(parsed.subject, parsed.aliases || [])) continue;
-        const item = { subject: parsed.subject, text: parsed.text, retired: false, aliases: (parsed.aliases || []).slice() };
-        newSchema.push(item);
-        sets.push(schemaItemMatchKeys(item));
-        state.unreferencedPasses[parsed.subject] = 0;
-      }
-    }
-    state.schema = dedupeSchema(newSchema).filter((item) => !isSelfSubject(item, ownerName));
-    let activeNodes = state.nodes.filter((n3) => n3.vibrancy > 0);
-    const newSnapshots = parsedLlm.newSnapshots.slice();
-    if (newSnapshots.length >= 2 && looksTruncated(newSnapshots[newSnapshots.length - 1]) && newSnapshots.slice(0, -1).some((s3) => !looksTruncated(s3))) {
-      newSnapshots.pop();
-    }
-    if (newSnapshots.length > 0) {
-      let nextSeq = Math.max(0, ...activeNodes.map((n3) => {
-        const match2 = n3.id.match(/^(\d+)_/);
-        return match2 && match2[1] !== void 0 ? parseInt(match2[1]) : 0;
-      })) + 1;
-      const norm = (s3) => s3.replace(/\s+/g, " ").trim().toLowerCase();
-      const seen = /* @__PURE__ */ new Set();
-      const replaced = [];
-      for (const snap of newSnapshots) {
-        const line = snap.replace(/\s+/g, " ").trim();
-        if (!line || seen.has(norm(line))) continue;
-        seen.add(norm(line));
-        const existing = activeNodes.find((n3) => norm(n3.snapshot) === norm(line));
-        if (existing) {
-          replaced.push({ ...existing, vibrancy: 3, snapshot: line });
-        } else {
-          const keyword = extractKeyword(line);
-          replaced.push({ id: `${String(nextSeq).padStart(2, "0")}_${keyword}`, vibrancy: 3, snapshot: line, links: [] });
-          nextSeq++;
-        }
-      }
-      activeNodes = replaced;
-    }
-    if (activeNodes.length > nodeCap) {
-      const sortedForPruning = activeNodes.map((node, index3) => ({ node, index: index3 })).sort((a2, b) => {
-        if (a2.node.vibrancy !== b.node.vibrancy) {
-          return a2.node.vibrancy - b.node.vibrancy;
-        }
-        return a2.index - b.index;
-      });
-      const keepIndices = new Set(
-        sortedForPruning.slice(activeNodes.length - nodeCap).map((item) => item.index)
-      );
-      activeNodes = activeNodes.filter((_2, index3) => keepIndices.has(index3));
-    }
-    state.nodes = activeNodes;
-    for (const item of state.schema) {
-      if (item.retired) continue;
-      const passes = state.unreferencedPasses[item.subject] ?? 0;
-      if (passes >= retirementThreshold) {
-        const subjectNameLower = item.subject.toLowerCase();
-        const hasActiveNodes = state.nodes.some((node) => {
-          return node.snapshot.toLowerCase().includes(subjectNameLower) || node.id.toLowerCase().includes(subjectNameLower);
-        });
-        if (!hasActiveNodes) {
-          item.retired = true;
-        }
-      }
-    }
-    return state;
-  }
-  function isWindowDue(totalActions, lastThrough, K) {
-    return totalActions >= lastThrough + 2 * K;
-  }
-  function distillationWindow(lastThrough, K) {
-    return { start: lastThrough, end: lastThrough + K };
-  }
-  function isManualWindowReady(totalActions, lastThrough, K) {
-    return totalActions >= lastThrough + K;
-  }
-  function buildConsolidateCommand(knowledgeBlock) {
-    return "Consolidate {{title}}'s knowledge list. Merge subjects that refer to the SAME entity or the SAME concept into ONE line, keeping the existing canonical name and PRESERVING any aliases after a '|' (never split an aliased group). Output ONLY lines in the exact form '- [Canonical | alias1, alias2] facts' (omit the '| ...' when there are no aliases). Do not invent new subjects.\n\nKNOWLEDGE:\n" + knowledgeBlock;
-  }
-  function isDistillationSourceCard(card, importantNames) {
-    if (card.deletedAt) return false;
-    const type = (card.type || "").toLowerCase();
-    if (type !== "character" && type !== "custom") return false;
-    const title = (card.title || "").toLowerCase();
-    if (title.endsWith(" (memory)")) return false;
-    if (title.endsWith(" - crystallized")) return false;
-    const keysList = (card.keys || "").split(/[,;]+/).map((k2) => k2.trim().toLowerCase()).filter(Boolean);
-    return importantNames.some((name) => title === name || keysList.includes(name));
-  }
-  function buildDistillationBuffer(actions, thoughtLog, window2) {
-    const buffer = [];
-    for (let i3 = window2.start; i3 < window2.end; i3++) {
-      if (i3 < 0 || i3 >= actions.length) continue;
-      const act = actions[i3];
-      const turnNum = i3 + 1;
-      const thought = thoughtLog.find((e2) => e2.turn === turnNum);
-      const cleanThought = thought ? extractThoughtInner2(thought.text) : void 0;
-      buffer.push({
-        actionText: act.text || "",
-        thoughtText: cleanThought,
-        turn: turnNum
-      });
-    }
-    return buffer;
-  }
-  function findCrystallizedCard(cards, name) {
-    const targetTitle = `${name} - Crystallized`.toLowerCase();
-    return cards.find(
-      (c2) => !c2.deletedAt && ((c2.type || "").toLowerCase() === "crystallized" || (c2.type || "").toLowerCase() === "memory" || (c2.type || "").toLowerCase() === "character" || (c2.type || "").toLowerCase() === "custom") && (c2.title || "").toLowerCase() === targetTitle
-    );
   }
 
   // src/inference/npc-memory-bank.ts
@@ -28201,6 +28233,22 @@ Characters for POV sections: ${names.join(", ")}`;
     }
     return regenerateMemoryBlock(shortId, memories.length - 1);
   }
+  var DB_HEAL_VERSION = 1;
+  var dbHealChecked = false;
+  async function ensureDbHealed() {
+    if (dbHealChecked) return;
+    dbHealChecked = true;
+    try {
+      const settings = await repo3.getSettings();
+      if ((settings?.dbHealVersion ?? 0) >= DB_HEAL_VERSION) return;
+      const healed = await repo3.healAllCrystallizedState();
+      await repo3.setSettings({ ...settings || {}, dbHealVersion: DB_HEAL_VERSION });
+      dlog2(`[AID bg] DB heal v${DB_HEAL_VERSION}: sanitized ${healed} Crystallized state(s).`);
+    } catch (err) {
+      dbHealChecked = false;
+      console.error("[AID bg] DB heal failed:", err);
+    }
+  }
   browser.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const isFirefox = typeof navigator !== "undefined" && /firefox/i.test(navigator.userAgent);
     if (isFirefox) {
@@ -29604,6 +29652,7 @@ ${toAppend}` : toAppend;
         case "consolidateOutlook":
           return consolidateOutlookForCharacter(msg.shortId, msg.characterTitle);
         case "getState": {
+          await ensureDbHealed();
           const settings = await repo3.getSettings();
           debugEnabled2 = !!settings?.showDebug;
           setDebugEnabled(debugEnabled2);

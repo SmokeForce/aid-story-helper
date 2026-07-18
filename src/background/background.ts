@@ -2452,6 +2452,27 @@ export async function regenerateLatestMemory(shortId: string): Promise<{ ok: boo
   }
   return regenerateMemoryBlock(shortId, memories.length - 1);
 }
+
+// One-time DB heal for imported/upgraded older databases. Bump when a new heal step is added; the
+// stamp (`settings.dbHealVersion`) gates it to run once per database. Restores done via importAll heal
+// unconditionally (see repo.importAll); this covers in-place extension upgrades.
+const DB_HEAL_VERSION = 1;
+let dbHealChecked = false;
+async function ensureDbHealed(): Promise<void> {
+  if (dbHealChecked) return;
+  dbHealChecked = true;
+  try {
+    const settings = await repo.getSettings();
+    if ((settings?.dbHealVersion ?? 0) >= DB_HEAL_VERSION) return;
+    const healed = await repo.healAllCrystallizedState();
+    await repo.setSettings({ ...(settings || {}), dbHealVersion: DB_HEAL_VERSION } as Settings);
+    dlog(`[AID bg] DB heal v${DB_HEAL_VERSION}: sanitized ${healed} Crystallized state(s).`);
+  } catch (err) {
+    dbHealChecked = false; // let a later call retry
+    console.error("[AID bg] DB heal failed:", err);
+  }
+}
+
 browser.runtime.onMessage.addListener((msg: BgMessage, sender, sendResponse) => {
   const isFirefox = typeof navigator !== "undefined" && /firefox/i.test(navigator.userAgent);
   if (isFirefox) {
@@ -4045,6 +4066,7 @@ async function handleMessage(msg: BgMessage): Promise<any> {
       case "consolidateOutlook":
         return consolidateOutlookForCharacter(msg.shortId, msg.characterTitle);
       case "getState": {
+        await ensureDbHealed(); // once per database: sanitize old imported/upgraded state before it's read
         // Load each store ONCE and reuse (seedBaselines used to re-read all of these).
         const settings = await repo.getSettings();
         debugEnabled = !!settings?.showDebug; setInfraDebug(debugEnabled); // keep verbose logging in sync with the user's setting

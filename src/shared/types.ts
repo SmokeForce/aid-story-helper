@@ -126,6 +126,7 @@ export interface Settings {
   crystallizedPreferencesEnabled?: boolean;// Run the Preferences (texture) distillation pass (default: true)
   crystallizedNpcMemoryEnabled?: boolean;  // Generate per-NPC memory-bank POV recollections (default: true)
   phenotypePopulation?: "western" | "global"; // Sampled-body population table for the phenotype engine (default: "western")
+  dbHealVersion?: number;                   // Highest one-time DB-heal migration applied (sanitizes imported/upgraded old databases). Absent = 0.
 }
 
 /** Count story actions in a list of (live) actions. */

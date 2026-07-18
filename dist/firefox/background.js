@@ -22866,39 +22866,46 @@ ${resolvedCommand}`;
   }
   function buildRenderedString(name, schema, snapshots, outlookLines = [], recallLines = [], preferenceLines = []) {
     const lines = [`[${name}'s Crystallized Memory`];
-    if (schema.length > 0) {
+    const knows = schema.map((item) => ({
+      label: [item.subject, ...item.aliases || []].map((s3) => String(s3 || "").trim()).filter(Boolean).join(" | "),
+      text: capKnowsText(String(item.text || "").trim())
+    })).filter((k2) => k2.label && k2.text);
+    if (knows.length > 0) {
       lines.push("Knows:");
-      schema.forEach((item, i3) => {
-        const comma = i3 < schema.length - 1 ? "," : "";
-        const label2 = [item.subject, ...item.aliases || []].map((s3) => String(s3 || "").trim()).filter(Boolean).join(" | ");
-        lines.push(`{"${jsonEscape(label2)}": "${jsonEscape(capKnowsText(item.text))}"}${comma}`);
+      knows.forEach((k2, i3) => {
+        const comma = i3 < knows.length - 1 ? "," : "";
+        lines.push(`{"${jsonEscape(k2.label)}": "${jsonEscape(k2.text)}"}${comma}`);
       });
     }
-    if (recallLines.length > 0) {
+    const recalls = recallLines.map((t3) => String(t3 || "").trim()).filter(Boolean);
+    if (recalls.length > 0) {
       lines.push("Recalls:");
-      recallLines.forEach((t3, i3) => {
-        const comma = i3 < recallLines.length - 1 ? "," : "";
+      recalls.forEach((t3, i3) => {
+        const comma = i3 < recalls.length - 1 ? "," : "";
         lines.push(`{${jsonEscape(t3)}}${comma}`);
       });
     }
-    if (snapshots.length > 0) {
+    const vivid = snapshots.map((s3) => String(s3 || "").trim()).filter(Boolean);
+    if (vivid.length > 0) {
       lines.push("Vivid Memories:");
-      snapshots.forEach((snap, i3) => {
-        const comma = i3 < snapshots.length - 1 ? "," : "";
+      vivid.forEach((snap, i3) => {
+        const comma = i3 < vivid.length - 1 ? "," : "";
         lines.push(`{${snap}}${comma}`);
       });
     }
-    if (preferenceLines.length > 0) {
+    const prefs = preferenceLines.map((t3) => String(t3 || "").trim()).filter(Boolean);
+    if (prefs.length > 0) {
       lines.push("Preferences:");
-      preferenceLines.forEach((t3, i3) => {
-        const comma = i3 < preferenceLines.length - 1 ? "," : "";
+      prefs.forEach((t3, i3) => {
+        const comma = i3 < prefs.length - 1 ? "," : "";
         lines.push(`{${jsonEscape(t3)}}${comma}`);
       });
     }
-    if (outlookLines.length > 0) {
+    const outlook = outlookLines.map((t3) => String(t3 || "").trim()).filter(Boolean);
+    if (outlook.length > 0) {
       lines.push("Outlook:");
-      outlookLines.forEach((t3, i3) => {
-        const comma = i3 < outlookLines.length - 1 ? "," : "";
+      outlook.forEach((t3, i3) => {
+        const comma = i3 < outlook.length - 1 ? "," : "";
         lines.push(`{${jsonEscape(t3)}}${comma}`);
       });
     }

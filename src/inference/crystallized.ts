@@ -566,45 +566,60 @@ function capKnowsText(text: string): string {
 // schema bookkeeping (aliases, retirement) is unchanged — only this display format changed.
 function buildRenderedString(name: string, schema: SchemaItem[], snapshots: string[], outlookLines: string[] = [], recallLines: string[] = [], preferenceLines: string[] = []): string {
   const lines: string[] = [`[${name}'s Crystallized Memory`];
-  if (schema.length > 0) {
+
+  // Knows: only entries that have BOTH a non-empty label AND non-empty text. An empty field would
+  // render {"Name": ""} (or {"": "…"}), injecting a bare "" pair into the AI's context — the model then
+  // echoes empty quotes into the story. Empties can arrive from an imported DB / stale schema, so we
+  // guard at the render boundary (the injection point), not just at distillation.
+  const knows = schema
+    .map((item) => ({
+      label: [item.subject, ...(item.aliases || [])].map((s) => String(s || "").trim()).filter(Boolean).join(" | "),
+      text: capKnowsText(String(item.text || "").trim()),
+    }))
+    .filter((k) => k.label && k.text);
+  if (knows.length > 0) {
     lines.push("Knows:");
-    schema.forEach((item, i) => {
-      const comma = i < schema.length - 1 ? "," : "";
+    knows.forEach((k, i) => {
+      const comma = i < knows.length - 1 ? "," : "";
       // Key = canonical name plus any aliases, pipe-separated ("Name | Alias1 | Alias2"), so the AI
       // sees every name it can reuse for this subject.
-      const label = [item.subject, ...(item.aliases || [])].map(s => String(s || "").trim()).filter(Boolean).join(" | ");
-      lines.push(`{"${jsonEscape(label)}": "${jsonEscape(capKnowsText(item.text))}"}${comma}`);
+      lines.push(`{"${jsonEscape(k.label)}": "${jsonEscape(k.text)}"}${comma}`);
     });
   }
+  // Every other section drops empty entries too — a bare {} is context noise the AI can mimic.
   // Recalls: scene-relevant memory-bank pulls, framed as active recollection. Sits directly after
   // Knows (both are "about the people present"), before Vivid Memories and Outlook.
-  if (recallLines.length > 0) {
+  const recalls = recallLines.map((t) => String(t || "").trim()).filter(Boolean);
+  if (recalls.length > 0) {
     lines.push("Recalls:");
-    recallLines.forEach((t, i) => {
-      const comma = i < recallLines.length - 1 ? "," : "";
+    recalls.forEach((t, i) => {
+      const comma = i < recalls.length - 1 ? "," : "";
       lines.push(`{${jsonEscape(t)}}${comma}`);
     });
   }
-  if (snapshots.length > 0) {
+  const vivid = snapshots.map((s) => String(s || "").trim()).filter(Boolean);
+  if (vivid.length > 0) {
     lines.push("Vivid Memories:");
-    snapshots.forEach((snap, i) => {
-      const comma = i < snapshots.length - 1 ? "," : "";
+    vivid.forEach((snap, i) => {
+      const comma = i < vivid.length - 1 ? "," : "";
       lines.push(`{${snap}}${comma}`);
     });
   }
   // Preferences: concrete personal texture (tastes/habits/quirks). Placed before Outlook — the
   // lowest-priority block — so the char-budget floor trims Outlook first and this texture is protected.
-  if (preferenceLines.length > 0) {
+  const prefs = preferenceLines.map((t) => String(t || "").trim()).filter(Boolean);
+  if (prefs.length > 0) {
     lines.push("Preferences:");
-    preferenceLines.forEach((t, i) => {
-      const comma = i < preferenceLines.length - 1 ? "," : "";
+    prefs.forEach((t, i) => {
+      const comma = i < prefs.length - 1 ? "," : "";
       lines.push(`{${jsonEscape(t)}}${comma}`);
     });
   }
-  if (outlookLines.length > 0) {
+  const outlook = outlookLines.map((t) => String(t || "").trim()).filter(Boolean);
+  if (outlook.length > 0) {
     lines.push("Outlook:");
-    outlookLines.forEach((t, i) => {
-      const comma = i < outlookLines.length - 1 ? "," : "";
+    outlook.forEach((t, i) => {
+      const comma = i < outlook.length - 1 ? "," : "";
       lines.push(`{${jsonEscape(t)}}${comma}`);
     });
   }

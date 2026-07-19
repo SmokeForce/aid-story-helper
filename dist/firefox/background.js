@@ -22167,6 +22167,39 @@ ${c2.value.slice(0, 600)}
     }
     return { proposals: [] };
   }
+  function isRestrictedParamModel(model5) {
+    return /^(o\d|gpt-5)/.test((model5 || "").toLowerCase());
+  }
+  function adaptUnsupportedParam(payload, errText) {
+    const e2 = (errText || "").toLowerCase();
+    const unsupported = e2.includes("not supported") || e2.includes("unsupported") || e2.includes("only the default");
+    if (!unsupported) return null;
+    if (e2.includes("max_tokens") && "max_tokens" in payload) {
+      const { max_tokens, ...rest } = payload;
+      return { ...rest, max_completion_tokens: max_tokens };
+    }
+    if (e2.includes("temperature") && "temperature" in payload) {
+      const { temperature, ...rest } = payload;
+      return rest;
+    }
+    return null;
+  }
+  async function sendChatCompletion(apiKey, body) {
+    let payload = body;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "authorization": `Bearer ${apiKey}` },
+        body: JSON.stringify(payload)
+      }, { label: "OpenAI" });
+      if (res.ok) return res.json();
+      const errText = await res.text();
+      const adapted = attempt < 2 ? adaptUnsupportedParam(payload, errText) : null;
+      if (!adapted) throw new Error(`OpenAI API error: HTTP ${res.status} - ${errText}`);
+      payload = adapted;
+    }
+    throw new Error("OpenAI API error: exhausted parameter adaptation");
+  }
   var OpenAIProvider = class {
     constructor(apiKey, model5, defaultTemperature) {
       this.apiKey = apiKey;
@@ -22183,25 +22216,13 @@ ${c2.value.slice(0, 600)}
         messages: [
           { role: "system", content: system },
           { role: "user", content: user }
-        ],
-        temperature: 0.1
+        ]
       };
+      if (!isRestrictedParamModel(modelName)) body.temperature = 0.1;
       if (useJsonFormat) {
         body.response_format = { type: "json_object" };
       }
-      const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "authorization": `Bearer ${this.apiKey}`
-        },
-        body: JSON.stringify(body)
-      }, { label: "OpenAI" });
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`OpenAI API error: HTTP ${res.status} - ${errText}`);
-      }
-      const json = await res.json();
+      const json = await sendChatCompletion(this.apiKey, body);
       this.lastRaw = JSON.stringify(json).slice(0, 4e3);
       const content = json.choices?.[0]?.message?.content || "";
       return parseOpenAIResponse(content);
@@ -22209,28 +22230,21 @@ ${c2.value.slice(0, 600)}
     async complete(system, user, opts2) {
       const modelName = this.model || "gpt-4o-mini";
       const fullUser = opts2?.cachePrefix ? `${opts2.cachePrefix}${user}` : user;
+      const restricted = isRestrictedParamModel(modelName);
+      const maxTokens = opts2?.maxTokens ?? 4096;
       const body = {
         model: modelName,
         messages: [
           { role: "system", content: system },
           { role: "user", content: fullUser }
         ],
-        temperature: opts2?.temperature ?? this.defaultTemperature ?? DEFAULT_COMPLETION_TEMPERATURE,
-        max_tokens: opts2?.maxTokens ?? 4096
+        // o-series / gpt-5 renamed this parameter; sending the legacy name is a hard 400 there.
+        ...restricted ? { max_completion_tokens: maxTokens } : { max_tokens: maxTokens }
       };
-      const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "authorization": `Bearer ${this.apiKey}`
-        },
-        body: JSON.stringify(body)
-      }, { label: "OpenAI" });
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`OpenAI API error: HTTP ${res.status} - ${errText}`);
+      if (!restricted) {
+        body.temperature = opts2?.temperature ?? this.defaultTemperature ?? DEFAULT_COMPLETION_TEMPERATURE;
       }
-      const json = await res.json();
+      const json = await sendChatCompletion(this.apiKey, body);
       this.lastRaw = JSON.stringify(json).slice(0, 4e3);
       return json.choices?.[0]?.message?.content || "";
     }

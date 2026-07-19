@@ -1,5 +1,7 @@
-import type { Provider, InferenceRequest, InferenceResponse } from "./provider";
+import type { Provider, InferenceRequest, InferenceResponse, CompleteOptions } from "./provider";
+import { DEFAULT_COMPLETION_TEMPERATURE } from "./provider";
 import { buildPrompt } from "./engine";
+import { fetchWithRetry } from "./http";
 
 function stripFences(text: string): string {
   const m = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -44,8 +46,8 @@ export function parseGeminiResponse(text: string): InferenceResponse {
 /**
  * POST a generateContent request with retry on transient failures. Google returns HTTP 500
  * "Internal error encountered." (and 502/503/429) intermittently — especially on preview/Gemma
- * models — so a single hit shouldn't fail the whole card/thought generation. Retries up to twice
- * with backoff; fails fast on non-retryable 4xx.
+ * models — so a single hit shouldn't fail the whole card/thought generation. `fetchWithRetry`
+ * handles the retry/backoff (honoring Retry-After) and a per-attempt timeout.
  *
  * Gemma models on the Gemini API do NOT reliably support a separate `systemInstruction`, so for all `gemma-*`
  * models the system prompt is folded into the user turn instead (avoiding 500 internal errors).
@@ -72,24 +74,24 @@ async function geminiGenerate(
     ? { contents: [{ parts: [{ text: `${system}\n\n${userText}` }] }], generationConfig }
     : { contents: [{ parts: [{ text: userText }] }], systemInstruction: { role: "system", parts: [{ text: system }] }, generationConfig };
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-  let lastErr = "";
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    if (res.ok) return res.json();
-    lastErr = await res.text();
-    const retryable = res.status === 500 || res.status === 502 || res.status === 503 || res.status === 429;
-    if (retryable && attempt < 2) {
-      await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
-      continue;
-    }
-    throw new Error(`Gemini API error: HTTP ${res.status} - ${lastErr}`);
+  const res = await fetchWithRetry(
+    url,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    { label: "Gemini" },
+  );
+  if (!res.ok) {
+    throw new Error(`Gemini API error: HTTP ${res.status} - ${await res.text()}`);
   }
-  throw new Error(`Gemini API error: ${lastErr}`);
+  return res.json();
 }
 
 export class GeminiProvider implements Provider {
   lastRaw: string | null = null;
-  constructor(private readonly apiKey: string, private readonly model: string) {}
+  constructor(
+    private readonly apiKey: string,
+    private readonly model: string,
+    private readonly defaultTemperature?: number,
+  ) {}
 
   async infer(req: InferenceRequest): Promise<InferenceResponse> {
     const { system, user } = buildPrompt(req);
@@ -107,11 +109,15 @@ export class GeminiProvider implements Provider {
     return parseGeminiResponse(content);
   }
 
-  async complete(system: string, user: string, cachePrefix?: string): Promise<string> {
+  async complete(system: string, user: string, opts?: CompleteOptions): Promise<string> {
     const modelName = this.model || "gemini-1.5-pro";
-    // No Anthropic-style prompt caching here — fold the stable prefix into the user content so none is lost.
-    const fullUser = cachePrefix ? `${cachePrefix}${user}` : user;
-    const json = await geminiGenerate(this.apiKey, modelName, system, fullUser, { temperature: 0.1 });
+    // Gemini caches matching prefixes implicitly (2.5 models); fold the stable prefix into the user
+    // content, first, so a repeated prefix stays byte-identical and cache-eligible.
+    const fullUser = opts?.cachePrefix ? `${opts.cachePrefix}${user}` : user;
+    const json = await geminiGenerate(this.apiKey, modelName, system, fullUser, {
+      temperature: opts?.temperature ?? this.defaultTemperature ?? DEFAULT_COMPLETION_TEMPERATURE,
+      maxOutputTokens: opts?.maxTokens ?? 4096,
+    });
     this.lastRaw = JSON.stringify(json).slice(0, 4000);
     const parts = json.candidates?.[0]?.content?.parts || [];
     return parts

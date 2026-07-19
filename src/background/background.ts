@@ -7,7 +7,7 @@ import { recordOp } from "../shared/op-registry";
 import { buildGameplayRequest, parseGameplayResponse } from "../sync/gameplay-fetch";
 import { backfillAll, type Page } from "../sync/backfill";
 import { applyActionUpdate, diffActionUpdate } from "../sync/reconcile";
-import { buildAnalyzeRequest, buildLocationContext, detectPresentCards, buildMemoraidPrompt } from "../inference/gather";
+import { buildAnalyzeRequest, buildLocationContext, detectPresentCards } from "../inference/gather";
 import { analyze, DEFAULT_TYPE_GUIDANCE, normalizeType } from "../inference/engine";
 import { ClaudeProvider, listModels as listClaudeModels } from "../inference/claude";
 import { OpenAIProvider, listOpenAIModels } from "../inference/openai";
@@ -1263,14 +1263,15 @@ async function runAnalyze(shortId: string): Promise<{ count: number; proposedNam
 
   let provider;
   const model = settings.model || "";
+  const temp = settings.completionTemperature;
   if (providerName === "openai") {
-    provider = new OpenAIProvider(apiKey || "", model || "gpt-4o-mini");
+    provider = new OpenAIProvider(apiKey || "", model || "gpt-4o-mini", temp);
   } else if (providerName === "gemini") {
-    provider = new GeminiProvider(apiKey || "", model || "gemini-1.5-pro");
+    provider = new GeminiProvider(apiKey || "", model || "gemini-1.5-pro", temp);
   } else if (providerName === "ollama") {
-    provider = new OllamaProvider(apiKey || "http://localhost:11434", model || "llama3");
+    provider = new OllamaProvider(apiKey || "http://localhost:11434", model || "llama3", temp);
   } else {
-    provider = new ClaudeProvider(apiKey || "", model || "claude-3-5-sonnet-latest");
+    provider = new ClaudeProvider(apiKey || "", model || "claude-3-5-sonnet-latest", temp);
   }
 
   const totalActionsCount = countActions(allActions);
@@ -1438,14 +1439,15 @@ async function getActiveProvider(): Promise<Provider | { error: string }> {
     return { error: `Set your API key/endpoint for ${providerName} in settings.` };
   }
   const model = settings.model || "";
+  const temp = settings.completionTemperature;
   if (providerName === "openai") {
-    return new OpenAIProvider(apiKey || "", model || "gpt-4o-mini");
+    return new OpenAIProvider(apiKey || "", model || "gpt-4o-mini", temp);
   } else if (providerName === "gemini") {
-    return new GeminiProvider(apiKey || "", model || "gemini-1.5-pro");
+    return new GeminiProvider(apiKey || "", model || "gemini-1.5-pro", temp);
   } else if (providerName === "ollama") {
-    return new OllamaProvider(apiKey || "http://localhost:11434", model || "llama3");
+    return new OllamaProvider(apiKey || "http://localhost:11434", model || "llama3", temp);
   } else {
-    return new ClaudeProvider(apiKey || "", model || "claude-3-5-sonnet-latest");
+    return new ClaudeProvider(apiKey || "", model || "claude-3-5-sonnet-latest", temp);
   }
 }
 
@@ -2456,17 +2458,28 @@ export async function regenerateLatestMemory(shortId: string): Promise<{ ok: boo
 // One-time DB heal for imported/upgraded older databases. Bump when a new heal step is added; the
 // stamp (`settings.dbHealVersion`) gates it to run once per database. Restores done via importAll heal
 // unconditionally (see repo.importAll); this covers in-place extension upgrades.
-const DB_HEAL_VERSION = 1;
+// v2 adds the POV-bleed remediation: state written while the unified distillation prompt lacked a
+// per-section identity anchor absorbed the PLAYER's experiences into NPC memory. Each step is gated
+// by the stamp so it runs at most once per database — step 2 in particular must never re-run, since
+// re-clearing would wipe layers the fixed prompt has legitimately rebuilt.
+const DB_HEAL_VERSION = 2;
 let dbHealChecked = false;
 async function ensureDbHealed(): Promise<void> {
   if (dbHealChecked) return;
   dbHealChecked = true;
   try {
     const settings = await repo.getSettings();
-    if ((settings?.dbHealVersion ?? 0) >= DB_HEAL_VERSION) return;
-    const healed = await repo.healAllCrystallizedState();
+    const from = settings?.dbHealVersion ?? 0;
+    if (from >= DB_HEAL_VERSION) return;
+    if (from < 1) {
+      const healed = await repo.healAllCrystallizedState();
+      dlog(`[AID bg] DB heal v1: sanitized ${healed} Crystallized state(s).`);
+    }
+    if (from < 2) {
+      const cleared = await repo.healPovBleedCrystallizedState();
+      dlog(`[AID bg] DB heal v2: cleared POV-bled Vivid/Outlook/Preferences on ${cleared} Crystallized state(s) (archived, Knows kept).`);
+    }
     await repo.setSettings({ ...(settings || {}), dbHealVersion: DB_HEAL_VERSION } as Settings);
-    dlog(`[AID bg] DB heal v${DB_HEAL_VERSION}: sanitized ${healed} Crystallized state(s).`);
   } catch (err) {
     dbHealChecked = false; // let a later call retry
     console.error("[AID bg] DB heal failed:", err);
@@ -4223,6 +4236,7 @@ async function handleMessage(msg: BgMessage): Promise<any> {
             useMemories: settings.useMemories,
             memoraidLookback: settings.memoraidLookback,
             memoraidThoughtLookback: settings.memoraidThoughtLookback ?? 1,
+            completionTemperature: settings.completionTemperature ?? 0.7,
             memoraidPresenceLookback: settings.memoraidPresenceLookback,
             autoRegenerateMemoryBankEntry: !!settings.autoRegenerateMemoryBankEntry,
             interceptTimeout: settings.interceptTimeout ?? 10,

@@ -9,7 +9,7 @@ import { type VividMemoryLogEntry, type CrystallizedArchiveEntry } from "../stor
 import { buildCardSave, buildCardCreate, DEFAULT_GQL_QUERIES } from "../inference/writeback";
 import { generateCard } from "../inference/native";
 import { isCharacterTriggered, type CardRow } from "../shared/types";
-import { parseCrystallized, renderCrystallizedEntry, renderCrystallizedEntryScene, effectiveCrystallizedCaps, reinforceAndDecay, reconcile, isWindowDue, isManualWindowReady, distillationWindow, isDistillationSourceCard, buildDistillationBuffer, findCrystallizedCard, parseOutlook, reconcileOutlook, parsePreferences, reconcilePreferences, snapshotTokens, type CrystallizedState, type SchemaItem } from "../inference/crystallized";
+import { parseCrystallized, renderCrystallizedEntry, renderCrystallizedEntryScene, effectiveCrystallizedCaps, reinforceAndDecay, reconcile, isWindowDue, isManualWindowReady, distillationWindow, isDistillationSourceCard, buildDistillationBuffer, findCrystallizedCard, parseOutlook, reconcileOutlook, parsePreferences, reconcilePreferences, snapshotTokens, buildUnifiedDistillationCommand, CRYSTALLIZED_SECTION_HEADERS, type CrystallizedState, type SchemaItem } from "../inference/crystallized";
 import { extractSceneSignal, selectRecalls, presentCastSignature, DEFAULT_RECALL_THRESHOLD } from "../inference/npc-memory-bank";
 import { getSceneText } from "./bg-scene";
 import { DRIFT_JUDGE_INSTRUCTION, parseDriftVerdict, stripDriftVerdictLine } from "../inference/core-character";
@@ -280,14 +280,21 @@ async function runDistillationForNPC(
   const dyingNodesText = dyingNodesList.map(n => `- Snapshot: ${n.snapshot}`).join("\n");
   
   const combinedContext = [
-    "Recent story events and character thoughts:",
+    // Label the narration's ownership explicitly: the Action lines are second-person AID story text
+    // whose "You" is the PLAYER, while the Thoughts lines belong to this card's owner. Without this
+    // the distiller reads "You woke in a ruined shrine" as the owner's own memory.
+    `Recent story events (second-person narration — "You" is the player character ${protagonist}, NOT ${name}) and ${name}'s own thoughts:`,
     bufferText,
     "",
     dyingNodesText ? "Fading memories (absorb their core lessons/facts into the Schema):\n" + dyingNodesText : ""
   ].filter(Boolean).join("\n").slice(0, 3000);
-  
+
   const formattingMode = settings?.formattingMode || DEFAULT_FORMATTING_MODE;
-  const generationTargetCard = { ...crystallizedCard, value: "" };
+  // {{title}} must resolve to the CHARACTER ("Hermes (God)"), not the Crystallized card's own title
+  // ("Hermes (God) - Crystallized") — otherwise every prompt opens "You are <Name> - Crystallized",
+  // an artifact name rather than a person, which dilutes the persona anchor. Generation payload only;
+  // the actual save below still uses `crystallizedCard`.
+  const generationTargetCard = { ...crystallizedCard, title: name, value: "" };
 
   const cleanLlmOutputBrackets = (text: string): string => {
     let cleaned = text.trim();
@@ -320,30 +327,25 @@ async function runDistillationForNPC(
   const currentOutlookText = (decayedState.outlook || []).map((b) => `- ${b.text}`).join("\n");
   const currentPreferencesText = (decayedState.preferences || []).map((b) => `- ${b.text}`).join("\n");
 
-  const H_KNOWS = "===KNOWS===", H_VIVID = "===VIVID===", H_OUTLOOK = "===OUTLOOK===", H_PREFS = "===PREFERENCES===";
+  const H_KNOWS = CRYSTALLIZED_SECTION_HEADERS.knows, H_VIVID = CRYSTALLIZED_SECTION_HEADERS.vivid;
+  const H_OUTLOOK = CRYSTALLIZED_SECTION_HEADERS.outlook, H_PREFS = CRYSTALLIZED_SECTION_HEADERS.preferences;
   const allHeaders = [H_KNOWS, H_VIVID, H_OUTLOOK, H_PREFS];
 
-  // Section directives — faithful to the standalone templates' rules AND output formats ("### I. SCHEMA"
-  // / "- Snapshot: " / "Beliefs:" / "Preferences:") so the parsers downstream are untouched.
-  const KNOWS_DIRECTIVE = `${H_KNOWS}\nUpdate your knowledge of the OTHER people, places, things, topics, foods, media, activities and objects you have formed a genuine opinion, preference or attachment to (the player character {protagonist} is simply one more person). This card is your OWN memory, so NEVER add a line about yourself. For each subject write ONE concise first-person line combining the key facts AND how you currently feel about them, EXACT form "- [Subject] one concise factual+emotional sentence"; when the story develops a subject, rewrite that subject's single line in place — never a second line for the same subject. Begin this section with the line "### I. SCHEMA".`;
-  const VIVID_DIRECTIVE = `${H_VIVID}\nGive your COMPLETE updated list of Vivid Memories: ONE concise first-person line per distinct scene — the emotional heart of the moment, feeling over fact, each under 140 characters, prefixed "- Snapshot: ". Merge lines describing the same scene; refine a remembered scene rather than duplicating it; drop what has faded; add a line for each genuinely new scene. Maximum 7 lines.`;
-  const OUTLOOK_DIRECTIVE = `${H_OUTLOOK}\nGive your COMPLETE updated list of beliefs: first-person, GENERALIZED views of yourself or the world — NEVER about a specific named person. Re-state (refined) every belief that still holds, drop what no longer holds, add at most 2 new ones only if events genuinely shifted something. Maximum 5. Begin this section with a line reading exactly "Beliefs:" then each belief on its own line prefixed "- ".`;
-  const PREFS_DIRECTIVE = `${H_PREFS}\nGive your COMPLETE updated list of concrete personal preferences and quirks — the ordinary TEXTURE of a person: tastes, habits, pet peeves, little rituals, small opinions about particular things. Each line first-person and CONCRETE. Re-state (refined) every preference that still fits, drop those that no longer do, add at most 2 new ones only if events revealed them. FORBIDDEN: emotional themes, life-philosophy, feelings about a specific named person, relationships/trauma/growth. Maximum 6. Begin this section with a line reading exactly "Preferences:" then each preference on its own line prefixed "- ".`;
-
-  const directiveParts: string[] = [];
-  if (schemaEnabled) directiveParts.push(KNOWS_DIRECTIVE);
-  if (nodesEnabled) directiveParts.push(VIVID_DIRECTIVE);
-  if (outlookEnabled) directiveParts.push(OUTLOOK_DIRECTIVE + (driftJudgeEnabled ? DRIFT_JUDGE_INSTRUCTION : ""));
-  if (preferencesEnabled) directiveParts.push(PREFS_DIRECTIVE);
+  const anySectionEnabled = schemaEnabled || nodesEnabled || outlookEnabled || preferencesEnabled;
 
   let schemaOutput = "", nodesOutput = "", outlookRaw = "", prefsRaw = "";
 
-  if (directiveParts.length > 0) {
+  if (anySectionEnabled) {
+    // Prompt construction (incl. the second-person PERSPECTIVE contract and the per-section identity
+    // re-anchor) lives in the pure inference module so it can be regression-tested directly.
     const unifiedCommand = resolveCommand(
-      `You are {{title}}, distilling your own long-term memory after the recent story (the player character is {protagonist}). ` +
-      `Read the recent events/thoughts and your current memory state, then output ONLY the requested sections below. Emit each section ` +
-      `beginning with its exact ===HEADER=== line on its own line, in the order shown, and write nothing outside these sections.\n\n` +
-      directiveParts.join("\n\n"),
+      buildUnifiedDistillationCommand({
+        schemaEnabled,
+        nodesEnabled,
+        outlookEnabled,
+        preferencesEnabled,
+        driftJudgeInstruction: driftJudgeEnabled ? DRIFT_JUDGE_INSTRUCTION : undefined,
+      }),
       protagonist
     );
     const contextParts = [combinedContext];
@@ -352,7 +354,8 @@ async function runDistillationForNPC(
     if (preferencesEnabled) contextParts.push(`Your current Preferences:\n${currentPreferencesText || "(none yet)"}`);
     const unifiedContext = contextParts.join("\n\n").slice(0, 6000);
 
-    dlog(`[Crystallized] Dispatching unified distillation (${directiveParts.length} section(s)) for ${name}...`);
+    const sectionCount = [schemaEnabled, nodesEnabled, outlookEnabled, preferencesEnabled].filter(Boolean).length;
+    dlog(`[Crystallized] Dispatching unified distillation (${sectionCount} section(s)) for ${name}...`);
     const rUnified = await generateCard(generationTargetCard, unifiedCommand, formattingMode, { storyInformation: unifiedContext });
     // Fatal like the old Schema/Nodes passes: a failed unified call must NOT advance the window marker
     // (the whole window retries next turn), so let it throw out of runDistillationForNPC.

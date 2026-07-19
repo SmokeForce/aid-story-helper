@@ -2610,6 +2610,13 @@
               </div>
               <input id="memoraid-thought-win" type="number" min="1" placeholder="1" style="margin:4px 0 8px 0;" />
 
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">Completion Temperature</label>
+                <span id="completion-temp-val" style="opacity:0.8;font-variant-numeric:tabular-nums;min-width:2.2em;text-align:right;">0.7</span>
+              </div>
+              <input id="completion-temp" type="range" min="0" max="1" step="0.05" value="0.7" style="margin:4px 0 8px 0;width:100%;" />
+              <div style="font-size:11px;opacity:0.7;margin:-4px 0 8px 0;">Sampling temperature for all AI generation (thoughts, memories, distillation). Lower = more consistent, higher = more varied. Applies to every provider.</div>
+
               <!-- Dummy setting strictly for visual screenshot matching with public version -->
               <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
                 <label style="margin:0;flex:1;">Thought Card Character Limit</label>
@@ -3850,6 +3857,11 @@ Output only the SCHEMA section.`,
     const charCardLimitEl = $("char-card-limit");
     const memoraidWinEl = $("memoraid-win");
     const thoughtCardLimitEl = $("thought-card-limit");
+    const completionTempEl = $("completion-temp");
+    const completionTempValEl = $("completion-temp-val");
+    completionTempEl?.addEventListener("input", () => {
+      if (completionTempValEl) completionTempValEl.textContent = Number(completionTempEl.value).toFixed(2);
+    });
     const provEl = $("prov"), keyLblEl = $("key-lbl");
     const themeEl = $("theme");
     const enableLcEl = $("enable-living-characters");
@@ -7258,6 +7270,7 @@ Output only the SCHEMA section.`,
       if (cleanSettings.formattingMode === DEFAULT_FORMATTING_MODE) delete cleanSettings.formattingMode;
       if (cleanSettings.analyzeWindow === 20) delete cleanSettings.analyzeWindow;
       if (cleanSettings.memoraidThoughtLookback === 1) delete cleanSettings.memoraidThoughtLookback;
+      if (cleanSettings.completionTemperature === 0.7) delete cleanSettings.completionTemperature;
       if (cleanSettings.memoraidPresenceLookback === 5) delete cleanSettings.memoraidPresenceLookback;
       if (cleanSettings.thoughtCardLimit === 2e3) delete cleanSettings.thoughtCardLimit;
       if (cleanSettings.interceptTimeout === 4) delete cleanSettings.interceptTimeout;
@@ -7491,6 +7504,8 @@ Output only the SCHEMA section.`,
           const crystallizedNpcMemoryEnabled = root.getElementById("crystallized-npc-memory-enabled")?.checked ?? true;
           const tcl = parseInt(thoughtCardLimitEl.value, 10);
           const thoughtCardLimit = Number.isFinite(tcl) && tcl >= 100 ? tcl : 2e3;
+          const ctVal = parseFloat(completionTempEl?.value ?? "");
+          const completionTemperature = Number.isFinite(ctVal) ? Math.max(0, Math.min(1, ctVal)) : 0.7;
           const settings = {
             provider: provEl.value,
             model: modelEl.value.trim() || void 0,
@@ -7507,6 +7522,7 @@ Output only the SCHEMA section.`,
             memoraidThoughtLookback,
             memoraidPresenceLookback,
             thoughtCardLimit,
+            completionTemperature,
             autoRegenerateMemoryBankEntry: autoRegenMems,
             interceptTimeout,
             locationMode: locMode,
@@ -7765,6 +7781,11 @@ Output only the SCHEMA section.`,
         }
         if (state.settings && (!memoraidThoughtWinEl.value || shouldForceUpdate || root.activeElement !== memoraidThoughtWinEl)) {
           memoraidThoughtWinEl.value = String(Math.max(1, state.settings.memoraidThoughtLookback ?? 1));
+        }
+        if (completionTempEl && state.settings && (shouldForceUpdate || root.activeElement !== completionTempEl)) {
+          const t = Math.max(0, Math.min(1, state.settings.completionTemperature ?? 0.7));
+          completionTempEl.value = String(t);
+          if (completionTempValEl) completionTempValEl.textContent = t.toFixed(2);
         }
         if (state.settings && (!memoraidPresenceWinEl.value || shouldForceUpdate || root.activeElement !== memoraidPresenceWinEl)) {
           memoraidPresenceWinEl.value = String(state.settings.memoraidPresenceLookback ?? 5);

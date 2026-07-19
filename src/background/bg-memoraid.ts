@@ -6,6 +6,7 @@ import { buildLifeCardContext } from "../inference/living-characters";
 import { buildCardSave, buildCardCreate, DEFAULT_GQL_QUERIES, buildGraphQLMutation, type GqlOperation, type GqlMutationRequest } from "../inference/writeback";
 import { isDistillationSourceCard } from "../inference/crystallized";
 import { generateCard } from "../inference/native";
+import { runBatch } from "../shared/concurrency";
 import { countActions, isCharacterTriggered, type CardRow, type Settings } from "../shared/types";
 import { resolveCommand, parseProtagonistName, DEFAULT_FORMATTING_MODE, DEFAULT_CARD_COMMANDS } from "../inference/card-command";
 import { isTitleUserDeleted } from "../inference/deleted-cards";
@@ -257,7 +258,7 @@ async function checkMemorAIDUpdatesImpl(shortId: string, pendingActionText?: str
   const cooldownMap: Record<string, number> = adv?.memoraidOffstageCooldown ? { ...adv.memoraidOffstageCooldown } : {};
   let cooldownChanged = false;
   const offstageLookback = settings?.memoraidPresenceLookback ?? 5;
-  const generationsToRun: { character: any; targetMemCard: CardRow; prevNotes: any; genCard: CardRow; command: string; formattingMode: string; opts: { storyInformation: string } }[] = [];
+  const generationsToRun: { character: any; targetMemCard: CardRow; prevNotes: any; genCard: CardRow; command: string; formattingMode: string; sceneBlock: string; perCharContext: string; opts?: { storyInformation: string; cachePrefix?: string } }[] = [];
   const generationResults: { character: any; targetMemCard: CardRow; value: string; newDesc: string }[] = [];
 
   for (const c of triggered) {
@@ -306,7 +307,10 @@ async function checkMemorAIDUpdatesImpl(shortId: string, pendingActionText?: str
       ? `${c.title || "This character"}'s nature:\n${durableCore}\n\n${thoughtContext}`
       : thoughtContext;
     const lifeContext = settings?.enableLivingCharacters !== false ? buildLifeCardContext(cards, c.title || "", settings) : "";
-    const combinedContext = [sceneBlock, lifeContext, anchoredContext]
+    // The scene block is identical for every present character this turn (turn-level
+    // sceneForGeneration); the life + anchored context is per-character. Keep them apart so a
+    // multi-character turn can send the shared scene as a cache-controlled prefix (decided below).
+    const perCharContext = [lifeContext, anchoredContext]
       .filter(Boolean)
       .join("\n\n")
       .trim()
@@ -319,22 +323,42 @@ async function checkMemorAIDUpdatesImpl(shortId: string, pendingActionText?: str
       + `\n\nCRITICAL: The generated thoughts must be strictly under ${thoughtCardLimit} characters in length.`;
 
     const formattingMode = settings?.formattingMode || DEFAULT_FORMATTING_MODE;
-    const opts = {
-      storyInformation: combinedContext
-    };
 
     // Clear the card's current value in the generation payload so the LLM generates
     // a fresh thought reaction for this turn from scratch, without being biased
     // to repeat the previous turn's thoughts and actions.
     const generationTargetCard = { ...targetMemCard, value: "" };
-    generationsToRun.push({ character: c, targetMemCard, prevNotes, genCard: generationTargetCard, command: resolvedCommand, formattingMode, opts });
+    generationsToRun.push({ character: c, targetMemCard, prevNotes, genCard: generationTargetCard, command: resolvedCommand, formattingMode, sceneBlock, perCharContext });
   }
 
 
   if (generationsToRun.length > 0) {
-    dlog(`[MemorAID] Generating ${generationsToRun.length} memories via the configured provider...`);
+    // A multi-character turn re-uses one identical scene + story summary across every character.
+    // Send that shared bulk as a cache-controlled prefix (Claude explicit; OpenAI/Gemini implicit;
+    // Ollama KV) so the repeat calls are charged the discounted rate. A single-character turn gets
+    // no prefix — there's no second call to amortize Claude's cache-write premium against.
+    const useSharedPrefix = generationsToRun.length >= 2;
     for (const item of generationsToRun) {
-      const parsed = await generateCard(item.genCard, item.command, item.formattingMode, item.opts);
+      item.opts = useSharedPrefix
+        ? { storyInformation: item.perCharContext, cachePrefix: item.sceneBlock }
+        : { storyInformation: [item.sceneBlock, item.perCharContext].filter(Boolean).join("\n\n").trim().slice(0, 4000) };
+    }
+    // Ollama serves a single model instance — parallel calls just queue on the GPU, so keep it
+    // sequential; cloud providers run the batch concurrently. When a shared prefix is in play we warm
+    // it on call #1 (awaited alone) before fanning out, so calls #2..N read the cache instead of each
+    // racing to write it. generateCard never throws (it resolves to { ok:false }), so a failed call
+    // just yields a skipped character below rather than sinking the batch.
+    const concurrency = settings?.provider === "ollama" ? 1 : 4;
+    dlog(`[MemorAID] Generating ${generationsToRun.length} memories via the configured provider (concurrency=${concurrency}, sharedPrefix=${useSharedPrefix})...`);
+    const genResults = await runBatch(
+      generationsToRun,
+      concurrency,
+      (item) => generateCard(item.genCard, item.command, item.formattingMode, item.opts!),
+      useSharedPrefix,
+    );
+    for (let idx = 0; idx < generationsToRun.length; idx++) {
+      const item = generationsToRun[idx]!;
+      const parsed = genResults[idx]!;
       if (!parsed.ok) {
         console.error(`[MemorAID] Provider generation failed for ${item.character.title}:`, parsed.message || "unknown error");
         continue;

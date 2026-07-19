@@ -1,5 +1,7 @@
-import type { Provider, InferenceRequest, InferenceResponse } from "./provider";
+import type { Provider, InferenceRequest, InferenceResponse, CompleteOptions } from "./provider";
+import { DEFAULT_COMPLETION_TEMPERATURE } from "./provider";
 import { buildPrompt } from "./engine";
+import { fetchWithRetry } from "./http";
 
 export interface ClaudeRequest {
   url: string;
@@ -7,7 +9,14 @@ export interface ClaudeRequest {
   body: string;
 }
 
-export function buildClaudeRequest(apiKey: string, model: string, system: string, user: string, cachePrefix?: string): ClaudeRequest {
+export function buildClaudeRequest(
+  apiKey: string,
+  model: string,
+  system: string,
+  user: string,
+  cachePrefix?: string,
+  extras?: { temperature?: number; maxTokens?: number },
+): ClaudeRequest {
   // When a cachePrefix is supplied, send the user turn as two blocks with the cache breakpoint on
   // the stable prefix — prompt caching is a prefix match, so the breakpoint caches system + prefix
   // together and repeated calls sharing that prefix read it at ~0.1x. The variable tail (`user`)
@@ -18,6 +27,15 @@ export function buildClaudeRequest(apiKey: string, model: string, system: string
         { type: "text", text: user },
       ]
     : user;
+  const body: Record<string, unknown> = {
+    model,
+    max_tokens: extras?.maxTokens ?? 8192,
+    system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
+    messages: [{ role: "user", content: messageContent }],
+  };
+  // Anthropic caps temperature at 1.0; only send it when explicitly set (infer() omits it to keep
+  // its long-standing JSON-analysis behaviour unchanged).
+  if (extras?.temperature != null) body.temperature = Math.max(0, Math.min(1, extras.temperature));
   return {
     url: "https://api.anthropic.com/v1/messages",
     headers: {
@@ -26,12 +44,7 @@ export function buildClaudeRequest(apiKey: string, model: string, system: string
       "anthropic-version": "2023-06-01",
       "anthropic-dangerous-direct-browser-access": "true",
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: 8192,
-      system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
-      messages: [{ role: "user", content: messageContent }],
-    }),
+    body: JSON.stringify(body),
   };
 }
 
@@ -122,18 +135,26 @@ export async function listModels(apiKey: string): Promise<string[]> {
 
 export class ClaudeProvider implements Provider {
   lastRaw: string | null = null;
-  constructor(private readonly apiKey: string, private readonly model: string) {}
+  constructor(
+    private readonly apiKey: string,
+    private readonly model: string,
+    private readonly defaultTemperature?: number,
+  ) {}
   async infer(req: InferenceRequest): Promise<InferenceResponse> {
     const { system, user } = buildPrompt(req);
     const r = buildClaudeRequest(this.apiKey, this.model, system, user);
-    const res = await fetch(r.url, { method: "POST", headers: r.headers, body: r.body });
+    const res = await fetchWithRetry(r.url, { method: "POST", headers: r.headers, body: r.body }, { label: "Claude" });
     const json = await res.json();
     this.lastRaw = JSON.stringify(json).slice(0, 4000);
     return parseClaudeResponse(json);
   }
-  async complete(system: string, user: string, cachePrefix?: string): Promise<string> {
-    const r = buildClaudeRequest(this.apiKey, this.model, system, user, cachePrefix);
-    const res = await fetch(r.url, { method: "POST", headers: r.headers, body: r.body });
+  async complete(system: string, user: string, opts?: CompleteOptions): Promise<string> {
+    const temperature = opts?.temperature ?? this.defaultTemperature ?? DEFAULT_COMPLETION_TEMPERATURE;
+    const r = buildClaudeRequest(this.apiKey, this.model, system, user, opts?.cachePrefix, {
+      temperature,
+      maxTokens: opts?.maxTokens,
+    });
+    const res = await fetchWithRetry(r.url, { method: "POST", headers: r.headers, body: r.body }, { label: "Claude" });
     if (!res.ok) {
       const errText = await res.text();
       throw new Error(`Claude API error: HTTP ${res.status} - ${errText}`);

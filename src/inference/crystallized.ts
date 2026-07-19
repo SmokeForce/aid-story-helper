@@ -1201,6 +1201,106 @@ export function buildDistillationBuffer(
 }
 
 /** Finds the crystallized card for a given character. */
+/**
+ * One-time remediation for the POV-unanchored distillation prompt (DB heal v2).
+ *
+ * Between the four-pass→single-call unification and the perspective fix, the Vivid / Outlook /
+ * Preferences directives carried NO identity anchor, so the model bound the story's second-person
+ * "You" (always the PLAYER) to the card owner and wrote the player's experiences into the NPC's
+ * memory. There is no way to detect an affected line after the fact — a bled snapshot is textually
+ * identical to a legitimate one and never names the protagonist (that is the bug) — so remediation is
+ * a blanket clear of exactly those three layers, not surgical removal.
+ *
+ * Knows is deliberately KEPT: it retained partial anchoring, it is the most expensive layer to
+ * rebuild (accumulated relationships), and it self-heals — it is keyed by subject and rewritten
+ * "in place" each window, so the fixed prompt corrects a bad line without losing the subject.
+ *
+ * The three cleared layers are full-list rewrites ("give your COMPLETE updated list"), so they
+ * regenerate within a window or two under the fixed prompt. Callers archive what is returned in
+ * `removed` (reason "perspective-heal") so nothing is truly destroyed.
+ */
+export function clearPovBleedLayers(state: CrystallizedState): {
+  state: CrystallizedState;
+  changed: boolean;
+  removed: { vivid: string[]; outlook: string[]; preferences: string[] };
+} {
+  const vivid = (state.nodes || []).map((n) => n.snapshot).filter(Boolean);
+  const outlook = (state.outlook || []).map((b) => b.text).filter(Boolean);
+  const preferences = (state.preferences || []).map((p) => p.text).filter(Boolean);
+  const changed = vivid.length > 0 || outlook.length > 0 || preferences.length > 0;
+  if (!changed) return { state, changed: false, removed: { vivid: [], outlook: [], preferences: [] } };
+  return {
+    state: { ...state, nodes: [], outlook: [], preferences: [] },
+    changed: true,
+    removed: { vivid, outlook, preferences },
+  };
+}
+
+/** Section delimiters for the unified distillation reply. Single source of truth: the prompt builder
+ *  below emits these headers and the background parser splits on the same constants. */
+export const CRYSTALLIZED_SECTION_HEADERS = {
+  knows: "===KNOWS===",
+  vivid: "===VIVID===",
+  outlook: "===OUTLOOK===",
+  preferences: "===PREFERENCES===",
+} as const;
+
+export interface UnifiedDistillationOptions {
+  schemaEnabled: boolean;
+  nodesEnabled: boolean;
+  outlookEnabled: boolean;
+  preferencesEnabled: boolean;
+  /** Drift-judge rider appended to the Outlook section; omit when the judge is off. */
+  driftJudgeInstruction?: string;
+}
+
+/**
+ * Build the unified Crystallized distillation command (tokens `{{title}}` and `{protagonist}` left
+ * unresolved for the caller's resolveCommand/resolveTitleToken).
+ *
+ * PERSPECTIVE CONTRACT — the reason this is a dedicated, tested builder: the distillation buffer is
+ * raw AID narration, which is SECOND PERSON, and its "You" is always the player character. The card
+ * owner (`{{title}}`) is someone else. When a first-person section directive is given without
+ * re-stating that, the model binds the narration's "You" to the card owner and the owner inherits the
+ * player's experiences (an NPC "remembering" the player's backstory). The standalone per-section
+ * templates each re-anchor with "You are {{title}}…"; when the four passes were folded into one call
+ * that anchor survived only in the preamble, so Vivid/Outlook/Preferences drifted. Therefore: the
+ * preamble states the contract explicitly AND every section directive re-anchors identity.
+ */
+export function buildUnifiedDistillationCommand(opts: UnifiedDistillationOptions): string {
+  const H = CRYSTALLIZED_SECTION_HEADERS;
+
+  const preamble =
+    `You are {{title}}, a character in an interactive, second-person story, distilling your OWN long-term memory after recent events.\n` +
+    `PERSPECTIVE (critical): in the narration that follows, "you"/"your" ALWAYS refers to the player character {protagonist} — NEVER to you. ` +
+    `{protagonist} is a SEPARATE person from you. Never adopt {protagonist}'s actions, experiences, memories, feelings, or opinions as your own; ` +
+    `record only what {{title}} personally did, witnessed, or feels.\n` +
+    `Read the recent events/thoughts and your current memory state, then output ONLY the requested sections below. Emit each section ` +
+    `beginning with its exact ===HEADER=== line on its own line, in the order shown, and write nothing outside these sections.`;
+
+  // Each directive re-states identity and the {protagonist} separation, and keeps the EXACT output
+  // format the downstream parsers expect ("### I. SCHEMA" / "- Snapshot: " / "Beliefs:" / "Preferences:").
+  const KNOWS =
+    `${H.knows}\nYou are {{title}}. Update YOUR knowledge of the OTHER people, places, things, topics, foods, media, activities and objects you have formed a genuine opinion, preference or attachment to (the player character {protagonist} is simply one more person you may know). This card is your OWN memory, so NEVER add a line about yourself, and NEVER record {protagonist}'s experiences as your own. For each subject write ONE concise first-person line combining the key facts AND how you currently feel about them, EXACT form "- [Subject] one concise factual+emotional sentence"; when the story develops a subject, rewrite that subject's single line in place — never a second line for the same subject. Begin this section with the line "### I. SCHEMA".`;
+
+  const VIVID =
+    `${H.vivid}\nYou are {{title}}. Give your COMPLETE updated list of Vivid Memories — ONLY moments YOU personally witnessed or took part in. Scenes experienced by {protagonist} or by others while you were absent are NOT your memories and must never be listed. ONE concise first-person line per distinct scene — the emotional heart of the moment, feeling over fact, each under 140 characters, prefixed "- Snapshot: ". Merge lines describing the same scene; refine a remembered scene rather than duplicating it; drop what has faded; add a line for each genuinely new scene. Maximum 7 lines.`;
+
+  const OUTLOOK =
+    `${H.outlook}\nYou are {{title}}. Give your COMPLETE updated list of YOUR beliefs: first-person, GENERALIZED views of yourself or the world — NEVER about a specific named person, and never {protagonist}'s convictions restated as yours. Re-state (refined) every belief that still holds, drop what no longer holds, add at most 2 new ones only if events genuinely shifted something. Maximum 5. Begin this section with a line reading exactly "Beliefs:" then each belief on its own line prefixed "- ".`;
+
+  const PREFS =
+    `${H.preferences}\nYou are {{title}}. Give your COMPLETE updated list of YOUR OWN concrete personal preferences and quirks — never {protagonist}'s: tastes, habits, pet peeves, little rituals, small opinions about particular things. Each line first-person and CONCRETE. Re-state (refined) every preference that still fits, drop those that no longer do, add at most 2 new ones only if events revealed them. FORBIDDEN: emotional themes, life-philosophy, feelings about a specific named person, relationships/trauma/growth. Maximum 6. Begin this section with a line reading exactly "Preferences:" then each preference on its own line prefixed "- ".`;
+
+  const parts: string[] = [];
+  if (opts.schemaEnabled) parts.push(KNOWS);
+  if (opts.nodesEnabled) parts.push(VIVID);
+  if (opts.outlookEnabled) parts.push(OUTLOOK + (opts.driftJudgeInstruction || ""));
+  if (opts.preferencesEnabled) parts.push(PREFS);
+
+  return `${preamble}\n\n${parts.join("\n\n")}`;
+}
+
 export function findCrystallizedCard(cards: CardRow[], name: string): CardRow | undefined {
   const targetTitle = `${name} - Crystallized`.toLowerCase();
   return cards.find(

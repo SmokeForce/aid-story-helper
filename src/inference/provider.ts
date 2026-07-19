@@ -32,23 +32,36 @@ export interface InferenceResponse {
   proposals: Proposal[];
 }
 
+/** Fallback completion temperature when neither the call nor the provider instance sets one. Kept
+ *  consistent across providers so the same feature generates with the same warmth regardless of the
+ *  configured backend (Claude previously ran at the API default ~1.0 while the others ran at 0.1). */
+export const DEFAULT_COMPLETION_TEMPERATURE = 0.7;
+
+export interface CompleteOptions {
+  /**
+   * STABLE leading portion of the user message, logically prepended to `user` (full prompt =
+   * system + cachePrefix + user). Providers that support prompt caching (Claude) emit it as a
+   * separate cache-controlled content block so repeated calls sharing the same prefix read it
+   * cheaply; others concatenate it. Only pass it when the same prefix is reused across ≥2 calls
+   * (multi-pass / multi-character), otherwise the cache-write premium is paid with no read.
+   */
+  cachePrefix?: string;
+  /** Sampling temperature for this call. Overrides the provider's configured default. */
+  temperature?: number;
+  /** Max output tokens for this call. Overrides the provider's default cap. */
+  maxTokens?: number;
+}
+
 export interface Provider {
   infer(req: InferenceRequest): Promise<InferenceResponse>;
-  /**
-   * Single-shot completion. `cachePrefix`, when provided, is the STABLE leading portion of the
-   * user message and is logically prepended to `user` (full prompt = system + cachePrefix + user).
-   * Providers that support prompt caching (Claude) emit it as a separate cache-controlled content
-   * block so repeated calls sharing the same prefix read it cheaply; others just concatenate it.
-   * Only pass it when the same prefix will be reused across ≥2 calls (multi-pass / multi-character),
-   * otherwise the cache-write premium is paid with no read to amortize it.
-   */
-  complete(system: string, user: string, cachePrefix?: string): Promise<string>;
+  /** Single-shot completion. See {@link CompleteOptions} for the caching/temperature/length knobs. */
+  complete(system: string, user: string, opts?: CompleteOptions): Promise<string>;
 }
 
 /** Test double: returns a fixed response and records the last request. */
 export class MockProvider implements Provider {
   lastRequest: InferenceRequest | null = null;
-  lastComplete: { system: string; user: string; cachePrefix?: string } | null = null;
+  lastComplete: { system: string; user: string; opts?: CompleteOptions } | null = null;
   constructor(
     private readonly canned: InferenceResponse,
     private readonly cannedComplete: string = "Mocked completion response"
@@ -57,8 +70,8 @@ export class MockProvider implements Provider {
     this.lastRequest = req;
     return this.canned;
   }
-  async complete(system: string, user: string, cachePrefix?: string): Promise<string> {
-    this.lastComplete = { system, user, cachePrefix };
+  async complete(system: string, user: string, opts?: CompleteOptions): Promise<string> {
+    this.lastComplete = { system, user, opts };
     return this.cannedComplete;
   }
 }

@@ -1,5 +1,7 @@
-import type { Provider, InferenceRequest, InferenceResponse } from "./provider";
+import type { Provider, InferenceRequest, InferenceResponse, CompleteOptions } from "./provider";
+import { DEFAULT_COMPLETION_TEMPERATURE } from "./provider";
 import { buildPrompt } from "./engine";
+import { fetchWithRetry } from "./http";
 
 function stripFences(text: string): string {
   const m = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -43,12 +45,16 @@ export function parseOpenAIResponse(text: string): InferenceResponse {
 
 export class OpenAIProvider implements Provider {
   lastRaw: string | null = null;
-  constructor(private readonly apiKey: string, private readonly model: string) {}
+  constructor(
+    private readonly apiKey: string,
+    private readonly model: string,
+    private readonly defaultTemperature?: number,
+  ) {}
 
   async infer(req: InferenceRequest): Promise<InferenceResponse> {
     const { system, user } = buildPrompt(req);
     const modelName = this.model || "gpt-4o-mini";
-    
+
     // Some older models don't support response_format: { type: "json_object" }
     const useJsonFormat = modelName.includes("gpt-4") || modelName.includes("gpt-3.5-turbo-1106") || modelName.includes("gpt-3.5-turbo-0125");
 
@@ -65,14 +71,14 @@ export class OpenAIProvider implements Provider {
       body.response_format = { type: "json_object" };
     }
 
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "authorization": `Bearer ${this.apiKey}`
       },
       body: JSON.stringify(body)
-    });
+    }, { label: "OpenAI" });
 
     if (!res.ok) {
       const errText = await res.text();
@@ -85,10 +91,11 @@ export class OpenAIProvider implements Provider {
     return parseOpenAIResponse(content);
   }
 
-  async complete(system: string, user: string, cachePrefix?: string): Promise<string> {
+  async complete(system: string, user: string, opts?: CompleteOptions): Promise<string> {
     const modelName = this.model || "gpt-4o-mini";
-    // No Anthropic-style prompt caching here — fold the stable prefix into the user content so none is lost.
-    const fullUser = cachePrefix ? `${cachePrefix}${user}` : user;
+    // OpenAI caches matching prefixes automatically (no config); fold the stable prefix into the user
+    // content, first, so a repeated prefix is byte-identical and eligible for the implicit cache.
+    const fullUser = opts?.cachePrefix ? `${opts.cachePrefix}${user}` : user;
 
     const body: any = {
       model: modelName,
@@ -96,17 +103,18 @@ export class OpenAIProvider implements Provider {
         { role: "system", content: system },
         { role: "user", content: fullUser }
       ],
-      temperature: 0.1
+      temperature: opts?.temperature ?? this.defaultTemperature ?? DEFAULT_COMPLETION_TEMPERATURE,
+      max_tokens: opts?.maxTokens ?? 4096,
     };
 
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "authorization": `Bearer ${this.apiKey}`
       },
       body: JSON.stringify(body)
-    });
+    }, { label: "OpenAI" });
 
     if (!res.ok) {
       const errText = await res.text();

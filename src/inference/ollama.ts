@@ -1,5 +1,10 @@
-import type { Provider, InferenceRequest, InferenceResponse } from "./provider";
+import type { Provider, InferenceRequest, InferenceResponse, CompleteOptions } from "./provider";
+import { DEFAULT_COMPLETION_TEMPERATURE } from "./provider";
 import { buildPrompt } from "./engine";
+import { fetchWithRetry } from "./http";
+
+// Local model load / long generations can exceed the cloud default; give Ollama a generous per-attempt timeout.
+const OLLAMA_TIMEOUT_MS = 120_000;
 
 function cleanEndpoint(endpoint: string): string {
   let host = (endpoint || "http://localhost:11434").trim();
@@ -58,7 +63,11 @@ export function parseOllamaResponse(text: string): InferenceResponse {
 
 export class OllamaProvider implements Provider {
   lastRaw: string | null = null;
-  constructor(private readonly endpoint: string, private readonly model: string) {}
+  constructor(
+    private readonly endpoint: string,
+    private readonly model: string,
+    private readonly defaultTemperature?: number,
+  ) {}
 
   async infer(req: InferenceRequest): Promise<InferenceResponse> {
     const { system, user } = buildPrompt(req);
@@ -81,11 +90,11 @@ export class OllamaProvider implements Provider {
 
     let res: Response;
     try {
-      res = await fetch(`${host}/api/chat`, {
+      res = await fetchWithRetry(`${host}/api/chat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body)
-      });
+      }, { label: "Ollama", timeoutMs: OLLAMA_TIMEOUT_MS });
     } catch (err: any) {
       throw new Error(
         `Failed to reach Ollama at ${host}/api/chat (${err?.message || err}). ` +
@@ -106,11 +115,12 @@ export class OllamaProvider implements Provider {
     return parseOllamaResponse(content);
   }
 
-  async complete(system: string, user: string, cachePrefix?: string): Promise<string> {
+  async complete(system: string, user: string, opts?: CompleteOptions): Promise<string> {
     const host = cleanEndpoint(this.endpoint);
     const modelName = this.model || "llama3";
-    // No Anthropic-style prompt caching here — fold the stable prefix into the user content so none is lost.
-    const fullUser = cachePrefix ? `${cachePrefix}${user}` : user;
+    // No provider-side prompt caching API here — fold the stable prefix into the user content, first,
+    // so Ollama's own KV cache can reuse it across a batch. None is lost.
+    const fullUser = opts?.cachePrefix ? `${opts.cachePrefix}${user}` : user;
 
     const body = {
       model: modelName,
@@ -120,18 +130,18 @@ export class OllamaProvider implements Provider {
       ],
       stream: false,
       options: {
-        temperature: 0.1,
-        num_predict: 2048
+        temperature: opts?.temperature ?? this.defaultTemperature ?? DEFAULT_COMPLETION_TEMPERATURE,
+        num_predict: opts?.maxTokens ?? 2048
       }
     };
 
     let res: Response;
     try {
-      res = await fetch(`${host}/api/chat`, {
+      res = await fetchWithRetry(`${host}/api/chat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body)
-      });
+      }, { label: "Ollama", timeoutMs: OLLAMA_TIMEOUT_MS });
     } catch (err: any) {
       throw new Error(
         `Failed to reach Ollama at ${host}/api/chat (${err?.message || err}). ` +

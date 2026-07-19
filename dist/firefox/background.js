@@ -21109,6 +21109,46 @@ Output only the SCHEMA section.`,
     }
     return buffer;
   }
+  function clearPovBleedLayers(state) {
+    const vivid = (state.nodes || []).map((n3) => n3.snapshot).filter(Boolean);
+    const outlook = (state.outlook || []).map((b) => b.text).filter(Boolean);
+    const preferences = (state.preferences || []).map((p5) => p5.text).filter(Boolean);
+    const changed = vivid.length > 0 || outlook.length > 0 || preferences.length > 0;
+    if (!changed) return { state, changed: false, removed: { vivid: [], outlook: [], preferences: [] } };
+    return {
+      state: { ...state, nodes: [], outlook: [], preferences: [] },
+      changed: true,
+      removed: { vivid, outlook, preferences }
+    };
+  }
+  var CRYSTALLIZED_SECTION_HEADERS = {
+    knows: "===KNOWS===",
+    vivid: "===VIVID===",
+    outlook: "===OUTLOOK===",
+    preferences: "===PREFERENCES==="
+  };
+  function buildUnifiedDistillationCommand(opts2) {
+    const H = CRYSTALLIZED_SECTION_HEADERS;
+    const preamble = `You are {{title}}, a character in an interactive, second-person story, distilling your OWN long-term memory after recent events.
+PERSPECTIVE (critical): in the narration that follows, "you"/"your" ALWAYS refers to the player character {protagonist} \u2014 NEVER to you. {protagonist} is a SEPARATE person from you. Never adopt {protagonist}'s actions, experiences, memories, feelings, or opinions as your own; record only what {{title}} personally did, witnessed, or feels.
+Read the recent events/thoughts and your current memory state, then output ONLY the requested sections below. Emit each section beginning with its exact ===HEADER=== line on its own line, in the order shown, and write nothing outside these sections.`;
+    const KNOWS = `${H.knows}
+You are {{title}}. Update YOUR knowledge of the OTHER people, places, things, topics, foods, media, activities and objects you have formed a genuine opinion, preference or attachment to (the player character {protagonist} is simply one more person you may know). This card is your OWN memory, so NEVER add a line about yourself, and NEVER record {protagonist}'s experiences as your own. For each subject write ONE concise first-person line combining the key facts AND how you currently feel about them, EXACT form "- [Subject] one concise factual+emotional sentence"; when the story develops a subject, rewrite that subject's single line in place \u2014 never a second line for the same subject. Begin this section with the line "### I. SCHEMA".`;
+    const VIVID = `${H.vivid}
+You are {{title}}. Give your COMPLETE updated list of Vivid Memories \u2014 ONLY moments YOU personally witnessed or took part in. Scenes experienced by {protagonist} or by others while you were absent are NOT your memories and must never be listed. ONE concise first-person line per distinct scene \u2014 the emotional heart of the moment, feeling over fact, each under 140 characters, prefixed "- Snapshot: ". Merge lines describing the same scene; refine a remembered scene rather than duplicating it; drop what has faded; add a line for each genuinely new scene. Maximum 7 lines.`;
+    const OUTLOOK = `${H.outlook}
+You are {{title}}. Give your COMPLETE updated list of YOUR beliefs: first-person, GENERALIZED views of yourself or the world \u2014 NEVER about a specific named person, and never {protagonist}'s convictions restated as yours. Re-state (refined) every belief that still holds, drop what no longer holds, add at most 2 new ones only if events genuinely shifted something. Maximum 5. Begin this section with a line reading exactly "Beliefs:" then each belief on its own line prefixed "- ".`;
+    const PREFS = `${H.preferences}
+You are {{title}}. Give your COMPLETE updated list of YOUR OWN concrete personal preferences and quirks \u2014 never {protagonist}'s: tastes, habits, pet peeves, little rituals, small opinions about particular things. Each line first-person and CONCRETE. Re-state (refined) every preference that still fits, drop those that no longer do, add at most 2 new ones only if events revealed them. FORBIDDEN: emotional themes, life-philosophy, feelings about a specific named person, relationships/trauma/growth. Maximum 6. Begin this section with a line reading exactly "Preferences:" then each preference on its own line prefixed "- ".`;
+    const parts = [];
+    if (opts2.schemaEnabled) parts.push(KNOWS);
+    if (opts2.nodesEnabled) parts.push(VIVID);
+    if (opts2.outlookEnabled) parts.push(OUTLOOK + (opts2.driftJudgeInstruction || ""));
+    if (opts2.preferencesEnabled) parts.push(PREFS);
+    return `${preamble}
+
+${parts.join("\n\n")}`;
+  }
   function findCrystallizedCard(cards, name) {
     const targetTitle = `${name} - Crystallized`.toLowerCase();
     return cards.find(
@@ -21616,6 +21656,32 @@ Notable Items: specific permanent contents. You must preserve the literal names 
       }
       return healed;
     }
+    /** DB heal v2 — one-time remediation of state written by the POV-unanchored distillation prompt.
+     *  Clears every stored state's Vivid / Outlook / Preferences (Knows is kept — it self-heals in
+     *  place; see clearPovBleedLayers) and ARCHIVES what it removed with reason "perspective-heal", so
+     *  the data is recoverable rather than destroyed. NOT idempotent-safe to re-run casually: a second
+     *  run would clear legitimately rebuilt layers, so it must stay gated behind the version stamp.
+     *  Returns the number of states cleared. */
+    async healPovBleedCrystallizedState() {
+      const db = await openAidDb();
+      const rows = await db.getAll("crystallizedState");
+      const archive = [];
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      let cleared = 0;
+      for (const row of rows) {
+        if (!row?.state) continue;
+        const { state, changed, removed } = clearPovBleedLayers(row.state);
+        if (!changed) continue;
+        const base = { shortId: row.shortId, characterKey: row.characterKey, turn: 0, archivedAt: now, reason: "perspective-heal" };
+        for (const text of removed.vivid) archive.push({ id: crypto.randomUUID(), kind: "vivid", text, ...base });
+        for (const text of removed.outlook) archive.push({ id: crypto.randomUUID(), kind: "outlook", text, ...base });
+        for (const text of removed.preferences) archive.push({ id: crypto.randomUUID(), kind: "preferences", text, ...base });
+        await db.put("crystallizedState", { ...row, state });
+        cleared++;
+      }
+      if (archive.length) await this.appendCrystallizedArchive(archive);
+      return cleared;
+    }
     async appendCrystallizedArchive(entries) {
       if (!entries.length) return;
       const db = await openAidDb();
@@ -21882,13 +21948,73 @@ ${c2.value.slice(0, 600)}
   // src/background/background.ts
   init_engine();
 
+  // src/inference/provider.ts
+  var DEFAULT_COMPLETION_TEMPERATURE = 0.7;
+
   // src/inference/claude.ts
   init_engine();
-  function buildClaudeRequest(apiKey, model5, system, user, cachePrefix) {
+
+  // src/inference/http.ts
+  var DEFAULT_RETRYABLE = (s3) => s3 === 408 || s3 === 409 || s3 === 425 || s3 === 429 || s3 >= 500 && s3 < 600;
+  var sleep = (ms) => new Promise((r2) => setTimeout(r2, ms));
+  function parseRetryAfter(header) {
+    if (!header) return null;
+    const secs = Number(header);
+    if (Number.isFinite(secs)) return Math.max(0, secs);
+    const when = Date.parse(header);
+    if (!Number.isNaN(when)) return Math.max(0, (when - Date.now()) / 1e3);
+    return null;
+  }
+  function backoffMs(attempt, retryAfterSec) {
+    if (retryAfterSec != null) return Math.min(retryAfterSec * 1e3, 3e4);
+    return Math.min(500 * 2 ** attempt, 8e3);
+  }
+  async function fetchWithRetry(url, init, options) {
+    const {
+      timeoutMs = 6e4,
+      maxAttempts = 3,
+      isRetryable = DEFAULT_RETRYABLE,
+      label: label2 = "provider"
+    } = options || {};
+    let lastErr = "";
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { ...init, signal: controller.signal });
+        clearTimeout(timer);
+        if (res.ok) return res;
+        if (isRetryable(res.status) && attempt < maxAttempts - 1) {
+          await sleep(backoffMs(attempt, parseRetryAfter(res.headers?.get?.("retry-after"))));
+          continue;
+        }
+        return res;
+      } catch (err) {
+        clearTimeout(timer);
+        lastErr = err?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : err?.message || String(err);
+        if (attempt < maxAttempts - 1) {
+          await sleep(backoffMs(attempt, null));
+          continue;
+        }
+        throw new Error(`${label2} request failed: ${lastErr}`);
+      }
+    }
+    throw new Error(`${label2} request failed: ${lastErr}`);
+  }
+
+  // src/inference/claude.ts
+  function buildClaudeRequest(apiKey, model5, system, user, cachePrefix, extras) {
     const messageContent = cachePrefix ? [
       { type: "text", text: cachePrefix, cache_control: { type: "ephemeral" } },
       { type: "text", text: user }
     ] : user;
+    const body = {
+      model: model5,
+      max_tokens: extras?.maxTokens ?? 8192,
+      system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
+      messages: [{ role: "user", content: messageContent }]
+    };
+    if (extras?.temperature != null) body.temperature = Math.max(0, Math.min(1, extras.temperature));
     return {
       url: "https://api.anthropic.com/v1/messages",
       headers: {
@@ -21897,12 +22023,7 @@ ${c2.value.slice(0, 600)}
         "anthropic-version": "2023-06-01",
         "anthropic-dangerous-direct-browser-access": "true"
       },
-      body: JSON.stringify({
-        model: model5,
-        max_tokens: 8192,
-        system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
-        messages: [{ role: "user", content: messageContent }]
-      })
+      body: JSON.stringify(body)
     };
   }
   function stripFences(text) {
@@ -21971,22 +22092,27 @@ ${c2.value.slice(0, 600)}
     return parseModelsResponse(await res.json());
   }
   var ClaudeProvider = class {
-    constructor(apiKey, model5) {
+    constructor(apiKey, model5, defaultTemperature) {
       this.apiKey = apiKey;
       this.model = model5;
+      this.defaultTemperature = defaultTemperature;
     }
     lastRaw = null;
     async infer(req) {
       const { system, user } = buildPrompt(req);
       const r2 = buildClaudeRequest(this.apiKey, this.model, system, user);
-      const res = await fetch(r2.url, { method: "POST", headers: r2.headers, body: r2.body });
+      const res = await fetchWithRetry(r2.url, { method: "POST", headers: r2.headers, body: r2.body }, { label: "Claude" });
       const json = await res.json();
       this.lastRaw = JSON.stringify(json).slice(0, 4e3);
       return parseClaudeResponse(json);
     }
-    async complete(system, user, cachePrefix) {
-      const r2 = buildClaudeRequest(this.apiKey, this.model, system, user, cachePrefix);
-      const res = await fetch(r2.url, { method: "POST", headers: r2.headers, body: r2.body });
+    async complete(system, user, opts2) {
+      const temperature = opts2?.temperature ?? this.defaultTemperature ?? DEFAULT_COMPLETION_TEMPERATURE;
+      const r2 = buildClaudeRequest(this.apiKey, this.model, system, user, opts2?.cachePrefix, {
+        temperature,
+        maxTokens: opts2?.maxTokens
+      });
+      const res = await fetchWithRetry(r2.url, { method: "POST", headers: r2.headers, body: r2.body }, { label: "Claude" });
       if (!res.ok) {
         const errText = await res.text();
         throw new Error(`Claude API error: HTTP ${res.status} - ${errText}`);
@@ -22042,9 +22168,10 @@ ${c2.value.slice(0, 600)}
     return { proposals: [] };
   }
   var OpenAIProvider = class {
-    constructor(apiKey, model5) {
+    constructor(apiKey, model5, defaultTemperature) {
       this.apiKey = apiKey;
       this.model = model5;
+      this.defaultTemperature = defaultTemperature;
     }
     lastRaw = null;
     async infer(req) {
@@ -22062,14 +22189,14 @@ ${c2.value.slice(0, 600)}
       if (useJsonFormat) {
         body.response_format = { type: "json_object" };
       }
-      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "authorization": `Bearer ${this.apiKey}`
         },
         body: JSON.stringify(body)
-      });
+      }, { label: "OpenAI" });
       if (!res.ok) {
         const errText = await res.text();
         throw new Error(`OpenAI API error: HTTP ${res.status} - ${errText}`);
@@ -22079,25 +22206,26 @@ ${c2.value.slice(0, 600)}
       const content = json.choices?.[0]?.message?.content || "";
       return parseOpenAIResponse(content);
     }
-    async complete(system, user, cachePrefix) {
+    async complete(system, user, opts2) {
       const modelName = this.model || "gpt-4o-mini";
-      const fullUser = cachePrefix ? `${cachePrefix}${user}` : user;
+      const fullUser = opts2?.cachePrefix ? `${opts2.cachePrefix}${user}` : user;
       const body = {
         model: modelName,
         messages: [
           { role: "system", content: system },
           { role: "user", content: fullUser }
         ],
-        temperature: 0.1
+        temperature: opts2?.temperature ?? this.defaultTemperature ?? DEFAULT_COMPLETION_TEMPERATURE,
+        max_tokens: opts2?.maxTokens ?? 4096
       };
-      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "authorization": `Bearer ${this.apiKey}`
         },
         body: JSON.stringify(body)
-      });
+      }, { label: "OpenAI" });
       if (!res.ok) {
         const errText = await res.text();
         throw new Error(`OpenAI API error: HTTP ${res.status} - ${errText}`);
@@ -22161,24 +22289,21 @@ ${c2.value.slice(0, 600)}
 
 ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText }] }], systemInstruction: { role: "system", parts: [{ text: system }] }, generationConfig };
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-    let lastErr = "";
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-      if (res.ok) return res.json();
-      lastErr = await res.text();
-      const retryable = res.status === 500 || res.status === 502 || res.status === 503 || res.status === 429;
-      if (retryable && attempt < 2) {
-        await new Promise((r2) => setTimeout(r2, 600 * (attempt + 1)));
-        continue;
-      }
-      throw new Error(`Gemini API error: HTTP ${res.status} - ${lastErr}`);
+    const res = await fetchWithRetry(
+      url,
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+      { label: "Gemini" }
+    );
+    if (!res.ok) {
+      throw new Error(`Gemini API error: HTTP ${res.status} - ${await res.text()}`);
     }
-    throw new Error(`Gemini API error: ${lastErr}`);
+    return res.json();
   }
   var GeminiProvider = class {
-    constructor(apiKey, model5) {
+    constructor(apiKey, model5, defaultTemperature) {
       this.apiKey = apiKey;
       this.model = model5;
+      this.defaultTemperature = defaultTemperature;
     }
     lastRaw = null;
     async infer(req) {
@@ -22193,10 +22318,13 @@ ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText
       const content = parts.filter((p5) => !p5.thought).map((p5) => p5.text || "").join("");
       return parseGeminiResponse(content);
     }
-    async complete(system, user, cachePrefix) {
+    async complete(system, user, opts2) {
       const modelName = this.model || "gemini-1.5-pro";
-      const fullUser = cachePrefix ? `${cachePrefix}${user}` : user;
-      const json = await geminiGenerate(this.apiKey, modelName, system, fullUser, { temperature: 0.1 });
+      const fullUser = opts2?.cachePrefix ? `${opts2.cachePrefix}${user}` : user;
+      const json = await geminiGenerate(this.apiKey, modelName, system, fullUser, {
+        temperature: opts2?.temperature ?? this.defaultTemperature ?? DEFAULT_COMPLETION_TEMPERATURE,
+        maxOutputTokens: opts2?.maxTokens ?? 4096
+      });
       this.lastRaw = JSON.stringify(json).slice(0, 4e3);
       const parts = json.candidates?.[0]?.content?.parts || [];
       return parts.filter((p5) => !p5.thought).map((p5) => p5.text || "").join("");
@@ -22216,6 +22344,7 @@ ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText
 
   // src/inference/ollama.ts
   init_engine();
+  var OLLAMA_TIMEOUT_MS = 12e4;
   function cleanEndpoint(endpoint) {
     let host = (endpoint || "http://localhost:11434").trim();
     if (!/^https?:\/\//i.test(host)) {
@@ -22264,9 +22393,10 @@ ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText
     return { proposals: [] };
   }
   var OllamaProvider = class {
-    constructor(endpoint, model5) {
+    constructor(endpoint, model5, defaultTemperature) {
       this.endpoint = endpoint;
       this.model = model5;
+      this.defaultTemperature = defaultTemperature;
     }
     lastRaw = null;
     async infer(req) {
@@ -22288,11 +22418,11 @@ ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText
       };
       let res;
       try {
-        res = await fetch(`${host}/api/chat`, {
+        res = await fetchWithRetry(`${host}/api/chat`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body)
-        });
+        }, { label: "Ollama", timeoutMs: OLLAMA_TIMEOUT_MS });
       } catch (err) {
         throw new Error(
           `Failed to reach Ollama at ${host}/api/chat (${err?.message || err}). Verify that: 1. Ollama is running (visit http://127.0.0.1:11434 in a browser tab). 2. You reloaded the extension in chrome://extensions or about:debugging. 3. (Firefox only) Localhost permissions are explicitly granted in Firefox Add-ons permissions.`
@@ -22307,10 +22437,10 @@ ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText
       const content = json.message?.content || "";
       return parseOllamaResponse(content);
     }
-    async complete(system, user, cachePrefix) {
+    async complete(system, user, opts2) {
       const host = cleanEndpoint(this.endpoint);
       const modelName = this.model || "llama3";
-      const fullUser = cachePrefix ? `${cachePrefix}${user}` : user;
+      const fullUser = opts2?.cachePrefix ? `${opts2.cachePrefix}${user}` : user;
       const body = {
         model: modelName,
         messages: [
@@ -22319,17 +22449,17 @@ ${userText}` }] }], generationConfig } : { contents: [{ parts: [{ text: userText
         ],
         stream: false,
         options: {
-          temperature: 0.1,
-          num_predict: 2048
+          temperature: opts2?.temperature ?? this.defaultTemperature ?? DEFAULT_COMPLETION_TEMPERATURE,
+          num_predict: opts2?.maxTokens ?? 2048
         }
       };
       let res;
       try {
-        res = await fetch(`${host}/api/chat`, {
+        res = await fetchWithRetry(`${host}/api/chat`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body)
-        });
+        }, { label: "Ollama", timeoutMs: OLLAMA_TIMEOUT_MS });
       } catch (err) {
         throw new Error(
           `Failed to reach Ollama at ${host}/api/chat (${err?.message || err}). Verify that: 1. Ollama is running (visit http://127.0.0.1:11434 in a browser tab). 2. You reloaded the extension in chrome://extensions or about:debugging. 3. (Firefox only) Localhost permissions are explicitly granted in Firefox Add-ons permissions.`
@@ -23396,6 +23526,28 @@ ${desc.trim()}
 
   // src/inference/native.ts
   var repo2 = new Repo();
+  function assembleGenerationPrompt(opts2) {
+    const summaryText = (opts2.summaryText || "").trim();
+    const ctx = (opts2.storyInformation || "").trim();
+    const stable = (opts2.cachePrefix || "").trim();
+    const instr = `Instructions:
+${opts2.instructions}`;
+    if (stable) {
+      const cachePrefix = `${[summaryText, stable].filter(Boolean).join("\n\n")}
+
+`;
+      const tailParts = [];
+      if (ctx) tailParts.push(`Narrative Context:
+${ctx}`);
+      tailParts.push(instr);
+      return { user: tailParts.join("\n\n"), cachePrefix };
+    }
+    const parts = [summaryText, ctx ? `Narrative Context:
+${ctx}` : ""].filter(Boolean);
+    return { user: parts.length ? `${parts.join("\n\n")}
+
+${instr}` : instr };
+  }
   async function activeProvider() {
     const settings = await repo2.getSettings();
     const providerName = settings?.provider || "claude";
@@ -23404,10 +23556,11 @@ ${desc.trim()}
       return { error: `Set your API key/endpoint for ${providerName} in settings.` };
     }
     const model5 = settings.model || "";
-    if (providerName === "openai") return new OpenAIProvider(apiKey || "", model5 || "gpt-4o-mini");
-    if (providerName === "gemini") return new GeminiProvider(apiKey || "", model5 || "gemini-1.5-pro");
-    if (providerName === "ollama") return new OllamaProvider(apiKey || "http://localhost:11434", model5 || "llama3");
-    return new ClaudeProvider(apiKey || "", model5 || "claude-3-5-sonnet-latest");
+    const temp = settings.completionTemperature;
+    if (providerName === "openai") return new OpenAIProvider(apiKey || "", model5 || "gpt-4o-mini", temp);
+    if (providerName === "gemini") return new GeminiProvider(apiKey || "", model5 || "gemini-1.5-pro", temp);
+    if (providerName === "ollama") return new OllamaProvider(apiKey || "http://localhost:11434", model5 || "llama3", temp);
+    return new ClaudeProvider(apiKey || "", model5 || "claude-3-5-sonnet-latest", temp);
   }
   function resolveTitleToken(template, title) {
     return template.replace(/\{\{\s*title\s*\}\}/g, title);
@@ -23424,26 +23577,24 @@ ${desc.trim()}
     const title = card.title || card.keys || "this entry";
     const resolvedCommand = resolveTitleToken(command, title);
     const system = `You are a creative writing assistant generating a Story Card entry for "${title}". Follow the format and instructions exactly, and output only the entry content.`;
-    const parts = [];
+    let summaryText = "";
     if (opts2?.includeStorySummary !== false && card.shortId) {
       try {
         const adv = await repo2.getAdventure(card.shortId);
         const summary = (adv?.memory || "").trim();
-        if (summary) parts.push(`Story summary:
-${summary}`);
+        if (summary) summaryText = `Story summary:
+${summary}`;
       } catch {
       }
     }
-    const ctx = (opts2?.storyInformation || "").trim();
-    if (ctx) parts.push(`Narrative Context:
-${ctx}`);
-    const user = parts.length ? `${parts.join("\n\n")}
-
-Instructions:
-${resolvedCommand}` : `Instructions:
-${resolvedCommand}`;
+    const { user, cachePrefix } = assembleGenerationPrompt({
+      summaryText,
+      storyInformation: opts2?.storyInformation,
+      cachePrefix: opts2?.cachePrefix,
+      instructions: resolvedCommand
+    });
     try {
-      const raw = await prov.complete(system, user);
+      const raw = await prov.complete(system, user, { cachePrefix, temperature: opts2?.temperature });
       return { ok: true, value: cleanCompletion(raw) };
     } catch (err) {
       return { ok: false, value: "", message: err?.message || String(err) };
@@ -23977,13 +24128,16 @@ Thoughts: ${item.thoughtText}` : "";
     const dyingNodesList = state.nodes.filter((n3) => dyingNodeIds.includes(n3.id));
     const dyingNodesText = dyingNodesList.map((n3) => `- Snapshot: ${n3.snapshot}`).join("\n");
     const combinedContext = [
-      "Recent story events and character thoughts:",
+      // Label the narration's ownership explicitly: the Action lines are second-person AID story text
+      // whose "You" is the PLAYER, while the Thoughts lines belong to this card's owner. Without this
+      // the distiller reads "You woke in a ruined shrine" as the owner's own memory.
+      `Recent story events (second-person narration \u2014 "You" is the player character ${protagonist}, NOT ${name}) and ${name}'s own thoughts:`,
       bufferText,
       "",
       dyingNodesText ? "Fading memories (absorb their core lessons/facts into the Schema):\n" + dyingNodesText : ""
     ].filter(Boolean).join("\n").slice(0, 3e3);
     const formattingMode = settings?.formattingMode || DEFAULT_FORMATTING_MODE;
-    const generationTargetCard = { ...crystallizedCard, value: "" };
+    const generationTargetCard = { ...crystallizedCard, title: name, value: "" };
     const cleanLlmOutputBrackets = (text) => {
       let cleaned = text.trim();
       if (cleaned.startsWith("[")) cleaned = cleaned.slice(1);
@@ -24000,27 +24154,20 @@ Thoughts: ${item.thoughtText}` : "";
     const currentVividText = decayedState.nodes.filter((n3) => n3.vibrancy > 0).map((n3) => `- Snapshot: ${n3.snapshot}`).join("\n");
     const currentOutlookText = (decayedState.outlook || []).map((b) => `- ${b.text}`).join("\n");
     const currentPreferencesText = (decayedState.preferences || []).map((b) => `- ${b.text}`).join("\n");
-    const H_KNOWS = "===KNOWS===", H_VIVID = "===VIVID===", H_OUTLOOK = "===OUTLOOK===", H_PREFS = "===PREFERENCES===";
+    const H_KNOWS = CRYSTALLIZED_SECTION_HEADERS.knows, H_VIVID = CRYSTALLIZED_SECTION_HEADERS.vivid;
+    const H_OUTLOOK = CRYSTALLIZED_SECTION_HEADERS.outlook, H_PREFS = CRYSTALLIZED_SECTION_HEADERS.preferences;
     const allHeaders = [H_KNOWS, H_VIVID, H_OUTLOOK, H_PREFS];
-    const KNOWS_DIRECTIVE = `${H_KNOWS}
-Update your knowledge of the OTHER people, places, things, topics, foods, media, activities and objects you have formed a genuine opinion, preference or attachment to (the player character {protagonist} is simply one more person). This card is your OWN memory, so NEVER add a line about yourself. For each subject write ONE concise first-person line combining the key facts AND how you currently feel about them, EXACT form "- [Subject] one concise factual+emotional sentence"; when the story develops a subject, rewrite that subject's single line in place \u2014 never a second line for the same subject. Begin this section with the line "### I. SCHEMA".`;
-    const VIVID_DIRECTIVE = `${H_VIVID}
-Give your COMPLETE updated list of Vivid Memories: ONE concise first-person line per distinct scene \u2014 the emotional heart of the moment, feeling over fact, each under 140 characters, prefixed "- Snapshot: ". Merge lines describing the same scene; refine a remembered scene rather than duplicating it; drop what has faded; add a line for each genuinely new scene. Maximum 7 lines.`;
-    const OUTLOOK_DIRECTIVE = `${H_OUTLOOK}
-Give your COMPLETE updated list of beliefs: first-person, GENERALIZED views of yourself or the world \u2014 NEVER about a specific named person. Re-state (refined) every belief that still holds, drop what no longer holds, add at most 2 new ones only if events genuinely shifted something. Maximum 5. Begin this section with a line reading exactly "Beliefs:" then each belief on its own line prefixed "- ".`;
-    const PREFS_DIRECTIVE = `${H_PREFS}
-Give your COMPLETE updated list of concrete personal preferences and quirks \u2014 the ordinary TEXTURE of a person: tastes, habits, pet peeves, little rituals, small opinions about particular things. Each line first-person and CONCRETE. Re-state (refined) every preference that still fits, drop those that no longer do, add at most 2 new ones only if events revealed them. FORBIDDEN: emotional themes, life-philosophy, feelings about a specific named person, relationships/trauma/growth. Maximum 6. Begin this section with a line reading exactly "Preferences:" then each preference on its own line prefixed "- ".`;
-    const directiveParts = [];
-    if (schemaEnabled) directiveParts.push(KNOWS_DIRECTIVE);
-    if (nodesEnabled) directiveParts.push(VIVID_DIRECTIVE);
-    if (outlookEnabled) directiveParts.push(OUTLOOK_DIRECTIVE + (driftJudgeEnabled ? DRIFT_JUDGE_INSTRUCTION : ""));
-    if (preferencesEnabled) directiveParts.push(PREFS_DIRECTIVE);
+    const anySectionEnabled = schemaEnabled || nodesEnabled || outlookEnabled || preferencesEnabled;
     let schemaOutput = "", nodesOutput = "", outlookRaw = "", prefsRaw = "";
-    if (directiveParts.length > 0) {
+    if (anySectionEnabled) {
       const unifiedCommand = resolveCommand(
-        `You are {{title}}, distilling your own long-term memory after the recent story (the player character is {protagonist}). Read the recent events/thoughts and your current memory state, then output ONLY the requested sections below. Emit each section beginning with its exact ===HEADER=== line on its own line, in the order shown, and write nothing outside these sections.
-
-` + directiveParts.join("\n\n"),
+        buildUnifiedDistillationCommand({
+          schemaEnabled,
+          nodesEnabled,
+          outlookEnabled,
+          preferencesEnabled,
+          driftJudgeInstruction: driftJudgeEnabled ? DRIFT_JUDGE_INSTRUCTION : void 0
+        }),
         protagonist
       );
       const contextParts = [combinedContext];
@@ -24031,7 +24178,8 @@ ${currentOutlookText || "(none yet)"}`);
       if (preferencesEnabled) contextParts.push(`Your current Preferences:
 ${currentPreferencesText || "(none yet)"}`);
       const unifiedContext = contextParts.join("\n\n").slice(0, 6e3);
-      dlog(`[Crystallized] Dispatching unified distillation (${directiveParts.length} section(s)) for ${name}...`);
+      const sectionCount = [schemaEnabled, nodesEnabled, outlookEnabled, preferencesEnabled].filter(Boolean).length;
+      dlog(`[Crystallized] Dispatching unified distillation (${sectionCount} section(s)) for ${name}...`);
       const rUnified = await generateCard(generationTargetCard, unifiedCommand, formattingMode, { storyInformation: unifiedContext });
       if (!rUnified.ok) {
         throw new Error(rUnified.message || "unknown error on unified distillation call");
@@ -25152,6 +25300,29 @@ Knows:
     };
   }
 
+  // src/shared/concurrency.ts
+  async function runBatch(items, limit, fn, warmFirst = false) {
+    const results = new Array(items.length);
+    if (items.length === 0) return results;
+    let start2 = 0;
+    if (warmFirst && limit > 1 && items.length > 1) {
+      results[0] = await fn(items[0], 0);
+      start2 = 1;
+    }
+    let next = start2;
+    const workers = Math.max(1, Math.min(limit, items.length - start2));
+    await Promise.all(
+      Array.from({ length: workers }, async () => {
+        for (; ; ) {
+          const i3 = next++;
+          if (i3 >= items.length) return;
+          results[i3] = await fn(items[i3], i3);
+        }
+      })
+    );
+    return results;
+  }
+
   // src/background/bg-memoraid.ts
   init_card_command();
   var lastProcessedSceneText = /* @__PURE__ */ new Map();
@@ -25377,23 +25548,32 @@ ${durableCore}
 
 ${thoughtContext}` : thoughtContext;
       const lifeContext = settings?.enableLivingCharacters !== false ? buildLifeCardContext(cards, c2.title || "", settings) : "";
-      const combinedContext = [sceneBlock, lifeContext, anchoredContext].filter(Boolean).join("\n\n").trim().slice(0, 4e3);
+      const perCharContext = [lifeContext, anchoredContext].filter(Boolean).join("\n\n").trim().slice(0, 4e3);
       const template = settings?.cardCommands?.memoraid || DEFAULT_CARD_COMMANDS.memoraid || "";
       const protagonist = adv?.protagonistName && adv.protagonistName.trim() || parseProtagonistName(adv?.memory) || "the player character";
       const resolvedCommand = resolveCommand(template, protagonist) + `
 
 CRITICAL: The generated thoughts must be strictly under ${thoughtCardLimit} characters in length.`;
       const formattingMode = settings?.formattingMode || DEFAULT_FORMATTING_MODE;
-      const opts2 = {
-        storyInformation: combinedContext
-      };
       const generationTargetCard = { ...targetMemCard, value: "" };
-      generationsToRun.push({ character: c2, targetMemCard, prevNotes, genCard: generationTargetCard, command: resolvedCommand, formattingMode, opts: opts2 });
+      generationsToRun.push({ character: c2, targetMemCard, prevNotes, genCard: generationTargetCard, command: resolvedCommand, formattingMode, sceneBlock, perCharContext });
     }
     if (generationsToRun.length > 0) {
-      dlog(`[MemorAID] Generating ${generationsToRun.length} memories via the configured provider...`);
+      const useSharedPrefix = generationsToRun.length >= 2;
       for (const item of generationsToRun) {
-        const parsed = await generateCard(item.genCard, item.command, item.formattingMode, item.opts);
+        item.opts = useSharedPrefix ? { storyInformation: item.perCharContext, cachePrefix: item.sceneBlock } : { storyInformation: [item.sceneBlock, item.perCharContext].filter(Boolean).join("\n\n").trim().slice(0, 4e3) };
+      }
+      const concurrency = settings?.provider === "ollama" ? 1 : 4;
+      dlog(`[MemorAID] Generating ${generationsToRun.length} memories via the configured provider (concurrency=${concurrency}, sharedPrefix=${useSharedPrefix})...`);
+      const genResults = await runBatch(
+        generationsToRun,
+        concurrency,
+        (item) => generateCard(item.genCard, item.command, item.formattingMode, item.opts),
+        useSharedPrefix
+      );
+      for (let idx = 0; idx < generationsToRun.length; idx++) {
+        const item = generationsToRun[idx];
+        const parsed = genResults[idx];
         if (!parsed.ok) {
           console.error(`[MemorAID] Provider generation failed for ${item.character.title}:`, parsed.message || "unknown error");
           continue;
@@ -27310,14 +27490,15 @@ ${contextRaw}
     req = { ...req, characters: req.characters.map((c2) => ({ ...c2, currentEntry: latestApplied.get(c2.name) ?? c2.currentEntry })) };
     let provider;
     const model5 = settings.model || "";
+    const temp = settings.completionTemperature;
     if (providerName === "openai") {
-      provider = new OpenAIProvider(apiKey || "", model5 || "gpt-4o-mini");
+      provider = new OpenAIProvider(apiKey || "", model5 || "gpt-4o-mini", temp);
     } else if (providerName === "gemini") {
-      provider = new GeminiProvider(apiKey || "", model5 || "gemini-1.5-pro");
+      provider = new GeminiProvider(apiKey || "", model5 || "gemini-1.5-pro", temp);
     } else if (providerName === "ollama") {
-      provider = new OllamaProvider(apiKey || "http://localhost:11434", model5 || "llama3");
+      provider = new OllamaProvider(apiKey || "http://localhost:11434", model5 || "llama3", temp);
     } else {
-      provider = new ClaudeProvider(apiKey || "", model5 || "claude-3-5-sonnet-latest");
+      provider = new ClaudeProvider(apiKey || "", model5 || "claude-3-5-sonnet-latest", temp);
     }
     const totalActionsCount = countActions(allActions);
     const { proposals, warnings } = await analyze(provider, req);
@@ -27471,14 +27652,15 @@ ${contextRaw}
       return { error: `Set your API key/endpoint for ${providerName} in settings.` };
     }
     const model5 = settings.model || "";
+    const temp = settings.completionTemperature;
     if (providerName === "openai") {
-      return new OpenAIProvider(apiKey || "", model5 || "gpt-4o-mini");
+      return new OpenAIProvider(apiKey || "", model5 || "gpt-4o-mini", temp);
     } else if (providerName === "gemini") {
-      return new GeminiProvider(apiKey || "", model5 || "gemini-1.5-pro");
+      return new GeminiProvider(apiKey || "", model5 || "gemini-1.5-pro", temp);
     } else if (providerName === "ollama") {
-      return new OllamaProvider(apiKey || "http://localhost:11434", model5 || "llama3");
+      return new OllamaProvider(apiKey || "http://localhost:11434", model5 || "llama3", temp);
     } else {
-      return new ClaudeProvider(apiKey || "", model5 || "claude-3-5-sonnet-latest");
+      return new ClaudeProvider(apiKey || "", model5 || "claude-3-5-sonnet-latest", temp);
     }
   }
   function resolveTitleToken2(template, title) {
@@ -28233,17 +28415,24 @@ Characters for POV sections: ${names.join(", ")}`;
     }
     return regenerateMemoryBlock(shortId, memories.length - 1);
   }
-  var DB_HEAL_VERSION = 1;
+  var DB_HEAL_VERSION = 2;
   var dbHealChecked = false;
   async function ensureDbHealed() {
     if (dbHealChecked) return;
     dbHealChecked = true;
     try {
       const settings = await repo3.getSettings();
-      if ((settings?.dbHealVersion ?? 0) >= DB_HEAL_VERSION) return;
-      const healed = await repo3.healAllCrystallizedState();
+      const from = settings?.dbHealVersion ?? 0;
+      if (from >= DB_HEAL_VERSION) return;
+      if (from < 1) {
+        const healed = await repo3.healAllCrystallizedState();
+        dlog2(`[AID bg] DB heal v1: sanitized ${healed} Crystallized state(s).`);
+      }
+      if (from < 2) {
+        const cleared = await repo3.healPovBleedCrystallizedState();
+        dlog2(`[AID bg] DB heal v2: cleared POV-bled Vivid/Outlook/Preferences on ${cleared} Crystallized state(s) (archived, Knows kept).`);
+      }
       await repo3.setSettings({ ...settings || {}, dbHealVersion: DB_HEAL_VERSION });
-      dlog2(`[AID bg] DB heal v${DB_HEAL_VERSION}: sanitized ${healed} Crystallized state(s).`);
     } catch (err) {
       dbHealChecked = false;
       console.error("[AID bg] DB heal failed:", err);
@@ -29790,6 +29979,7 @@ ${toAppend}` : toAppend;
               useMemories: settings.useMemories,
               memoraidLookback: settings.memoraidLookback,
               memoraidThoughtLookback: settings.memoraidThoughtLookback ?? 1,
+              completionTemperature: settings.completionTemperature ?? 0.7,
               memoraidPresenceLookback: settings.memoraidPresenceLookback,
               autoRegenerateMemoryBankEntry: !!settings.autoRegenerateMemoryBankEntry,
               interceptTimeout: settings.interceptTimeout ?? 10,

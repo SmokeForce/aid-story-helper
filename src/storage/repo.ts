@@ -1,7 +1,7 @@
 import { openAidDb, type AdventureMeta, type ActionRow, type VividMemoryLogEntry, type InjectionLogEntry, type CrystallizedArchiveEntry, type NpcMemoryBlock } from "./db";
 import type { CanonicalAction, OpRecord, CardRow, Version, Settings, GlobalAsset } from "../shared/types";
 import type { CrystallizedState } from "../inference/crystallized";
-import { sanitizeCrystallizedState } from "../inference/crystallized";
+import { sanitizeCrystallizedState, clearPovBleedLayers } from "../inference/crystallized";
 import type { PhenotypeRecord } from "../inference/phenotype/types";
 
 export type { CrystallizedArchiveEntry, NpcMemoryBlock };
@@ -486,6 +486,33 @@ export class Repo {
       }
     }
     return healed;
+  }
+
+  /** DB heal v2 — one-time remediation of state written by the POV-unanchored distillation prompt.
+   *  Clears every stored state's Vivid / Outlook / Preferences (Knows is kept — it self-heals in
+   *  place; see clearPovBleedLayers) and ARCHIVES what it removed with reason "perspective-heal", so
+   *  the data is recoverable rather than destroyed. NOT idempotent-safe to re-run casually: a second
+   *  run would clear legitimately rebuilt layers, so it must stay gated behind the version stamp.
+   *  Returns the number of states cleared. */
+  async healPovBleedCrystallizedState(): Promise<number> {
+    const db = await openAidDb();
+    const rows = await db.getAll("crystallizedState");
+    const archive: CrystallizedArchiveEntry[] = [];
+    const now = new Date().toISOString();
+    let cleared = 0;
+    for (const row of rows) {
+      if (!row?.state) continue;
+      const { state, changed, removed } = clearPovBleedLayers(row.state);
+      if (!changed) continue;
+      const base = { shortId: row.shortId, characterKey: row.characterKey, turn: 0, archivedAt: now, reason: "perspective-heal" as const };
+      for (const text of removed.vivid) archive.push({ id: crypto.randomUUID(), kind: "vivid", text, ...base });
+      for (const text of removed.outlook) archive.push({ id: crypto.randomUUID(), kind: "outlook", text, ...base });
+      for (const text of removed.preferences) archive.push({ id: crypto.randomUUID(), kind: "preferences", text, ...base });
+      await db.put("crystallizedState", { ...row, state });
+      cleared++;
+    }
+    if (archive.length) await this.appendCrystallizedArchive(archive);
+    return cleared;
   }
 
   async appendCrystallizedArchive(entries: CrystallizedArchiveEntry[]): Promise<void> {

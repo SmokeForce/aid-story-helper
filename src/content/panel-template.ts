@@ -1955,6 +1955,13 @@ export function buildPanelTemplate(version: string): string {
               </div>
               <input id="memoraid-thought-win" type="number" min="1" placeholder="1" style="margin:4px 0 8px 0;" />
 
+              <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
+                <label style="margin:0;flex:1;">Completion Temperature</label>
+                <span id="completion-temp-val" style="opacity:0.8;font-variant-numeric:tabular-nums;min-width:2.2em;text-align:right;">0.7</span>
+              </div>
+              <input id="completion-temp" type="range" min="0" max="1" step="0.05" value="0.7" style="margin:4px 0 8px 0;width:100%;" />
+              <div style="font-size:11px;opacity:0.7;margin:-4px 0 8px 0;">Sampling temperature for all AI generation (thoughts, memories, distillation). Lower = more consistent, higher = more varied. Applies to every provider.</div>
+
               <!-- Dummy setting strictly for visual screenshot matching with public version -->
               <div style="display:flex;align-items:center;gap:6px;margin:8px 0 4px 0;">
                 <label style="margin:0;flex:1;">Thought Card Character Limit</label>

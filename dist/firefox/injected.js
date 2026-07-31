@@ -145,6 +145,16 @@
     if (isTextField(lastActiveEl) && now - lastActiveTime < recentMs) return lastActiveEl;
     return null;
   }
+  function normalizeEntry(s) {
+    return (s || "").trim().replace(/\r\n/g, "\n");
+  }
+  function shouldUpdateOpenEditor(opts) {
+    if (opts.shown === void 0) return true;
+    const shown = normalizeEntry(opts.shown);
+    if (shown === normalizeEntry(opts.newValue)) return true;
+    if (opts.expectedCurrent !== void 0 && shown === normalizeEntry(opts.expectedCurrent)) return true;
+    return false;
+  }
 
   // src/interceptor/injected.ts
   (() => {
@@ -627,7 +637,7 @@
         console.warn("[AID injected] Error updating open AN editor DOM:", err);
       }
     }
-    function updateOpenEditorDom(value, description) {
+    function updateOpenEditorDom(value, description, expectedCurrent) {
       try {
         const dialog = document.querySelector('[role="dialog"]') || document.querySelector('[role="presentation"]') || document.querySelector(".drawer") || document.querySelector(".modal");
         if (!dialog) {
@@ -658,6 +668,10 @@
             if (!entryTextarea) entryTextarea = cardTextareas[0];
             if (!notesTextarea) notesTextarea = cardTextareas[cardTextareas.length - 1];
           }
+        }
+        if (!shouldUpdateOpenEditor({ shown: entryTextarea?.value, newValue: value, expectedCurrent })) {
+          dlog("[AID injected] Open card editor is showing a DIFFERENT card \u2014 skipping DOM update to avoid clobbering it.");
+          return;
         }
         if (entryTextarea && entryTextarea.value !== value) {
           setReactInputValue(entryTextarea, value);
@@ -871,11 +885,17 @@
         if (newKeys !== void 0) {
           approvedCardKeys.set(cardId, { keys: newKeys, prev: prevKeys ?? "" });
         }
+        const userEditing = isEditingInGui({ value, description, keys: newKeys });
         const isEmptyNewCard = value === "" && !approvedCards.has(cardId);
+        const previousApproved = approvedCards.get(cardId)?.value;
         if (!isEmptyNewCard) {
           approvedCards.set(cardId, { value, description });
           dlog("[AID injected] Registered approved card override:", cardId, value.length);
-          updateOpenEditorDom(value, description);
+          if (userEditing) {
+            dlog("[AID injected] User is editing a card \u2014 NOT overwriting the open editor DOM for", cardId);
+          } else {
+            updateOpenEditorDom(value, description, previousApproved);
+          }
         }
         try {
           const client = getApolloClient();
@@ -886,7 +906,9 @@
             } catch {
             }
             dlog("[AID injected] Performing direct cache update for StoryCard:", cardId, "inCache:", inCache);
-            if (!isEmptyNewCard) {
+            if (userEditing) {
+              dlog("[AID injected] User is editing a card \u2014 skipping Apollo cache overwrite for", cardId);
+            } else if (!isEmptyNewCard) {
               client.cache.modify({
                 id: `StoryCard:${cardId}`,
                 fields: {

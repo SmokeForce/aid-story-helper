@@ -1,7 +1,7 @@
 import { WsTracker } from "../shared/ws-tracker";
 import { extractOps } from "../shared/gql-detect";
 import { requestHasNativeCardGeneration, generatedCardIdsFromRequest, collectGeneratedCardUpdates } from "../shared/native-generate";
-import { pickActiveField } from "./gui-edit";
+import { pickActiveField, shouldUpdateOpenEditor } from "./gui-edit";
 
 // Runs in the PAGE (MAIN) world. No extension APIs here — only postMessage.
 (() => {
@@ -628,7 +628,20 @@ import { pickActiveField } from "./gui-edit";
     }
   }
 
-  function updateOpenEditorDom(value: string, description?: string) {
+  /**
+   * Push a card's new value/description into AID's OPEN card editor.
+   *
+   * `expectedCurrent` is the value we believe that card is currently showing (its previous approved
+   * value). The DOM here is card-AGNOSTIC — we can only locate "the open dialog", not which card it
+   * belongs to — so without this check a background regeneration for card X types its content into
+   * whatever editor happens to be open (card Y), and AID's own autosave then persists it: the
+   * reported "character card suddenly becomes a MemorAID card". When we can't prove the open editor
+   * is showing this card, we SKIP the write. Skipping is safe and invisible: the value is already
+   * saved server-side, and the Apollo cache update + refetch renders it correctly on reopen.
+   * `expectedCurrent === undefined` means we have no prior for this card (first write this session),
+   * so identity can't be established and the DOM write is skipped.
+   */
+  function updateOpenEditorDom(value: string, description?: string, expectedCurrent?: string) {
     try {
       // Find the active modal/drawer/dialog wrapper. If none is open, do nothing.
       const dialog = document.querySelector('[role="dialog"]') || 
@@ -673,6 +686,13 @@ import { pickActiveField } from "./gui-edit";
         }
       }
       
+      // Identity gate (pure, unit-tested in gui-edit.ts): only touch the editor when it is provably
+      // showing THIS card. Anything else means a DIFFERENT card is open — leave it completely alone.
+      if (!shouldUpdateOpenEditor({ shown: entryTextarea?.value, newValue: value, expectedCurrent })) {
+        dlog("[AID injected] Open card editor is showing a DIFFERENT card — skipping DOM update to avoid clobbering it.");
+        return;
+      }
+
       if (entryTextarea && entryTextarea.value !== value) {
         setReactInputValue(entryTextarea, value);
         dlog("[AID injected] Programmatically updated ENTRY textarea in DOM.");
@@ -893,16 +913,32 @@ import { pickActiveField } from "./gui-edit";
         approvedCardKeys.set(cardId, { keys: newKeys, prev: prevKeys ?? "" });
       }
 
+      // Don't clobber a card the user is actively editing in AID's own card editor. A BACKGROUND
+      // regeneration (per-turn MemorAID thought, scene-aware Crystallized re-save, Life-card update, …)
+      // would otherwise overwrite the open editor's textareas — and the cache it reads — with the
+      // freshly generated value, wiping the user's in-progress edits ("cards get overwritten while
+      // open"). isEditingInGui (focus-based, with a recently-focused fallback) is the SAME guard the
+      // page→extension autosave path already uses; this reverse (extension→page) path never had it.
+      const userEditing = isEditingInGui({ value, description, keys: newKeys });
+
       // A freshly created, still-empty card: don't register an "" override (a thought may be
       // saved seconds later, and the stale empty override would blank the card in refetched
       // responses). Just make the page refetch so the new card shows up in its list.
       const isEmptyNewCard = value === "" && !approvedCards.has(cardId);
+      // Captured BEFORE the override is replaced: what this card was last known to show. It is how
+      // updateOpenEditorDom tells "the open editor is this card" from "the open editor is some other
+      // card I must not touch".
+      const previousApproved = approvedCards.get(cardId)?.value;
       if (!isEmptyNewCard) {
         approvedCards.set(cardId, { value, description });
         dlog("[AID injected] Registered approved card override:", cardId, value.length);
 
-        // Attempt to update the open editor DOM textareas directly
-        updateOpenEditorDom(value, description);
+        // Attempt to update the open editor DOM textareas directly — unless the user is editing it.
+        if (userEditing) {
+          dlog("[AID injected] User is editing a card — NOT overwriting the open editor DOM for", cardId);
+        } else {
+          updateOpenEditorDom(value, description, previousApproved);
+        }
       }
 
       // Attempt to silently update the Apollo Client cache directly
@@ -915,7 +951,13 @@ import { pickActiveField } from "./gui-edit";
           } catch { /* assume present; modify below is a no-op either way */ }
 
           dlog("[AID injected] Performing direct cache update for StoryCard:", cardId, "inCache:", inCache);
-          if (!isEmptyNewCard) {
+          if (userEditing) {
+            // Editing in progress: leave the card's cached value/description/keys alone so the open
+            // editor (which reads from this cache) isn't reset out from under the user. The value is
+            // already saved server-side, so a later refetch (after they close) reflects it, and the
+            // approvedCards override above rewrites any interim fetch response.
+            dlog("[AID injected] User is editing a card — skipping Apollo cache overwrite for", cardId);
+          } else if (!isEmptyNewCard) {
             client.cache.modify({
               id: `StoryCard:${cardId}`,
               fields: {

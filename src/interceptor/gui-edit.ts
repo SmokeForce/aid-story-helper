@@ -32,3 +32,43 @@ export function pickActiveField(
   if (isTextField(lastActiveEl) && (now - lastActiveTime) < recentMs) return lastActiveEl;
   return null;
 }
+
+/** Normalize an editor/card value for comparison (trim + CRLF→LF), matching isEditingInGui. */
+function normalizeEntry(s: string | undefined): string {
+  return (s || "").trim().replace(/\r\n/g, "\n");
+}
+
+/**
+ * Decide whether AID's OPEN card editor may be overwritten with a card's newly generated value.
+ *
+ * The editor DOM is card-AGNOSTIC — the interceptor can locate "the open dialog" but not which card
+ * it belongs to. Without this check, a background regeneration for card X writes its content into
+ * whatever editor happens to be open (card Y), and AID's own autosave then persists it — the
+ * reported "an existing character Story Card suddenly becomes a MemorAID card" / "the card is just
+ * gone" data loss.
+ *
+ * We only write when the open editor is PROVABLY the same card:
+ *  - it already shows the new value (this card, already current), or
+ *  - it shows the value we last knew this card to have (`expectedCurrent`).
+ *
+ * Anything else — including `expectedCurrent === undefined`, meaning we have no prior for this card
+ * and therefore cannot establish identity — declines the write. Declining is safe and invisible: the
+ * value is already persisted server-side, so the Apollo cache update and the next refetch render it
+ * correctly. Refusing to write can only ever lose a cosmetic in-place update; writing to the wrong
+ * card destroys user data.
+ */
+export function shouldUpdateOpenEditor(opts: {
+  /** Current contents of the open editor's entry textarea, or undefined if none was resolved. */
+  shown: string | undefined;
+  /** The new value being pushed for this card. */
+  newValue: string;
+  /** The value this card was last known to show, if any. */
+  expectedCurrent?: string;
+}): boolean {
+  // No entry textarea resolved: nothing to compare and nothing meaningful to clobber.
+  if (opts.shown === undefined) return true;
+  const shown = normalizeEntry(opts.shown);
+  if (shown === normalizeEntry(opts.newValue)) return true;
+  if (opts.expectedCurrent !== undefined && shown === normalizeEntry(opts.expectedCurrent)) return true;
+  return false;
+}
